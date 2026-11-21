@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { BoardData, MessagesData, RhodiumData, SlotData } from "../src/board";
-import { BOARD_LOGIN, newInstance, until } from "./instance";
+import { boardAct, BOARD_LOGIN, newInstance, until } from "./instance";
 
 test("the board, slot and service report the selectable plugins and load failures without exposing bot config", async () => {
   const plugin = (id: string) => JSON.stringify(resolve(import.meta.dir, "../examples/plugins", id));
@@ -61,6 +61,9 @@ test("a plugin conversation keeps its IM badge and transcript after disabling bo
     send = true;
     await until(async () => (await r.ok("read", "w/echo")).includes("Echo:"));
     expect(await commands()).not.toContain("usage");
+    const base = "http://" + daemon.logs.find(l => l.msg === "ready")!.board;
+    const result = await (await boardAct(base, { kind: "common", slot: id, name: "status" })).json();
+    expect(result.card.actions).toEqual(["/model", "/new"]);
     for (const enabled of [true, false]) {
       if (!enabled) {
         await r.stop();
@@ -71,5 +74,12 @@ test("a plugin conversation keeps its IM badge and transcript after disabling bo
       expect(data.blocks[0]).toMatchObject({ kind: "user", text: "check the board", from: { platform: "local-im", bot: "local" } });
       expect(data.blocks.at(-1)).toMatchObject({ kind: "assistant", text: expect.stringContaining("check the board") });
     }
+    await r.stop();
+    const config = readFileSync(r.config, "utf8").replaceAll("enabled = false", "enabled = true")
+      .replace('platform = "local-im"', 'platform = "fake"\nlike = "qq"\nsocket = ' + JSON.stringify(resolve(r.dir, "fake-im.sock")));
+    writeFileSync(r.config, config);
+    daemon = await r.start();
+    const after = await get<MessagesData>("/api/messages?slot=" + id);
+    expect(after.blocks[0]).toMatchObject({ source: "Local IM 私聊", from: { platform: "local-im", botAvatar: null, avatar: null } });
   } finally { await r.cleanup(); platform.stop(true); }
 }, 20_000);

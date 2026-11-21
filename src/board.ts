@@ -615,10 +615,10 @@ async function withFrom(store: Store, cfg: Config, slot: string, conversation: s
       const chat = chats.find((c) => c.id === came[n]);
       const origin = bots.find((x) => x.id === (chat?.bot ?? said?.id));
       if (!said && (!origin || isBuiltinPlatform(origin.platform))) return { ...b, from: null };
-      const bot = origin && Object.hasOwn(cfg.bots, origin.name) ? origin : undefined;
-      // A recorded IM input still identifies its platform after disabling a plugin or changing its label.
-      const platform = origin?.platform ?? said?.platform;
+      // Prefer the recorded label: the same bot row can now belong to a different platform.
+      const platform = said?.platform ?? origin?.platform;
       if (!platform) return { ...b, from: null };
+      const bot = origin?.platform === platform && Object.hasOwn(cfg.bots, origin.name) ? origin : undefined;
       // Without its chat, the source line names no account: with several of yours, whose chat it was is not known, so none's avatar.
       const mine = bot && said?.private ? chats.filter((c) => c.bot === bot.id && owners(bot, cfg).includes(c.platformChatId)) : [];
       const yours = bot && (chat ?? (mine.length === 1 ? mine[0] : undefined));

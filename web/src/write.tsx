@@ -850,7 +850,7 @@ export function Composer({ slot, turn, archived, switchable, log, changed, comma
   };
   return (
     <div className="chat-inset px-3 pt-1 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
-      {reply?.card && <InfoCard card={reply.card} anchor={box} close={() => setShown(null)} run={(c) => run(c, reply)} />}
+      {reply?.card && <InfoCard supports={supports} card={reply.card} anchor={box} close={() => setShown(null)} run={(c) => run(c, reply)} />}
       {reply?.panel && <Answer r={reply} name={/^\/(\S+)/.exec(reply.said)?.[1] ?? ""} close={() => setShown(null)} pick={(c) => choose(c, reply)} />}
       {agent && <AgentSheet open={shown === "agent"} anchor={agentKey} close={() => setShown((s) => (s === "agent" ? null : s))} agent={agent} turn={turn} send={send} />}
       {/* With a mouse its search box took the keyboard: closed, the caret is back where you type. */}
