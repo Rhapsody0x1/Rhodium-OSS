@@ -13,7 +13,7 @@ import { contextText, formatCommand, left, statusText, time, usageText, type Slo
 import { fileKind, mediaLine, withoutMedia, type Media } from "./media";
 import { buttonRows, CANCEL, layout, moment, PAGE, showPanel, span, unpaged, width, type Candidate, type Panel } from "./panels";
 import type { FlowView } from "./bot-flow";
-import { amid, MADE, PLATFORMS, platformDef, platformLabel, series, type BotDef, type Made } from "./platforms";
+import { isBuiltinPlatform, amid, MADE, PLATFORMS, platformDef, platformLabel, series, type BotDef, type Made } from "./platforms";
 import type { PluginRegistry } from "./plugin-loader";
 import { DECISION_LINE, REPORT_LINE, RESUME_PROMPT, sendLine, sourceLine, withoutSource } from "./prompt";
 import { forIm, localRefs, type Checked } from "./reply-images";
@@ -3133,9 +3133,10 @@ function connection(state: State, input: Extract<Input, { kind: "connection" }>,
   const q = quotas(state, ctx, d);
   const to = elsewhere(state, ctx, d, q, bot, undefined);
   const name = `${platformLabel(bot.platform)} Bot ${bot.name}`;
-  const text = input.up
-    ? `${name} 已恢复，又连上平台了。`
-    : `${name} 连不上平台，已经连续失败 ${ctx.config.limits.botFailures} 次。它会一直自动重连，连上之前这个 Bot 的消息收不到也发不出。${input.error ? `\n原因：${input.error}` : ""}`;
+  const down = isBuiltinPlatform(bot.platform)
+    ? `连不上平台，已经连续失败 ${ctx.config.limits.botFailures} 次。它会一直自动重连，连上之前这个 Bot 的消息收不到也发不出。`
+    : "已停止重连。检查插件配置和连接后重启 Rhodium。";
+  const text = input.up ? `${name} 已恢复，又连上平台了。` : `${name} ${down}${input.error ? `\n原因：${input.error}` : ""}`;
   // Rhodium's own words: plain text, not the agent's Markdown (send()).
   if (to) outbound(d, ctx, { chat: to.chat.id, replyTo: null, trace: null, status: place(q, to, null).status, text });
   return d;

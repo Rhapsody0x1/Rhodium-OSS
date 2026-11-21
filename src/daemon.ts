@@ -8,7 +8,7 @@ import { dlopen } from "bun:ffi";
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
-import { agentDef, allAgentKinds } from "./agents";
+import { agentDef, allAgentKinds, headlessEnv } from "./agents";
 import { avatarDir, errorKind, refreshAvatars } from "./avatars";
 import { botFlows } from "./bot-flow";
 import { inFront, serveBoard, type Fronts, type Hear } from "./board";
@@ -22,11 +22,12 @@ import { keepFile, mediaLine, storeAttachments } from "./media";
 import { replyPictures, saidPictures } from "./reply-images";
 import { freeDisk, trace, upkeep } from "./ops";
 import { amid, isBuiltinPlatform } from "./platforms";
+import { PluginImAdapter } from "./plugin-im";
 import { loadPlugins, type PluginRegistry } from "./plugin-loader";
 import { makeQQ, msgSeq } from "./qq";
 import { clip } from "./render";
 import { BOARD, chatName, IN_TUI, menus, route, type Ctx, type Decision, type Effect, type Payload, type RhReply, type State, type Write } from "./router";
-import { createRunner } from "./runner";
+import { agentBaseEnv, createRunner } from "./runner";
 import { B32, MODEL_INFO, namesOf, openStore, setMeta, ulid, untaken, type AgentInput, type EventSource, type Outbound, type Store, type Tx } from "./store";
 import { makeTelegram } from "./telegram";
 import { conversationFile, recentInFile } from "./transcript";
@@ -237,11 +238,13 @@ export function createLoop(opts: {
     } catch (err) {
       log("input failed", { kinds: inputs.map((i) => i.kind), error: String(err) });
       for (const input of inputs) {
+        if (input.kind === "im") input.message.acknowledge?.(new Error("Inbound transaction failed"));
         // Else rh, or the board's page, waits for good.
         if (input.kind === "rh" || input.kind === "board") perform({ kind: "rh_reply", id: input.id, reply: { ok: false, error: `内部错误：${err}` } });
       }
       return;
     }
+    for (const input of inputs) if (input.kind === "im") input.message.acknowledge?.();
     for (const c of pictured) opts.pictures?.(c);
     for (const e of effects) {
       try {
@@ -955,7 +958,8 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     ready: recovered.promise,
     deaf,
     plugins,
-    pluginPids: () => runner.pluginPids(),
+    pluginPids: () => [...runner.pluginPids(), ...[...adapters.values()].flatMap((a) =>
+      a instanceof PluginImAdapter && a.pid ? [{ id: a.pluginId, pid: a.pid }] : [])],
     notify(text) {
       log("rh doctor found problems", { report: text }); // also for an instance with no main chat
       loop.enqueue({ kind: "notice", text: `rh doctor 自检：\n${text}` });
@@ -1001,14 +1005,23 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     });
     if (!isBuiltinPlatform(bot.platform)) {
       const rec = plugins.plugins[bot.platform];
-      if (rec?.status === "loaded" && rec.manifest.kind !== "im") {
+      if (rec?.status === "loaded" && rec.manifest.kind === "im") {
+        const { platform, target, owner, ...fields } = { ...config.plugins[bot.platform]?.config, ...bot };
+        adapters.set(id, new PluginImAdapter({
+          id, name, plugin: rec, config: fields, env: headlessEnv(platform, agentBaseEnv(config)),
+          kept: kept(store), handshakeMs: config.durations.pluginHandshake, rpcMs: config.durations.pluginRpc,
+          stopGrace: config.durations.stopGrace, botFailures: config.limits.botFailures,
+        }));
+        return id;
+      }
+      if (rec?.status === "loaded") {
         log("bot platform references a non-IM plugin; marking bot faulted", { bot: name, platform: bot.platform, kind: rec.manifest.kind });
       } else if (rec?.status === "failed") {
         log("bot platform plugin failed to load; marking bot faulted", { bot: name, platform: bot.platform, error: rec.error });
       } else if (rec?.status === "disabled") {
         log("bot platform plugin is disabled; marking bot faulted", { bot: name, platform: bot.platform });
       } else {
-        log("plugin IM adapter not active before IM plugin runtime; marking bot faulted", { bot: name, platform: bot.platform });
+        log("bot platform plugin is not installed; marking bot faulted", { bot: name, platform: bot.platform });
       }
       store.tx((tx) => void tx.update("bot", { id }, { connState: "faulted" }));
       return id;
@@ -1071,9 +1084,9 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
   // Pictures and files are downloaded for your messages only, and kept by their hash before routing
   // (architecture §8.3), so a stranger can't fill the disk. One at a time: messages stay in order.
   const media = join(config.stateDir, "media");
-  const yours = (m: InboundMessage) => store.tx((tx) => {
+  const fetchAttachments = (m: InboundMessage) => m.attachments?.length && store.tx((tx) => {
     const bot = tx.get("bot", m.bot);
-    return !!bot && owners(bot, config).includes(m.sender);
+    return !!bot && owners(bot, config).includes(m.sender) && !seen(tx, m);
   });
   // A message's bot and chat as Rhodium names them; a chat not yet routed to has no id yet.
   const named = (m: InboundMessage) =>
@@ -1101,6 +1114,12 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     // first time it gets through after that, back (architecture §8.6).
     let failures = 0;
     const connected: Connected = (up, error) => {
+      if (stop.signal.aborted) return;
+      if (!up && adapter instanceof PluginImAdapter && adapter.faulted) {
+        log(adapter.initFailed ? "plugin im init failed" : "plugin im stopped reconnecting", { bot, plugin: adapter.pluginId, error });
+        loop.enqueue({ kind: "connection", bot, up: false, error });
+        return;
+      }
       const { botFailures } = config.limits;
       if (up && failures >= botFailures) loop.enqueue({ kind: "connection", bot, up: true });
       if (up) failures = 0;
@@ -1111,10 +1130,27 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
       if (!stop.signal.aborted) connection(store, bot, up);
     };
     void (async () => {
-      for await (const m of adapter.messages(connected, stop.signal)) if (!stop.signal.aborted) loop.enqueue({ kind: "im", message: yours(m) ? await storeAttachments(media, m, (msg, f) => log(msg, { ...named(m), ...f })) : m });
+      for await (const m of adapter.messages(connected, stop.signal)) {
+        if (stop.signal.aborted) break;
+        const message = fetchAttachments(m) ? await storeAttachments(media, m, (msg, f) => log(msg, { ...named(m), ...f })) : m;
+        if (!stop.signal.aborted) loop.enqueue({ kind: "im", message });
+      }
     })();
   }
   for (const bot of adapters.keys()) listen(bot);
+  if ([...adapters.values()].some((a) => a instanceof PluginImAdapter)) {
+    const shutdown = async () => {
+      const closing = [];
+      for (const [id, adapter] of adapters) if (adapter instanceof PluginImAdapter) {
+        stops.get(id)?.abort();
+        closing.push(adapter.shutdown());
+      }
+      await Promise.allSettled(closing);
+      process.exit(0);
+    };
+    process.once("SIGTERM", shutdown);
+    process.once("SIGINT", shutdown);
+  }
   // The bots' avatars and yours, and your Telegram name, for the board's topology (spec web-topology):
   // now, then once a day; a bot taken in, or one your private chat with is new, that bot's at once.
   // One that fails keeps the last.
