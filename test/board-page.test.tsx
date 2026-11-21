@@ -2882,3 +2882,13 @@ test("story 623: your own message waiting to be typed into the terminal shows �
   expect(box).toMatch(/>你<\/span><span[^>]*>QQ 私聊<\/span><span[^>]*>等输入框空出来<\/span>/);
   expect(box).toContain(">看下测试为什么挂了<");
 });
+
+test("plugin information cards show known context without offering unsupported actions", () => {
+  const card: Info = { command: "status", model: "echo", context: { usedTokens: 100, maxTokens: 1000 }, ref: "w/echo", agent: "echo-agent", dir: "~/w", line: "空闲", actions: [] };
+  const status = renderToStaticMarkup(<Status s={card} run={async () => {}} canContext={false} />);
+  expect(status).toContain("10%");
+  expect(status).not.toMatch(/<button[^>]*>上下文/);
+  const context = renderToStaticMarkup(<InfoCard anchor={{ current: null }} card={{ command: "context", ...card.context! }} close={() => {}} run={async () => {}} supports={() => false} />);
+  expect(context).toContain("10%");
+  expect(context).not.toContain("压缩");
+});

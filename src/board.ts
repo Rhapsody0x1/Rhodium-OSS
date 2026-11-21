@@ -11,10 +11,10 @@
 import type { Server, ServerWebSocket } from "bun";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { displayDirectory as tilde, expandHome, parentDirectory, sameDirectory, userHome } from "./paths";
+import { compiled, displayDirectory as tilde, expandHome, parentDirectory, sameDirectory, userHome } from "./paths";
 import { dirname, extname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { AGENT_KINDS, agentDef, isBuiltinAgent, TYPING } from "./agents";
+import { AGENT_KINDS, agentDef, allAgentKinds, isBuiltinAgent, TYPING } from "./agents";
 import { askCard, askText, type AskCard, type AskPrompt } from "./asks";
 import { avatarDir } from "./avatars";
 import type { BotFlows } from "./bot-flow";
@@ -30,7 +30,8 @@ import { moment } from "./panels";
 import { agentCommands } from "./commands";
 import { AT_BOARD, askGone, contactOf, IN_TUI, resumeWaits, settingsOf, slotState, STATE, target, WEB_PAUSED, WEB_QUEUE, workspaceName, type Payload, type RhReply } from "./router";
 import { namesOf, type Ask, type Bot, type Chat, type Conversation, type Event, type Outbound, type Slot, type Store, type Tx } from "./store";
-import { allPlatformLabels, platformDef } from "./platforms";
+import type { PluginRegistry } from "./plugin-loader";
+import { allPlatformLabels, isBuiltinPlatform, platformDef } from "./platforms";
 import { splitSource, withoutSource } from "./prompt";
 import { paneSession } from "./tui";
 import { codeRef } from "./local";
@@ -39,7 +40,7 @@ import { conversationFile, conversationsIn, describe, findConversations, fullTex
 
 /** The page and its files as Vite built them: embedded in the built binary, and in web/dist when
  *  run from source. */
-const WEB = (/^B:\/~BUN\/root\//i.test(Bun.main.replaceAll("\\", "/")) || Bun.main.startsWith("/$bunfs/")) ? join(import.meta.dir, "web") : join(import.meta.dir, "../web/dist");
+const WEB = compiled ? join(import.meta.dir, "web") : join(import.meta.dir, "../web/dist");
 
 export type Group = "needsYou" | "running" | "done" | "idle";
 
@@ -67,9 +68,32 @@ export type Card = {
   activeAt: number;
   pinnedAt: number | null;
 };
+/** Public board metadata never includes plugin commands, credentials or bot configuration. */
+export type BoardMetadata = {
+  agents: { id: string; name: string; statusName: string; tui: boolean; importable: boolean }[];
+  platforms: { id: string; label: string }[];
+  plugins: { id: string; status: "loaded" | "disabled" | "failed"; kind?: "agent" | "im"; error?: string }[];
+  configErrors: string[];
+};
+
+function boardMetadata(registry?: PluginRegistry): BoardMetadata {
+  return {
+    agents: allAgentKinds().map(id => {
+      const { name, statusName, tui, importable } = agentDef(id);
+      return { id, name, statusName, tui, importable };
+    }),
+    platforms: allPlatformLabels(),
+    plugins: Object.values(registry?.plugins ?? {}).map(p => ({
+      id: p.id, status: p.status, ...(p.status === "loaded" && { kind: p.manifest.kind }), ...(p.status === "failed" && { error: p.error }),
+    })),
+    configErrors: registry?.configErrors.map(e => e.error) ?? [],
+  };
+}
+
 /** GET /api/board. bots: as /api/topology has them. noHerdr: herdr is not where switching to the
  *  terminal looks for it, so the page hides its ways there (spec web-write "终端入口"); whether it runs is not asked. */
 export type BoardData = {
+  metadata?: BoardMetadata;
   workspaces: { name: string; dir: string; groups: Record<Group, Card[]>; archived: Card[] }[];
   bots: Pick<TopologyData["bots"][number], "id" | "name" | "platform" | "avatar">[];
   noHerdr?: true;
@@ -137,7 +161,7 @@ function statusOf(tx: Tx, now: number): (s: Slot) => { state: string; group: Gro
 }
 
 /** What GET /api/board answers: each workspace's slots in the four groups; archived ones apart. */
-async function board(store: Store, cfg: Config, now: number): Promise<BoardData> {
+async function board(store: Store, cfg: Config, now: number, metadata: BoardMetadata): Promise<BoardData> {
   const { workspaces, slots, conversations, status } = store.tx((tx) => ({
     workspaces: tx.find("workspace", {}),
     slots: tx.find("slot", {}),
@@ -162,6 +186,7 @@ async function board(store: Store, cfg: Config, now: number): Promise<BoardData>
     return topo.bots.filter((b) => bots.has(b.id)).map((b) => b.id);
   };
   return {
+    metadata,
     ...(!hasHerdr(cfg) && { noHerdr: true }),
     ...(process.platform === "win32" && { windowsPaths: true as const }),
     bots: await Promise.all(topo.bots.map(async ({ id, name, platform }) => ({ id, name, platform, avatar: await avatarOf(cfg, id) }))),
@@ -550,13 +575,17 @@ const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** The bot and chat a source line names, as the bots are now (each by the name chats call it).
  *  Written when its platform had one bot, the line names none: the platform's only bot now, if it
  *  still has one. id null for a bot gone or one of several. null for a line naming no chat. */
-export function saidThrough(source: string | null, bots: { id: string; name: string; platform: Platform }[]): { platform: Platform; bot: string | null; id: string | null; private: boolean } | null {
+export function saidThrough(source: string | null, bots: { id: string; name: string; platform: Platform }[], origin?: Platform): { platform: Platform; bot: string | null; id: string | null; private: boolean } | null {
   const labels = allPlatformLabels().sort((a, b) => b.label.length - a.label.length);
   if (!labels.length) return null;
   const through = new RegExp(`^(${labels.map((p) => escapeRegex(p.label)).join("|")})(?: Bot (.+) 的| ?)(私聊|聊天窗口)(?:${SENT_AT}.*)?$`);
   const m = source === null ? null : through.exec(source);
-  const platform = m && labels.find((p) => p.label === m[1])?.id;
-  if (!m || !platform) return null;
+  if (!m) return null;
+  const matches = labels.filter(p => p.label === m[1]);
+  // Several platforms may use the same display name. The inbound chat identifies which one sent it.
+  const platform = matches.find(p => p.id === origin)?.id
+    ?? matches.find(p => bots.some(b => b.platform === p.id && (!m[2] || b.name === m[2])))?.id
+    ?? matches[0]!.id;
   const mine = bots.filter((b) => b.platform === platform);
   const bot = m[2] !== undefined ? mine.find((b) => b.name === m[2]) : mine.length === 1 ? mine[0] : undefined;
   return { platform, bot: bot?.name ?? m[2] ?? null, id: bot?.id ?? null, private: m[3] === "私聊" };
@@ -580,21 +609,26 @@ async function withFrom(store: Store, cfg: Config, slot: string, conversation: s
         if (dest && ws) b.out.to = `${ws.name}/${dest.name}`;
       }
     }
-    return { bots: tx.find("bot", {}).filter((b) => Object.hasOwn(cfg.bots, b.name)), chats, came };
+    return { bots: tx.find("bot", {}), chats, came };
   });
-  const named = bots.map((b) => ({ id: b.id, name: cfg.bots[b.name]!.label ?? b.name, platform: b.platform }));
+  const named = bots.filter(b => Object.hasOwn(cfg.bots, b.name)).map(b => ({ id: b.id, name: cfg.bots[b.name]!.label ?? b.name, platform: b.platform }));
   return Promise.all(
     blocks.map(async (b, n): Promise<Block> => {
       if (b.kind !== "user") return b;
-      const said = saidThrough(b.source, named);
-      if (!said) return { ...b, from: null };
       const chat = chats.find((c) => c.id === came[n]);
-      const bot = bots.find((x) => x.id === (chat?.bot ?? said.id));
+      const recorded = chat && bots.find(b => b.id === chat.bot);
+      const said = saidThrough(b.source, named, recorded?.platform);
+      const origin = recorded ?? bots.find(b => b.id === said?.id);
+      if (!said && (!origin || isBuiltinPlatform(origin.platform))) return { ...b, from: null };
+      // Prefer the recorded label: the same bot row can now belong to a different platform.
+      const platform = said?.platform ?? origin?.platform;
+      if (!platform) return { ...b, from: null };
+      const bot = origin?.platform === platform && Object.hasOwn(cfg.bots, origin.name) ? origin : undefined;
       // Without its chat, the source line names no account: with several of yours, whose chat it was is not known, so none's avatar.
-      const mine = bot && said.private ? chats.filter((c) => c.bot === bot.id && owners(bot, cfg).includes(c.platformChatId)) : [];
+      const mine = bot && said?.private ? chats.filter((c) => c.bot === bot.id && owners(bot, cfg).includes(c.platformChatId)) : [];
       const yours = bot && (chat ?? (mine.length === 1 ? mine[0] : undefined));
-      const name = named.find((x) => x.id === bot?.id)?.name ?? said.bot;
-      return { ...b, from: { platform: said.platform, bot: name, botAvatar: bot ? await avatarOf(cfg, bot.id) : null, avatar: yours ? await avatarOf(cfg, yours.id) : null } };
+      const name = named.find((x) => x.id === bot?.id)?.name ?? said?.bot ?? null;
+      return { ...b, from: { platform, bot: name, botAvatar: bot ? await avatarOf(cfg, bot.id) : null, avatar: yours ? await avatarOf(cfg, yours.id) : null } };
     }),
   );
 }
@@ -798,6 +832,7 @@ function slotEvents(store: Store, q: URLSearchParams): Response {
 
 /** GET /api/slot. */
 export type SlotData = {
+  metadata?: BoardMetadata;
   id: string;
   ref: string;
   dir: string;
@@ -853,8 +888,8 @@ export type Command = { name: string; usage?: string; summary: string; kind: "ru
 
 /** The commands of a slot with the agent: its / menu's but /rh_help, each a button on the board (#289).
  *  One with a list to pick from is pick. */
-export const commandsFor = (agent: AgentKind | null): Command[] =>
-  agentCommands(agent).map((c) => ({
+export const commandsFor = (agent: AgentKind | null, negotiated?: readonly string[]): Command[] =>
+  agentCommands(agent, negotiated).map((c) => ({
     name: c.name,
     ...(c.usage && { usage: c.usage }),
     summary: c.summary,
@@ -967,7 +1002,7 @@ const GONE_FOR = 10_000;
 
 /** GET /api/slot?id=<id>: the slot (product §7) and its timeline; its events are on /api/slot-events.
  *  A headless slot also has its process. */
-async function slotDetail(store: Store, cfg: Config, id: string, alive: BoardMeter["alive"], hearing: Set<Hear>): Promise<Response> {
+async function slotDetail(store: Store, cfg: Config, id: string, meter: BoardMeter, hearing: Set<Hear>, metadata: BoardMetadata): Promise<Response> {
   await terminalMeter(store, cfg, id, hearing);
   const detail = store.tx((tx) => {
     const s = tx.get("slot", id);
@@ -1002,7 +1037,7 @@ async function slotDetail(store: Store, cfg: Config, id: string, alive: BoardMet
       }),
       queue: queueOf(tx, s),
       meter: meterOf(tx, conv),
-      live: s.mode === "tui" || (s.conversation !== null && alive(s.conversation)),
+      live: s.mode === "tui" || (s.conversation !== null && meter.alive(s.conversation)),
       conversation: s.conversation,
       slot: s,
       conversations: tx.find("conversation", { slot: s.id }),
@@ -1010,7 +1045,7 @@ async function slotDetail(store: Store, cfg: Config, id: string, alive: BoardMet
   });
   if (!detail) return new Response("没有这个槽位。\n", { status: 404 });
   const { conversation, slot, conversations, ...view } = detail;
-  const data: SlotData = { ...view, process: view.mode === "headless" ? await processOf(store, cfg, conversation) : null, timeline: await timeline(cfg, slot, conversations), commands: commandsFor(view.agent) };
+  const data: SlotData = { ...view, metadata, process: view.mode === "headless" ? await processOf(store, cfg, conversation) : null, timeline: await timeline(cfg, slot, conversations), commands: commandsFor(view.agent, view.live && conversation ? meter.pluginCommands?.(conversation) : undefined) };
   return Response.json(data, { headers: { "cache-control": "no-store" } });
 }
 
@@ -1059,12 +1094,12 @@ const LOG_LINES = 200;
 
 /** GET /api/rhodium: Rhodium itself (product §7): this run, each bot's connection, and its log in
  *  journald (architecture §12). No log when it does not run as its systemd service, as under rh dev. */
-async function rhodium(store: Store, cfg: Config, startedAt: number) {
+async function rhodium(store: Store, cfg: Config, startedAt: number, metadata?: BoardMetadata) {
   const { rows, boot } = store.tx((tx) => ({ rows: tx.find("bot", {}), boot: tx.get("meta", "boot")?.value }));
   const bots = Object.entries(cfg.bots)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([name, b]) => ({ name, platform: b.platform, state: rows.find((r) => r.name === name)?.connState ?? null }));
-  return { boot: Number(boot), pid: process.pid, startedAt, unit: cfg.unit || null, bots, logs: cfg.unit ? await journal(cfg.unit) : null };
+  return { ...(metadata && { metadata }), boot: Number(boot), pid: process.pid, startedAt, unit: cfg.unit || null, bots, logs: cfg.unit ? await journal(cfg.unit) : null };
 }
 /** GET /api/rhodium. */
 export type RhodiumData = Awaited<ReturnType<typeof rhodium>>;
@@ -1316,7 +1351,7 @@ async function front(req: Request, fronts: Fronts): Promise<Response> {
 
 /** Asks a conversation's running agent for the meter, as a page opens its chat (open) or asks (ask);
  *  and whether its process runs (architecture §7.11): the slot runner's. */
-export type BoardMeter = { ask(conversation: string, why: "open" | "ask"): void; alive(conversation: string): boolean };
+export type BoardMeter = { ask(conversation: string, why: "open" | "ask"): void; alive(conversation: string): boolean; pluginCommands?(conversation: string): string[] | undefined };
 
 /** POST /api/meter: field slot, from the board's own page alone. Its running agent is asked for the
  *  meter, answered at once; what it says comes as the event meter. None is started (architecture §7.11). */
@@ -1653,8 +1688,10 @@ export function serveBoard(
   fronts: Fronts = new Map(),
   meter: BoardMeter = { ask: () => {}, alive: () => false },
   flows?: BotFlows,
+  plugins?: PluginRegistry,
 ): { servers: Server<Term>[]; deaf: Map<string, string> } {
   const startedAt = Date.now();
+  const metadata = boardMetadata(plugins);
   const { follow, hear } = transcripts(store, cfg);
   // Every event stream open: each hears of a meter recorded, with the agent and conversation, for a page
   // on a slot of that agent to read /api/slot again (architecture §7.11); and of a bot-making flow
@@ -1737,7 +1774,7 @@ export function serveBoard(
     if (/^\/next(\/|$)/.test(path)) return new Response(null, { status: 301, headers: { location: `/${path.slice("/next".length).replace(/^\/+/, "")}${url.search}` } });
     switch (path) {
       case "/api/board":
-        return board(store, cfg, Date.now()).then((b) => Response.json(b, { headers: { "cache-control": "no-store" } }));
+        return board(store, cfg, Date.now(), metadata).then((b) => Response.json(b, { headers: { "cache-control": "no-store" } }));
       case "/api/bots/owners":
         return botOwners(req, store, cfg, url.searchParams.get("bot") ?? "");
       case "/api/topology":
@@ -1753,7 +1790,7 @@ export function serveBoard(
       case "/api/held":
         return heldText(req, store, url.searchParams.get("id") ?? "");
       case "/api/slot":
-        return slotDetail(store, cfg, url.searchParams.get("id") ?? "", meter.alive, hearing);
+        return slotDetail(store, cfg, url.searchParams.get("id") ?? "", meter, hearing, metadata);
       case "/api/history":
         return history(req, store, cfg, url.searchParams.get("slot") ?? "");
       case "/api/slot-events":
@@ -1773,7 +1810,7 @@ export function serveBoard(
       case "/api/ping":
         return new Response(null, { status: 204 });
       case "/api/rhodium":
-        return rhodium(store, cfg, startedAt).then((r) => Response.json(r, { headers: { "cache-control": "no-store" } }));
+        return rhodium(store, cfg, startedAt, metadata).then((r) => Response.json(r, { headers: { "cache-control": "no-store" } }));
       case "/api/act":
         return write(req, act);
       case "/api/front":

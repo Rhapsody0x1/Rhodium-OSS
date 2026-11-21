@@ -3,15 +3,23 @@
 // reaches the first fake bot as a private message from its owner; what the bot sends back is
 // printed. The agent is whatever [programs] says: a fake agent, or your own claude.
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { fixedOwners, loadConfig, type Config } from "./config";
+import { compiled } from "./paths";
+import { createPrivateWindows, windows } from "./windows";
+import { detached } from "./detached";
 import { FakeIm, FakeImClient, fakeCapabilities } from "./fake-im";
 
 const USAGE = "用法：rh dev --fake --config <配置文件>\n";
 
 /** This same program run as the rhodium daemon: the compiled binary, or bun with main.ts. */
-const self = () => (Bun.main.startsWith("/$bunfs/") ? [process.execPath] : [process.execPath, Bun.main]);
+function self(): string[] {
+  if (!compiled) return [process.execPath, Bun.main];
+  // The installed Windows CLI is rh.exe, a hard link that always dispatches to rh.
+  if (windows && basename(process.execPath).toLowerCase() === "rh.exe") return [join(dirname(process.execPath), "rhodium.exe")];
+  return [process.execPath];
+}
 
 export async function dev(args: string[]): Promise<number> {
   let config: string | undefined;
@@ -42,10 +50,14 @@ export async function dev(args: string[]): Promise<number> {
   for (const [n, b] of fakes) {
     if (b.socket === bot.socket) platform.bot({ name: n, capabilities: fakeCapabilities(b), passiveReplies: cfg.limits.qqPassiveReplies, passiveWindowMs: cfg.durations.qqPassiveWindow });
   }
-  const im = new FakeImClient(bot.socket);
-  mkdirSync(cfg.stateDir, { recursive: true });
+  const im = new FakeImClient(bot.socket, platform.token);
+  if (windows) createPrivateWindows([cfg.stateDir]);
+  else mkdirSync(cfg.stateDir, { recursive: true });
   const logFile = join(cfg.stateDir, "dev.log");
-  const daemon = Bun.spawn([...self(), "--config", config], { stdin: "ignore", stdout: "ignore", stderr: Bun.file(logFile) });
+  const daemon = Bun.spawn([...self(), "--config", config], {
+    stdin: "ignore", stdout: "ignore", stderr: Bun.file(logFile), windowsHide: true,
+    ...(platform.token && { env: { ...process.env, RHODIUM_FAKE_IM_AUTH: bot.socket + " " + platform.token } }),
+  });
   let stopping = false;
   void daemon.exited.then((code) => {
     if (stopping) return;
@@ -59,7 +71,7 @@ export async function dev(args: string[]): Promise<number> {
     daemon.kill();
     process.exit(143);
   });
-  process.stdout.write(`rhodium 已启动，日志在 ${logFile}。\n每输入一行，就是你经 Bot ${name} 发的一条私聊消息。Ctrl-D 退出。\n`);
+  process.stdout.write(`rhodium 已启动，日志在 ${logFile}。\n每输入一行，就是你经 Bot ${name} 发的一条私聊消息。${windows ? "Ctrl-Z 后按回车" : "Ctrl-D"} 退出。\n`);
 
   // What the bot sends to your chat, as it comes.
   let shown = 0;
@@ -78,7 +90,9 @@ export async function dev(args: string[]): Promise<number> {
   })();
 
   for await (const line of console) {
-    if (line.trim()) await im.inject(name, { chat: me, sender: me, text: line });
+    const text = line.replace(/\r$/, "");
+    if (windows && text === "\x1a") break; // Some Windows terminals deliver Ctrl-Z as a line.
+    if (text.trim()) await im.inject(name, { chat: me, sender: me, text });
   }
 
   stopping = true;
@@ -86,8 +100,8 @@ export async function dev(args: string[]): Promise<number> {
   daemon.kill();
   await daemon.exited;
   platform.close();
-  process.stdout.write(
-    `rhodium 已停。托管进程照常在跑，和 rhodium 重启时一样；要停掉它们：systemctl --user stop '${cfg.unitPrefix}hold-*'\n`,
-  );
+  process.stdout.write(detached
+    ? "rhodium 已停。托管进程继续运行；用同一份配置重启后，可在看板停掉槽位。\n"
+    : `rhodium 已停。托管进程照常在跑，和 rhodium 重启时一样；要停掉它们：systemctl --user stop '${cfg.unitPrefix}hold-*'\n`);
   return 0;
 }

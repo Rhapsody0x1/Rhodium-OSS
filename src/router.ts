@@ -6,7 +6,7 @@ import { basename, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { agentDef, allAgentKinds, DEFAULT_AGENT, isBuiltinAgent, isRegisteredAgent, TYPING } from "./agents";
 import { askButtons, askLine, askText, parseAnswer, timeoutAnswer, type Answer, type AskKind, type AskPrompt, type ConfirmInput, type Said } from "./asks";
-import { COMMANDS, IM_COMMANDS, homeButtons, imCommand, imUsage, QQ_ROW, SETTINGS, slashMenu, SLOT_HINT, TELEGRAM_ROW, tilde, type Lists, type SettingKey, type SlotEntry } from "./commands";
+import { agentCommands, COMMANDS, IM_COMMANDS, homeButtons, imCommand, imUsage, QQ_ROW, SETTINGS, slashMenu, SLOT_HINT, TELEGRAM_ROW, tilde, type Lists, type SettingKey, type SlotEntry } from "./commands";
 import { formatDuration, formatGB, fixedOwners, formatMB, gb, memoryText, ownerCode, owners, paired, parseDuration, type Config } from "./config";
 import { FROM_BOARD, parseCommand, quoteOf, quoting, type AgentAsk, type AgentEvent, type AgentKind, type BoardAct, type BuiltinAgentKind, type Button, type Capabilities, type Choice, type CommandResult, type CommonCommand, type Importable, type InboundMessage, type Input, type MenuItem, type PanelUi, type Platform, type RhCaller, type RowButton, type TimerKind, type Used } from "./contracts";
 import { contextText, formatCommand, left, statusText, time, usageText, type SlotInfo } from "./im-commands";
@@ -1559,7 +1559,9 @@ function commandReply(state: State, ctx: Ctx, d: Decision, at: At, r: CommandRes
       const running = slot.state === "running" || slot.state === "waiting";
       // The board's card offers what can be done now: no compacting mid-turn, nothing in the terminal.
       const actions = slot.mode === "tui" ? [] : [...(running ? ["/stop"] : []), "/model", ...(running ? [] : ["/compact", "/new"])];
-      const card: StatusCard = { ...r, ref: info.ref, agent: agentOf(state, slot), dir: tilde(slot.dir), line: info.line, ...(info.tool && { tool: info.tool }), actions };
+      const agent = agentOf(state, slot);
+      const allowed = agentCommands(agent, turnAgent(state, ctx, slot).supportedCommands ?? undefined);
+      const card: StatusCard = { ...r, ref: info.ref, agent, dir: tilde(slot.dir), line: info.line, ...(info.tool && { tool: info.tool }), actions: actions.filter(a => allowed.some(c => a === "/" + c.name)) };
       return query(state, ctx, d, at, statusText(r, info, ctx.now), card, statusButtons(slot));
     }
     case "model": {

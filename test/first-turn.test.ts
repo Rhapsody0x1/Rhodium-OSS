@@ -195,10 +195,16 @@ test("after rh stop, a start that fails before its holder launches is a crash, n
 /** Starts rh dev --fake, which runs the fake IM platform and rhodium itself; the instance lends
  *  its config and dirs. again() starts another on the same config, as you would once one exited.
  *  done() kills them and removes the platform's dir. */
-async function rhDev() {
+async function rhDev(tcp = false) {
   const im = mkdtempSync(join(tmpdir(), "rhodium-test-dev-"));
+  let socket = join(im, "im.sock");
+  if (tcp) {
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+    socket = probe.url.host;
+    await probe.stop(true);
+  }
   rhodium = newInstance({
-    toml: ["[bots.dev]", 'platform = "fake"', 'like = "qq"', `socket = "${im}/im.sock"`, `owner = "${ME}"`, 'target = "w/a"'].join("\n"),
+    toml: ["[bots.dev]", 'platform = "fake"', 'like = "qq"', `socket = "${socket}"`, `owner = "${ME}"`, 'target = "w/a"'].join("\n"),
   });
   await rhHold().built; // the slot's holder; only rhodium.start() waits for it otherwise
   const devs: Bun.Subprocess<"pipe", "pipe", "pipe">[] = [];
@@ -227,8 +233,8 @@ test("rh dev, terminated, stops its rhodium too", async () => {
   }
 }, 30_000);
 
-test("rh dev --fake: a line typed in the terminal reaches the slot from you, and the reply is printed there", async () => {
-  const { dev, done } = await rhDev();
+test.each(["Unix socket", "loopback TCP"])("rh dev --fake over %s: a line typed in the terminal reaches the slot from you, and the reply is printed there", async (transport) => {
+  const { dev, done } = await rhDev(transport === "loopback TCP");
   let out = "";
   const reading = (async () => {
     for await (const chunk of dev.stdout.pipeThrough(new TextDecoderStream())) out += chunk;
@@ -236,7 +242,7 @@ test("rh dev --fake: a line typed in the terminal reaches the slot from you, and
   try {
     await until(async () => (await rhodium.rh(["ws", "w", rhodium.dir])).code === 0, 10_000);
     await rhodium.ok("new", "w/a");
-    dev.stdin.write("hello from the terminal\n");
+    dev.stdin.write("hello from the terminal" + (transport === "loopback TCP" ? "\r\n" : "\n"));
     await dev.stdin.flush();
     await until(() => out.includes("fake reply"), 15_000);
     expect(asked()).toEqual(["hello from the terminal"]);

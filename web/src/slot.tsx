@@ -23,6 +23,7 @@ import { Stick, type Place } from "./stick";
 import { TickStrip, ticksOf } from "./ticks";
 import { ExchangeLine, exchanges } from "./exchanges";
 import { Sent, Fold, folded, KEY, MARKDOWN, Running, SaidOf, type Shown } from "./tools";
+import { Metadata } from "./metadata";
 import { SettingsMenu, useTerminalEntry } from "./settings";
 import { useUnreadBut } from "./unread";
 import { Asks } from "./asks";
@@ -456,7 +457,10 @@ export function SlotPage({ id, live, graph = true }: { id: string; live: boolean
   const [{ log, query, place }] = useState(() => visit(id));
   const { data, error } = useQuery(query);
   const gone = (error as { status?: number } | null)?.status === 404;
-  if (data && !gone) return <ChatView d={data} log={log} place={place} live={live} graph={graph} />;
+  if (data && !gone) {
+    const chat = <ChatView d={data} log={log} place={place} live={live} graph={graph} />;
+    return data.metadata ? <Metadata.Provider value={data.metadata}>{chat}</Metadata.Provider> : chat;
+  }
   return (
     <>
       <TopBar live={live} />
@@ -564,7 +568,7 @@ export function ChatView({ d, log, place, live, graph = true }: { d: SlotData; l
   const typeIn = d.settings.find((s) => s.key === "type-in");
   const typesIn = terminal && Boolean(typeIn?.value ?? typeIn?.default);
   // The terminal key, unless 终端入口 is off or there is no Herdr (spec web-write "终端入口").
-  const entry = useTerminalEntry();
+  const entry = useTerminalEntry(d.agent);
   const changed = () => redraw((n) => n + 1);
 
   // Its transcript grew: bring the blocks written since, and only them. One not brought comes next time.

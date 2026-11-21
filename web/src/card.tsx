@@ -8,6 +8,7 @@ import { agentDef } from "../../src/agents";
 import type { AgentKind, ContextUse, ExtraUsage, QuotaWindow, SessionUse, Tokens } from "../../src/contracts";
 import { moment, money, percent, span, tokens } from "../../src/panels";
 import type { InfoCard as Card, StatusCard } from "../../src/router";
+import { useAgent } from "./metadata";
 import { AgentLogo, ModelName, ROOM } from "./common";
 import { toast } from "./toast";
 import { buttonVariants } from "./components/ui/button";
@@ -199,11 +200,11 @@ export function PopFrame({ open, anchor, close, label, title, icon: Icon, logo, 
 
 /** A query's answer, drawn from its data. run: says a command as typed, its answer shown as any is.
  *  /status's is a popover over the message box, anchor in it (#761). */
-export function InfoCard({ card, anchor, close, run }: { card: Card; anchor: RefObject<HTMLElement | null>; close: () => void; run: (command: string) => Promise<void> }) {
+export function InfoCard({ card, anchor, close, run, supports = () => true }: { supports?: (name: string) => boolean; card: Card; anchor: RefObject<HTMLElement | null>; close: () => void; run: (command: string) => Promise<void> }) {
   if (card.command === "status")
     return (
       <PopFrame open anchor={anchor} label={card.ref} logo={<AgentLogo agent={card.agent} />} title={card.ref} sub={card.line.split("，")[0]} close={close}>
-        <Status s={card} run={run} />
+        <Status s={card} run={run} canContext={supports("context")} />
       </PopFrame>
     );
   if (card.command === "usage")
@@ -215,9 +216,9 @@ export function InfoCard({ card, anchor, close, run }: { card: Card; anchor: Ref
   return (
     <CardFrame icon={ChartPie} title="上下文" close={close}>
       <Context c={card} />
-      <div className="flex gap-2 px-4 pt-1 pb-4">
+      {supports("compact") && <div className="flex gap-2 px-4 pt-1 pb-4">
         <Action icon={FoldVertical} label="压缩" run={() => run("/compact")} />
-      </div>
+      </div>}
     </CardFrame>
   );
 }
@@ -294,9 +295,10 @@ function Usage({ u }: { u: Extract<Card, { command: "usage" }> }) {
  *  with none of them. */
 export function QuotaPart({ agent, q }: { agent: AgentKind; q: { limits: QuotaWindow[]; extra?: ExtraUsage; credits?: number } }) {
   const now = Date.now();
+  const { name } = useAgent(agent);
   if (!q.limits.length && !q.extra && q.credits === undefined) return null;
   return (
-    <Section icon={<AgentLogo agent={agent} />} title={`${agentDef(agent).name} 额度`}>
+    <Section icon={<AgentLogo agent={agent} />} title={`${name} 额度`}>
       {q.limits.map((l, i) => (
         <Window key={i} l={l} now={now} />
       ))}
@@ -394,7 +396,9 @@ const ACTIONS: Record<string, [LucideIcon, string]> = { "/stop": [Square, "停�
 /** /status (stories 401-406): the tool running, if any; 模型设置 and 状态 as IM has them, the quota
  *  windows at 80% or more under them; the directory tapped is copied, the context tapped opens
  *  /context's card; then what can be done now. */
-export function Status({ s, run }: { s: StatusCard; run: (command: string) => Promise<void> }) {
+export function Status({ s, run, canContext = true }: { canContext?: boolean; s: StatusCard; run: (command: string) => Promise<void> }) {
+  const { statusName } = useAgent(s.agent);
+  const ContextRow = canContext ? "button" : "div";
   const full = (s.limits ?? []).filter((l) => l.usedPercent >= 80);
   const now = Date.now();
   const c = s.context;
@@ -418,7 +422,7 @@ export function Status({ s, run }: { s: StatusCard; run: (command: string) => Pr
       <Section icon={<Box className="size-3.5" />} title="模型设置">
         <div className={row}>
           Agent
-          <span className="ml-auto">{agentDef(s.agent).statusName}</span>
+          <span className="ml-auto">{statusName}</span>
         </div>
         {(s.model || s.effort) && (
           <div className={row}>
@@ -443,7 +447,7 @@ export function Status({ s, run }: { s: StatusCard; run: (command: string) => Pr
           <Copy aria-label="复制" className="size-3.5 shrink-0 text-muted-foreground" />
         </button>
         {c && (
-          <button onClick={() => void run("/context")} className={cn(row, PRESS)}>
+          <ContextRow onClick={canContext ? () => void run("/context") : undefined} className={cn(row, canContext && PRESS)}>
             上下文
             {p !== null && (
               <span className="ml-auto block h-1.5 w-20 overflow-hidden rounded-full bg-muted">
@@ -451,8 +455,8 @@ export function Status({ s, run }: { s: StatusCard; run: (command: string) => Pr
               </span>
             )}
             <span className={cn(p === null && "ml-auto", TONE_TEXT[tone(p ?? 0)])}>{c.maxTokens ? percent(c.usedTokens, c.maxTokens) : `~${tokens(c.usedTokens)}`}</span>
-            <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-          </button>
+            {canContext && <ChevronRight className="size-4 shrink-0 text-muted-foreground" />}
+          </ContextRow>
         )}
       </Section>
       {full.length > 0 && (

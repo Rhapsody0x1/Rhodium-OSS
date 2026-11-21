@@ -27,11 +27,15 @@ export const fakeLike = { qq: QQ_CAPABILITIES, telegram: TELEGRAM_CAPABILITIES, 
  *  durations.feishuEdit. */
 export const fakeCapabilities = (bot: BotConfig, feishuEdit = 3000): Capabilities => PLATFORMS.fake.capabilities(bot, { feishuEdit });
 
+// The dev process passes this per-run credential to its daemon, never to the agents it launches.
+const [devSocket, devToken] = (process.env.RHODIUM_FAKE_IM_AUTH ?? "").split(" ");
+delete process.env.RHODIUM_FAKE_IM_AUTH;
+
 /** Rhodium's adapter for a [bots.<name>] table with platform = "fake": like picks the capability
  *  table, socket is where the platform listens. id is the bot's row id. */
 export function fakeBotFromConfig(id: string, name: string, bot: BotConfig, { durations }: AdapterDeps): FakeBot {
   if (!bot.socket) throw new Error(`config: bots.${name} needs socket = the fake IM platform's socket path`);
-  return new FakeBot(bot.socket, { id, name, capabilities: PLATFORMS.fake.capabilities(bot, durations) });
+  return new FakeBot(bot.socket, { id, name, capabilities: PLATFORMS.fake.capabilities(bot, durations) }, bot.socket === devSocket ? devToken : undefined);
 }
 
 /** What a test injects: an inbound message as the platform would deliver it. */
@@ -286,6 +290,14 @@ class PlatformBot {
   }
 }
 
+/** A host:port is TCP; Unix socket paths keep their filesystem permissions. */
+function tcpPort(address: string): number | undefined {
+  if (!/^[^/\\]*:/.test(address) || /^[a-z]:[\\/]/i.test(address)) return undefined;
+  const match = /^127\.0\.0\.1:([1-9]\d{0,4})$/.exec(address);
+  if (!match || +match[1]! > 65535) throw new Error("fake-im: expected 127.0.0.1:<port> (1–65535)");
+  return +match[1]!;
+}
+
 /** The platform: every fake bot, behind one socket at path. Its state lives as long as it does. */
 export class FakeIm {
   private readonly bots = new Map<string, PlatformBot>();
@@ -295,14 +307,19 @@ export class FakeIm {
   // ponytail: a run that numbers more messages than the milliseconds till the next starts collides.
   private ids = Date.now();
 
+  readonly token?: string;
+
   constructor(private readonly path: string) {
-    rmSync(path, { force: true }); // a stale socket from a crashed run
+    const port = tcpPort(path);
+    if (port) this.token = crypto.randomUUID();
+    else rmSync(path, { force: true }); // a stale socket from a crashed run
     this.server = Bun.serve({
-      unix: path,
-      fetch: (req) => this.handle(req),
+      ...(port ? { hostname: "127.0.0.1", port } : { unix: path }),
+      fetch: (req) => this.token && req.headers.get("authorization") !== "Bearer " + this.token
+        ? Response.json({ error: "private fake IM endpoint" }, { status: 403 }) : this.handle(req),
       error: (e) => Response.json({ error: e.message }, { status: 400 }),
     });
-    chmodSync(path, 0o600); // whoever can connect speaks as you
+    if (!port) chmodSync(path, 0o600); // whoever can connect speaks as you
   }
 
   /** Set a bot up on the platform, before or after rhodium connects to it. */
@@ -312,7 +329,7 @@ export class FakeIm {
 
   close() {
     this.server.stop(true);
-    rmSync(this.path, { force: true });
+    if (!this.token) rmSync(this.path, { force: true });
   }
 
   /** A send or edit's result; one set to hang gets none, and its request stays open till the bot hangs up. */
@@ -370,11 +387,18 @@ export class FakeIm {
   }
 }
 
-async function call<T>(path: string, op: string, body: object, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(`http://fake-im/${op}`, { unix: path, method: "POST", body: JSON.stringify(body), signal });
-  const out = (await res.json()) as T & { error?: string };
-  if (!res.ok) throw new Error(`fake-im ${op}: ${out.error}`);
-  return out;
+function requester(path: string, token?: string) {
+  const port = tcpPort(path);
+  const origin = port ? `http://${path}` : "http://fake-im";
+  return async <T>(op: string, body: object, signal?: AbortSignal): Promise<T> => {
+    const res = await fetch(`${origin}/${op}`, {
+      ...(port ? { headers: { authorization: `Bearer ${token ?? ""}` }, redirect: "error", proxy: "" } : { unix: path }),
+      method: "POST", body: JSON.stringify(body), signal,
+    });
+    const out = (await res.json()) as T & { error?: string };
+    if (!res.ok) throw new Error(`fake-im ${op}: ${out.error}`);
+    return out;
+  };
 }
 
 /** Rhodium's adapter for one fake bot: a client of the platform's socket that keeps retrying
@@ -384,11 +408,14 @@ export class FakeBot implements ImAdapter {
   readonly capabilities: Capabilities;
   private readonly name: string;
   private readonly stop = new AbortController();
+  private readonly request: ReturnType<typeof requester>;
 
   constructor(
-    private readonly path: string,
+    path: string,
     opts: FakeBotOptions,
+    token?: string,
   ) {
+    this.request = requester(path, token);
     this.id = opts.id;
     this.name = opts.name;
     this.capabilities = opts.capabilities;
@@ -474,21 +501,22 @@ export class FakeBot implements ImAdapter {
   }
 
   private call<T>(op: string, body: object): Promise<T> {
-    return call(this.path, op, { bot: this.name, ...body }, this.stop.signal);
+    return this.request(op, { bot: this.name, ...body }, this.stop.signal);
   }
 }
 
 /** The test side of the socket: the user, plus control over the platform. */
 export class FakeImClient {
-  constructor(private readonly path: string) {}
+  private readonly request: ReturnType<typeof requester>;
+  constructor(path: string, token?: string) { this.request = requester(path, token); }
 
   inject(bot: string, message: Injection): Promise<{ messageId: string }> {
     const attachments = message.attachments?.map((a) => ({ ...a, data: Buffer.from(a.data).toString("base64") }));
-    return call(this.path, "inject", { bot, ...message, attachments });
+    return this.request("inject", { bot, ...message, attachments });
   }
 
   log(bot: string, chat: string): Promise<Posted[]> {
-    return call(this.path, "log", { bot, chat });
+    return this.request("log", { bot, chat });
   }
 
   /** What each message the bot sent in chat shows now, after its edits, oldest first: an edit shows
@@ -514,31 +542,31 @@ export class FakeImClient {
   }
 
   menu(bot: string, chat?: string): Promise<MenuItem[] | null> {
-    return call(this.path, "menu", { bot, chat });
+    return this.request("menu", { bot, chat });
   }
 
   /** Every / menu the bot has set, oldest first; chat is left out for a bot-wide one. */
   menuLog(bot: string): Promise<{ chat?: string; items: MenuItem[] }[]> {
-    return call(this.path, "menu-log", { bot });
+    return this.request("menu-log", { bot });
   }
 
   /** Every row the bot has set, oldest first, at when (ms) it arrived; chat is left out for a bot-wide one. */
   rowLog(bot: string): Promise<{ chat?: string; row: RowButton[]; at: number }[]> {
-    return call(this.path, "row-log", { bot });
+    return this.request("row-log", { bot });
   }
 
   /** Set how the bot's next send or edit turns out; on narrows it to one of the two. */
   async next(bot: string, outcome: Outcome, on?: Posted["kind"] | "row"): Promise<void> {
-    await call(this.path, "next", { bot, outcome, on });
+    await this.request("next", { bot, outcome, on });
   }
 
   /** Break a bot's connection (up false) or let it reconnect (up true). */
   async connection(bot: string, up: boolean): Promise<void> {
-    await call(this.path, "connection", { bot, up });
+    await this.request("connection", { bot, up });
   }
 
   /** Whether rhodium is connected to the bot, as the platform sees it. */
   connected(bot: string): Promise<boolean> {
-    return call(this.path, "connected", { bot });
+    return this.request("connected", { bot });
   }
 }

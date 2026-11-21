@@ -5,10 +5,10 @@ import { windowsConversationLock } from "../src/tui-lock";
 import { renameTarget } from "../src/config";
 import { Database } from "bun:sqlite";
 import { createPrivateWindows, checkWindowsPermissions, makePipe } from "../src/windows";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { realpath } from "node:fs/promises";
-import { join, win32 } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { createServer } from "node:net";
 import { connectHolder, type HolderLink } from "../src/holder";
 
@@ -346,3 +346,51 @@ test.skipIf(process.platform !== "win32")("compiled daemon serves the board, enf
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }, 90000);
+
+test.skipIf(process.platform !== "win32")("installed rh.exe dev --fake sends and receives a private message over loopback TCP", async () => {
+  const exe = process.env.RHODIUM_TEST_EXE!;
+  // Hard links must live on the same volume; CI can put TEMP on another drive.
+  const bin = mkdtempSync(join(dirname(exe), "rhodium-test-dev-"));
+  const dir = mkdtempSync(join(tmpdir(), "rhodium-test-dev-"));
+  let dev: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+  try {
+    linkSync(exe, join(bin, "rhodium.exe"));
+    linkSync(exe, join(bin, "rh.exe"));
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+    const address = probe.url.host;
+    await probe.stop(true);
+    const config = join(dir, "config.toml");
+    createPrivateWindows([config], [
+      `holdBin = ${JSON.stringify(process.env.RHODIUM_TEST_HOLD!)}`, "[board]", "port = 0",
+      "[bots.dev]", 'platform = "fake"', 'like = "qq"', 'owner = "test-user"', `socket = ${JSON.stringify(address)}`,
+      "[programs]", `claude = ${JSON.stringify(process.env.RHODIUM_TEST_AGENT!)}`, `codex = ${JSON.stringify(join(dir, "missing.exe"))}`,
+      `pi = ${JSON.stringify(join(dir, "missing.exe"))}`, `herdr = ${JSON.stringify(join(dir, "missing.exe"))}`,
+    ].join("\n"));
+    dev = Bun.spawn([join(bin, "rh.exe"), "dev", "--fake", "--config", config], {
+      cwd: dir, env: { ...process.env, HOME: dir, USERPROFILE: dir, LOCALAPPDATA: dir },
+      stdin: "pipe", stdout: "pipe", stderr: "pipe",
+    });
+    const stderr = new Response(dev.stderr).text();
+    let output = "";
+    const reading = (async () => {
+      for await (const chunk of dev!.stdout.pipeThrough(new TextDecoderStream())) output += chunk;
+    })();
+    // The built-in slot list needs no live agent and identifies a reply routed through the bot.
+    dev.stdin.write("/rh_ls\r\n");
+    await dev.stdin.flush();
+    for (const deadline = Date.now() + 20000; !output.includes("还没有槽位") && dev.exitCode === null && Date.now() < deadline;) await Bun.sleep(50);
+    if (!output.includes("还没有槽位")) throw new Error("No fake IM reply: " + (dev.exitCode === null ? output : await stderr));
+    dev.stdin.write("\x1a\r\n"); // Ctrl-Z and Enter at the Windows console.
+    await dev.stdin.end();
+    expect(await dev.exited).toBe(0);
+    await reading;
+    expect(output).toContain("Ctrl-Z");
+    expect(output).toContain("rhodium 已停");
+    expect(output).not.toContain("systemctl");
+  } finally {
+    if (dev && dev.exitCode === null) Bun.spawnSync(["taskkill.exe", "/PID", String(dev.pid), "/T", "/F"], { stdout: "ignore", stderr: "ignore" });
+    await dev?.exited;
+    rmSync(dir, { recursive: true, force: true, maxRetries: 6 });
+    rmSync(bin, { recursive: true, force: true, maxRetries: 6 });
+  }
+}, 45_000);

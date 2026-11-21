@@ -896,7 +896,7 @@ function SlotMenu({ s, at, close, ask, className }: { s: Slot; at?: { x: number;
   const go = (a: Parameters<typeof run>[0]) => () => void run(a);
   const turn = inTurn(s);
   const runs = s.mode === "headless" && s.phase !== "off" && s.phase !== "crashed";
-  const entry = useTerminalEntry();
+  const entry = useTerminalEntry(s.agent);
   const terminal: Choice[] =
     s.mode === "tui"
       ? [{ icon: SquareTerminal, label: "收回终端", run: () => ask({ slot: s.id, back: true }) }]

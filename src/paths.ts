@@ -3,6 +3,9 @@ import path from "node:path";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 
+/** Bun's embedded filesystem roots in binaries built for Unix and for Windows. */
+export const compiled = Bun.main.startsWith("/$bunfs/") || /^B:[\\/]~BUN[\\/]root[\\/]/i.test(Bun.main);
+
 export function userHome() {
   if (process.platform !== "win32") return process.env.HOME || homedir();
   const home = process.env.USERPROFILE || homedir();

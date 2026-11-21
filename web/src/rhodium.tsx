@@ -30,12 +30,21 @@ export function RhodiumView({ d }: { d: RhodiumData }) {
           return (
             <li key={b.name} className={cn("flex items-baseline gap-2.5 rounded-lg border border-l-4 bg-card px-2.5 py-2", edge)}>
               <span className="font-medium">{b.name}</span>
-              <span className="text-xs text-muted-foreground">{b.platform}</span>
+              <span className="text-xs text-muted-foreground">{d.metadata?.platforms.find(p => p.id === b.platform)?.label ?? b.platform}</span>
               <span className="ml-auto text-xs">{label}</span>
             </li>
           );
         })}
       </ul>
+      {!!d.metadata?.plugins.length && <>
+        <Heading>插件</Heading>
+        <ul className="grid gap-1.5">{d.metadata.plugins.map(p =>
+          <li key={p.id} className="rounded-lg border bg-card px-2.5 py-2">
+            <div className="flex items-baseline justify-between gap-2"><span className="font-medium break-all">{p.id}</span>
+              <span className={cn("shrink-0 text-xs", p.status === "failed" ? "text-destructive" : "text-muted-foreground")}>{{ loaded: "已加载", disabled: "已禁用", failed: "加载失败" }[p.status]}</span></div>
+            {p.error && <p className="mt-1 text-sm text-muted-foreground break-words">{p.error}</p>}
+          </li>)}</ul>
+      </>}
       <Heading>日志（journald）</Heading>
       <Box>{log ?? "rhodium 不是作为 systemd 服务运行的，日志在它的 stderr 里。"}</Box>
     </>

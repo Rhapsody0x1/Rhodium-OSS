@@ -8512,3 +8512,41 @@ smoke("story 650: on a wide screen ↑ from the message box's first line brings 
     answer = was;
   }
 });
+
+smoke("the board offers a loaded agent for creation and switching, keeps import and terminal controls scoped, and explains a failed plugin", async () => {
+  const plugin = { id: "echo-agent", name: "Echo Agent", statusName: "Echo", tui: false, importable: false };
+  const page = await open("", async p => {
+    await p.route("**/api/board", async route => {
+      const data = await (await route.fetch()).json();
+      data.metadata.agents.push(plugin);
+      data.metadata.plugins.push({ id: "broken", status: "failed", error: "missing manifest" });
+      await route.fulfill({ json: data });
+    });
+    await p.route("**/api/slot?id=*", async route => {
+      const data = await (await route.fetch()).json();
+      data.metadata.agents.push(plugin);
+      await route.fulfill({ json: { ...data, agent: plugin.id, commands: [] } });
+    });
+  });
+  await page.getByText("missing manifest", { exact: false }).waitFor();
+  const plus = page.getByRole("button", { name: "新建", exact: true });
+  await plus.click();
+  await page.getByRole("menuitem", { name: "新建槽位" }).click();
+  const dialog = page.getByRole("dialog");
+  const echo = dialog.getByRole("radio", { name: "Echo Agent", exact: true });
+  await echo.click();
+  expect(await echo.getAttribute("aria-checked")).toBe("true");
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({state: "hidden"});
+  await plus.click();
+  await page.getByRole("menuitem", { name: "导入" }).click();
+  await dialog.getByRole("radio", { name: "pi", exact: true }).waitFor();
+  expect(await echo.count()).toBe(0);
+  await page.goto(`http://127.0.0.1:${server!.port}/#/slot/${talks}`);
+  const change = page.getByRole("button", { name: "换 agent" });
+  await change.waitFor();
+  expect(await page.getByRole("button", { name: "切到终端" }).count()).toBe(0);
+  expect(await page.getByRole("button", { name: "模型和思考强度" }).count()).toBe(0);
+  await change.click();
+  await page.getByRole("button", { name: /Echo Agent/ }).waitFor();
+});

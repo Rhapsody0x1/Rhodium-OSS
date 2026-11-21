@@ -14,13 +14,12 @@ afterEach(() => open.splice(0).reverse().forEach((x) => x.close()));
 
 let n = 0;
 /** The platform runs here in the test process, as in whole-system tests; rhodium's adapters connect to it. */
-function platform() {
-  const path = join(dir, `im-${n++}.sock`);
+function platform(path = join(dir, `im-${n++}.sock`)) {
   const im = new FakeIm(path);
   open.push(im);
   /** Rhodium's adapter for the bot the platform knows as name; a new one is a restarted rhodium. */
   const connect = (opts: { id?: string; name: string; capabilities: Capabilities }) => {
-    const bot = new FakeBot(path, { id: "B1", ...opts });
+    const bot = new FakeBot(path, { id: "B1", ...opts }, im.token);
     open.push(bot);
     return bot;
   };
@@ -29,7 +28,7 @@ function platform() {
     im.bot(opts);
     return connect(opts);
   };
-  return { im, client: new FakeImClient(path), fake, connect };
+  return { im, client: new FakeImClient(path, im.token), fake, connect };
 }
 
 /** Pull the next inbound message, failing instead of hanging when none comes. */
@@ -52,6 +51,28 @@ test("an injected message comes out of the bot's inbound stream with its message
   const { messageId } = await client.inject("main", { chat: "c1", sender: "u1", text: "hello" });
 
   expect(await next()).toMatchObject({ bot: "B1", chat: "c1", sender: "u1", messageId, text: "hello" });
+});
+
+test("loopback TCP carries a private conversation only with the running fake platform's token", async () => {
+  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+  const address = probe.url.host;
+  await probe.stop(true);
+  const { fake, client } = platform(address);
+  const bot = fake({ name: "local", capabilities: fakeLike.telegram });
+  const next = inbox(bot);
+  const message = { chat: "u", sender: "u", text: "hello" };
+  const untrusted = await fetch(`http://${address}/inject`, { method: "POST", body: JSON.stringify({ bot: "local", ...message }) });
+  expect(untrusted.status).toBe(403);
+  await client.inject("local", message);
+  expect(await next()).toMatchObject(message);
+  expect(await bot.send("u", { text: "reply" })).toMatchObject({ status: "sent" });
+  expect((await client.log("local", "u")).map(p => p.text)).toEqual(["reply"]);
+});
+
+test("a fake TCP endpoint must be a literal loopback address and a usable port", () => {
+  for (const addr of ["0.0.0.0:1234", "localhost:1234", "127.0.0.1:0", "127.0.0.1:65536"]) {
+    expect(() => new FakeIm(addr)).toThrow(/127\.0\.0\.1/);
+  }
 });
 
 test("the same platform message id injected twice comes out twice; dedup is Rhodium's job", async () => {

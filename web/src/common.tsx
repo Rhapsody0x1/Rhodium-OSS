@@ -2,9 +2,10 @@
 // way back, a slot's top bar, headings and text boxes, a file's row.
 import { cn } from "cn";
 import { Activity, Bot, ChevronLeft, FileText, Plus, Settings } from "lucide-react";
-import { createContext, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject, type UIEvent } from "react";
+import { createContext, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject, type UIEvent } from "react";
 import { Link, useLocation } from "wouter";
 import type { AgentKind, BuiltinAgentKind } from "../../src/contracts";
+import { Metadata, useAgent } from "./metadata";
 import { request, settled } from "./data";
 
 const rel = new Intl.RelativeTimeFormat("zh-CN", { numeric: "auto" });
@@ -49,7 +50,7 @@ const LOGO: Partial<Record<BuiltinAgentKind, Logo>> = {
 
 /** The agent's name, as its logo is named: agents.ts's, kept here too so the first screen does not load
  *  that table, which would put it over its 200KB (architecture §2). */
-export const agentName = (agent: AgentKind) => LOGO[agent as BuiltinAgentKind]?.name ?? agent;
+export const agentName = (agent: AgentKind, fallback: string) => LOGO[agent as BuiltinAgentKind]?.name ?? fallback;
 
 /** A model by its name, the default's 默认 with the model it uses beside it in grey (story 407). */
 export function ModelName({ name }: { name: string }) {
@@ -65,9 +66,10 @@ export function ModelName({ name }: { name: string }) {
 
 /** The agent's logo, as tall as the text around it, named for screen readers. */
 export function AgentLogo({ agent, className }: { agent: AgentKind; className?: string }) {
+  const { name } = useAgent(agent);
   const logo = LOGO[agent as BuiltinAgentKind];
   const size = cn("inline-block size-[1em] shrink-0 align-[-0.125em]", className);
-  if (!logo) return <Bot role="img" aria-label={agent} className={size} />;
+  if (!logo) return <Bot role="img" aria-label={name} className={size}><title>{name}</title></Bot>;
   if ("mask" in logo) return <span role="img" aria-label={logo.name} className={cn(size, "bg-current")} style={{ mask: `url(${logo.mask}) center / contain no-repeat` }} />;
   return (
     <svg role="img" aria-label={logo.name} viewBox={logo.viewBox} className={size}>
@@ -268,6 +270,7 @@ export function flagged(hash: string, flag: string, on: boolean): string {
 export function BoardHeader({ live }: { live: boolean | null }) {
   const [location] = useLocation();
   const ms = useLatency(live);
+  const metadata = useContext(Metadata);
   // A wide screen has the list beside a slot's chat.
   const on = location.startsWith("/topology") ? "topology" : location === "/" || location.startsWith("/slot/") ? "list" : null;
   const go = (view: "list" | "topology") => {
@@ -329,6 +332,8 @@ export function BoardHeader({ live }: { live: boolean | null }) {
           </SettingsMenu>
         </Suspense>
       </header>
+      {metadata?.plugins.filter(p => p.status === "failed").map(p => <p key={p.id} role="alert" className="pb-2 text-sm text-destructive break-words">插件 {p.id} 加载失败：{p.error}</p>)}
+      {metadata?.configErrors.map(error => <p key={error} role="alert" className="pb-2 text-sm text-destructive break-words">{error}</p>)}
     </div>
   );
 }

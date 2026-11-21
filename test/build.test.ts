@@ -162,7 +162,10 @@ test("stories 136, 138, 210, 211: the built rhodium serves the board page at / w
     const [head, data] = new TextDecoder().decode((await stream.read()).value).split("\ndata: ");
     expect([head, JSON.parse(data!)]).toEqual(["event: page", { entry: `./${entry}`, stream: expect.stringMatching(/^[\w-]{36}$/) }]);
     ac.abort();
-    expect(await (await get("/api/board")).json()).toEqual({ workspaces: [], bots: [] });
+    const { metadata, ...board } = await (await get("/api/board")).json();
+    expect(board).toEqual({ workspaces: [], bots: [] });
+    expect(metadata.agents.map((a: { id: string }) => a.id)).toEqual(["claude", "pi", "codex"]);
+    expect(metadata.plugins).toEqual([]);
     expect((await get("/api/rhodium")).status).toBe(200);
   } finally {
     await rhodium.cleanup();
