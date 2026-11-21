@@ -206,9 +206,10 @@ Agent 插件由 `rh-hold` 直接作为子进程拉起。进程内通过 stdin（
   - `rhodium` 重启重连 `rh-hold` 并重放完 `out.log` 后，`replayed()` 只把仍留在未闭合集合中的提问作为 `pending_asks` 发给路由：
     - 若崩溃前用户已答且核心已交付（数据库状态为 `delivered`），`out.log` 里已有 `ask_resolved`，根本不会出现在 `pending_asks`；即便进程恰好在写出 `ask_resolved` 前崩掉，路由在处理 `pending_asks` 时也会比对数据库 `state.listed`（包含已 `delivered` 记录），绝不重复弹出旧提问；
     - 若崩溃前用户已答但尚未完成 `delivered` 落库（数据库状态为 `answered`，`out.log` 无 `ask_resolved`），它仍在 `pending_asks` 中，路由会立即触发重新下发 `answer`。
-  - **重复 `answer` 语义与插件幂等去重**：`src/runner.ts` 的 `answer()` 先等待驱动把 `answer` 写入插件，再在后续数据库事务中将提问状态改为 `delivered`。若第一次 `answer` 已写入仍存活的插件进程，而核心在更新数据库前退出且插件尚未写出 `ask_resolved`，重连时核心会看到数据库仍为 `answered` 且 `out.log` 中该提问未闭合，从而再次下发同一个 `answer`。`state.listed` 只能防止向用户重复弹题，不能阻止插件把同一批准/回答重复交给下游。因此 `rh-agent/1` 公开契约规定：`answer` 跨核心重启为**至少一次（at-least-once）投递**；插件在**同一次进程运行内必须按 `requestId` 去重**，对同一 `requestId` **至多向下游交付一次**，并严格区分两态：
-    - **首次交付仍在进行中**：若收到同一 `requestId` 的重复 `answer`，插件必须合并等待，不再向下游重复执行，也**暂不发出 `ask_resolved`**，待首次下游交付真正成功后才发出确认；
-    - **首次交付已成功后**：若再次收到同一 `requestId` 的重复 `answer`，插件必须忽略重复的下游执行，并可再次发出 `{"type":"ask_resolved","requestId":"<id>"}` 以便核心闭合提问并将状态更新为 `delivered`。
+  - **重复 `answer` 语义与插件幂等去重**：`src/runner.ts` 的 `answer()` 先等待驱动把 `answer` 写入插件，再在后续数据库事务中将提问状态改为 `delivered`。若第一次 `answer` 已写入仍存活的插件进程，而核心在更新数据库前退出且插件尚未写出 `ask_resolved`，重连时核心会看到数据库仍为 `answered` 且 `out.log` 中该提问未闭合，从而再次下发同一个 `answer`。`state.listed` 只能防止向用户重复弹题，不能阻止插件把同一批准/回答重复交给下游。因此 `rh-agent/1` 公开契约规定：`answer` 跨核心重启为**至少一次（at-least-once）投递**；插件在**同一次进程运行内必须按 `requestId` 去重**，对同一 `requestId` **至多向下游交付一次**，并严格区分三态：
+    - **首次交付仍在进行中（`in-flight`）**：若收到同一 `requestId` 的重复 `answer`，插件必须合并等待，不再向下游重复执行，也**暂不发出 `ask_resolved`**，待首次下游交付真正成功后才发出确认；
+    - **首次交付已成功后（`delivered`）**：若再次收到同一 `requestId` 的重复 `answer`，插件必须忽略重复的下游执行，并可再次发出 `{"type":"ask_resolved","requestId":"<id>"}` 以便核心闭合提问并将状态更新为 `delivered`；
+    - **首次交付失败/已关闭（`cancelled`）**：若首次向下游交付失败（如抛出异常）并已发出 `ask_cancel`，同一进程运行内必须保留该 `requestId` 的已关闭标记，拒绝后续迟到的重复 `answer`——既不再调用下游（防止因首次仅回执丢失而二次批准），也不发出 `ask_resolved`。
 - **通用命令子集与自动拒绝**：只有列入 `ready.capabilities.commands`（且与清单静态声明一致）的通用命令才会转发 `command` 到插件。`new` 与 `resume` 始终由核心自己处理；`stop` 固定映射为 `interrupt`；未声明支持的命令（例如 `/ultracode`、`/compact`）由核心直接向用户返回“该 agent 不支持此命令”，不惊动插件进程。
 - **核心托管对话记录（唯一写入者、残尾修复与首次同步、检查点顺序及幂等去重）**：
   - **为什么统一托管**：各家插件 agent 的本地记录格式各异（有的写自有格式 JSONL，有的不落盘或结构随版本变化），由核心统一记录在 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`，让网页对话页、`rh read` 和槽位时间线 `/resume` 无需为每家插件单独写解析器，展示格式也完全一致。
@@ -306,21 +307,25 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 - **模块组成**：
   - `manifest.ts`：`PluginManifest` 类型定义与 `validateManifest(json)` 纯函数校验器（含保留名与禁止拉起 `claude` 校验）。
   - `stdio.ts`：UTF-8 按行 JSON 读写封装（解析兼容 `\r\n`，守住 64MB 单行上限，日志仅写 `stderr` 绝不污染 `stdout`）。
-  - `agent.ts`：`rh-agent/1` 协议消息类型（`CoreToAgentMessage`、`AgentToCoreMessage`）、`AgentPlugin` 接口、`AgentContext` 事件发射器、`PluginFatalError` 与 `runAgentPlugin(plugin)` 运行时入口。
+  - `agent.ts`：`rh-agent/1` 协议消息类型（`CoreToAgentMessage`、`AgentToCoreMessage`）、`AgentPlugin` 接口、`AgentContext` 事件发射器、`PluginFatalError`、`AgentPluginRunOptions`（含可选 `interruptTimeoutMs` 与 `closeTimeoutMs`）与 `runAgentPlugin(plugin, opts?)` 运行时入口。
   - `im.ts`：`rh-im/1` 协议 JSON-RPC 与 `Capabilities` 类型、`ImPlugin` 接口、`ImContext` 上下文、`PluginSendFailedError` 与 `runImPlugin(plugin)` 运行时入口。
   - `index.ts`：统一导出全部公开类型与运行时辅助函数。
 
-- **Agent 插件接口 `AgentPlugin` 与运行时 `runAgentPlugin(plugin)`**：
-  - 插件作者仅需实现：`init(params, ctx)`（返回 `{ session, capabilities, selfStarted?, version? }`）、`send(msg, ctx)`（经 `ctx.taken` / `ctx.turnStart` / `ctx.session` / `ctx.textDelta` / `ctx.toolStart` / `ctx.item` / `ctx.ask` / `ctx.askCancel` / `ctx.usage` / `ctx.turnEnd` / `ctx.error` 上报事件）、`interrupt(ctx)`，按需实现 `answer?(requestId, answer, ctx)` / `approval?(on, ctx)` / `command?(name, args, ctx)` 与 `close?()`。
+- **Agent 插件接口 `AgentPlugin` 与运行时 `runAgentPlugin(plugin, opts?)`**：
+  - 插件作者仅需实现：`init(params, ctx)`（返回 `{ session, capabilities, selfStarted?, version? }`）、`send(msg, ctx)`（经 `ctx.taken` / `ctx.turnStart` / `ctx.session` / `ctx.textDelta` / `ctx.toolStart` / `ctx.item` / `ctx.ask` / `ctx.askCancel` / `ctx.usage` / `ctx.turnEnd` / `ctx.error` 上报事件）、`interrupt(ctx)`，按需实现 `answer?(requestId, answer, ctx)` / `approval?(on, ctx)` / `command?(name, args, ctx)` 与 `close?()`。`opts` 支持配置 `interruptTimeoutMs`（默认 `10_000` ms，对齐 `durations.pluginInterrupt`，便于测试缩小时限）与 `closeTimeoutMs`（默认 `5_000` ms，对齐 `durations.stopGrace`）。
   - SDK 运行时自动承担：
     1. **按行读 stdin 与非阻塞分派控制消息**：消费 stdin JSONL 并把事件/结果序列化写入 stdout。SDK **绝不阻塞等待 `plugin.send()` 完成后才读下一行 stdin**：无论 `plugin.send()` 选择“仅把回合入队便立即返回”，还是“等待整轮结束后再 resolve”，SDK 都异步追踪该 Promise 并保持 stdin 读循环持续运转。因此回合仍在 `send()` 内等待 `ask` 回答或执行工具时，后续到达的 `answer`、`interrupt`、`approval`、`command` 与 `close` 均可实时分派，不会互相死锁；
     2. 校验 `init.proto === 1`：`plugin.init()` 成功后自动发出 `ready`，若抛出 `PluginFatalError(msg, { retryable })` 或未捕获异常则自动发出 `fatal` 后退出；
-    3. **内置 §3.2 `answer` 两态幂等去重与拒绝收尾**：按 `requestId` 记录 `in-flight` / `delivered` 状态：
-       - 首次交付仍在进行中重收重复 `answer` 时合并等待，不重复调用 `plugin.answer()` 且**暂不发出 `ask_resolved`**；
-       - 首次 `plugin.answer()` 成功后标为 `delivered` 并自动发出 `ask_resolved`，此后重收重复 `answer` 忽略下游执行并自动重发 `ask_resolved` 确认闭合；
-       - 若 `plugin.answer()` **抛出异常或 reject**：SDK **绝不发出 `ask_resolved`**，立即清除该 `requestId` 的 `in-flight` 状态（同步释放合并等待），将错误记 `stderr` 后依次发出 `{"type":"ask_cancel","requestId":"<id>"}` 与 `{"type":"error","detail":...,"recoverable":false}`，并触发 `plugin.interrupt(ctx)` 结束阻塞回合（若抛出 `PluginFatalError` 或中断也失败，则按退出清理流程以非零码退出交由核心崩溃续跑接管），绝不只记一条非致命错误后让等待无限挂起；
+    3. **内置 §3.2 `answer` 三态幂等去重与限时拒绝收尾**：按 `requestId` 维护 `in-flight` / `delivered` / `cancelled` 三态记录：
+       - `in-flight`（首次交付进行中）：重收重复 `answer` 时合并等待，不重复调用 `plugin.answer()` 且**暂不发出 `ask_resolved`**；
+       - `delivered`（首次交付成功）：首次 `plugin.answer()` 成功后标为 `delivered` 并自动发出 `ask_resolved`，此后重收重复 `answer` 忽略下游执行并自动重发 `ask_resolved` 确认闭合；
+       - `cancelled`（回答失败/已关闭分支）：当 `plugin.answer()` 抛出异常或 reject 时：
+         1. SDK **绝不发出 `ask_resolved`**，将该 `requestId` 状态从 `in-flight` **迁移并保留为 `cancelled`（不删除该 `requestId` 记录）**，同时释放所有合并等待中的重复 `answer`；
+         2. 在同一次进程运行期内，若管道中随后再收到同一 `requestId` 的迟到重复 `answer`，命中 `cancelled` 状态直接拒绝/忽略：**既不再调用 `plugin.answer()`（避免首次仅回执丢失导致的二次批准），也不发出 `ask_resolved`**；
+         3. SDK 将错误记 `stderr` 后依次发出 `{"type":"ask_cancel","requestId":"<id>"}` 与 `{"type":"error","detail":...,"recoverable":false}`，并由 SDK 本地触发 `plugin.interrupt(ctx)`；
+         4. **本地中断限时收尾**：由于该次中断由 SDK 本地发起、核心 §3.2 的 `durations.pluginInterrupt` 计时器未必已启动，SDK 必须为其启动受 `opts.interruptTimeoutMs`（默认 `10_000` ms）约束的本地限时计时器：若回合在时限内通过 `turn_end` 回到空闲则恢复正常服务；若 `plugin.answer()` 抛出 `PluginFatalError`、`plugin.interrupt()` 抛错，或**超出 `interruptTimeoutMs` 仍未完成中断/未发出 `turn_end`**，SDK 立即走统一退出清理路径（单次执行受 `opts.closeTimeoutMs` 默认 `5_000` ms 限制的 `plugin.close()` 后以非零退出码退出），交由 `rh-hold` 与核心崩溃续跑/告警接管，绝不无限挂起；
     4. 将 `command()` 的返回值或异常自动包装为 `command_result`，其余运行期未捕获异常统一转报为 `error`（记录堆栈到 `stderr`，不污染 `stdout`）；
-    5. 收到 `close`、stdin EOF、`SIGTERM` 或 `SIGINT` 时保证只执行一次 `plugin.close()` 清理下游子进程后退出。
+    5. 收到 `close`、stdin EOF、`SIGTERM` 或 `SIGINT` 时，保证在受 `opts.closeTimeoutMs` 约束下只执行一次 `plugin.close()` 清理下游子进程后退出。
 
 - **IM 插件接口 `ImPlugin` 与运行时 `runImPlugin(plugin)`**：
   - 插件作者仅需实现：`init(params, ctx)`（返回 `Capabilities`）、`send(chat, message, ctx)`（返回 `SendResult`），按能力/按需实现 `edit?` / `dropButtons?` / `answerPress?` / `fetchAttachment?` / `setMenu?` / `setRow?` / `profile?` 与 `shutdown?()`。
@@ -561,7 +566,7 @@ target = "work/main"
   2. 陌生人（不在 `owners` 内的发送者）从任意 IM 适配器（含插件 IM）发来的入站消息绝不触发 agent；
   3. `pi` 与所有外部插件不得使用 Claude 订阅凭据，保留并验证 **Windows 混合大小写环境变量键**（如 `Anthropic_Api_Key`、`CLAUDE_code_oauth_token`）的过滤回归测试。
 - **核心单元测试与集成验收（无 systemd/Herdr 依赖）**：
-  - `test/plugin-sdk.test.ts`：覆盖 `runAgentPlugin`（按行 JSON 读写、握手与 `ready`/`fatal`；**回合仍在 `send()` 内等待 `ask` 时仍可实时分派 `answer` 完成回合，或实时分派 `interrupt`/`close` 中断退出**；`answer` 两态去重且首次交付成功前不发 `ask_resolved`；**`plugin.answer()` 拒绝时不发 `ask_resolved`、清除 `in-flight`、发出 `ask_cancel` + `error` 并触发中断/退出，绝不无限挂起**；命令与运行期异常转报；`close`/EOF/`SIGTERM` 单次清理退出）与 `runImPlugin`（`init` 能力表回传；**`ctx.inbound()` 须等核心落库回执 `{ ok: true }` 才返回且等待期间并发响应 `fetch_attachment` 不死锁**；**保留 `unknown` 结局**：模拟平台已收到 1 条消息但 HTTP 回执丢失时，`send()` 返回 `unknown` 或抛网络异常均透传/映射为 `{ status: "unknown", error }`、绝不降级成 `failed` 且平台只收到 1 条；仅明确拒收/未发出返回 `failed`；`shutdown`/EOF 单次清理退出）。
+  - `test/plugin-sdk.test.ts`：覆盖 `runAgentPlugin`（按行 JSON 读写、握手与 `ready`/`fatal`；**回合仍在 `send()` 内等待 `ask` 时仍可实时分派 `answer` 完成回合，或实时分派 `interrupt`/`close` 中断退出**；`answer` 三态去重（`in-flight`/`delivered`/`cancelled`）且首次交付成功前不发 `ask_resolved`；**回答失败 + 本地中断超时 + 迟到重复包用例**：配置较短 `interruptTimeoutMs`，模拟首次 `plugin.answer(reqId)` 拒绝、本地触发的 `plugin.interrupt()` 持续未完成，随后管道再送入同一 `reqId` 的重复 `answer`，断言**下游 `plugin.answer` 调用次数等于 1**、**`ask_resolved` 成功确认次数等于 0**、已发出 `ask_cancel` + `error`，且 SDK 在 `interruptTimeoutMs` 时限内走限时 `close()` 退出清理路径以非零码收尾；命令与运行期异常转报；`close`/EOF/`SIGTERM` 单次清理退出）与 `runImPlugin`（`init` 能力表回传；**`ctx.inbound()` 须等核心落库回执 `{ ok: true }` 才返回且等待期间并发响应 `fetch_attachment` 不死锁**；**保留 `unknown` 结局**：模拟平台已收到 1 条消息但 HTTP 回执丢失时，`send()` 返回 `unknown` 或抛网络异常均透传/映射为 `{ status: "unknown", error }`、绝不降级成 `failed` 且平台只收到 1 条；仅明确拒收/未发出返回 `failed`；`shutdown`/EOF 单次清理退出）。
   - `test/plugin-loader.test.ts`：清单校验、保留名拦截（含 `herdr`）、拦截指向 `claude` 的 `program`/`command`、版本不兼容拒绝、`enabled = false` 禁用、损坏 JSON 隔离，以及**直接用同一套校验函数验证本文档中的示例清单与握手样例**。
   - `test/plugin-agent.test.ts`：
     - 通用驱动生命周期、`steer: false` 排队、非支持命令拒绝、`fatal(retryable=false)` 停止续跑；
@@ -582,7 +587,7 @@ target = "work/main"
     - **Agent 插件 7 项检查**：1) 清单字段与静态合规检查（非保留名、启动命令与 `program` 不得指向 `claude`）；2) 环境变量中无敏感凭据泄漏；3) 握手成功并在超时内回传 `ready`；4) 正常一轮问答；5) 提问、首次交付成功后发 `ask_resolved` 闭环与重复同一 `requestId` 的 `answer` 去重（处理中不提前确认），或不支持命令规范响应；6) 打断 `interrupt` 与优雅关闭 `close`（及子进程无残留）；7) 畸形/超限输入与模拟失败错误回报规范。
     - **IM 插件 7 项检查**：1) 清单与能力表校验；2) `init` 握手并在超时内发 `connected`；3) `send` 正常文本与超长/纯文本分片/Markdown（含 `markdown: null`）边界处理；4) `edit` / `drop_buttons` / `set_menu` 按能力声明一致表现（未声明支持的能力跳过对应调用，如纯文本追加型平台仅测 `send`）；5) `kept_get` / `kept_set` 读写闭环（含私聊通道映射、同步游标与上下文令牌持久化验证）；6) 模拟发送失败或缺少会话上下文时返回规范 `{ status: "failed" }` 而非进程崩溃；7) `shutdown` 优雅退出且无残留进程。
 - **核心内置最小示例插件（随仓库提交，供 CI 与演示复现，并作为组员参考样板）**：
-  - `examples/plugins/echo-agent/`：基于 `packages/plugin-sdk/` 实现（`implements AgentPlugin` + `runAgentPlugin`，零第三方依赖），实现 `rh-agent/1`，包含正常回显、工具调用模拟、提问与复用 SDK 两态去重完成 `ask_resolved`、错误触发词（`/fail`）与延迟 `session` 模式。
+  - `examples/plugins/echo-agent/`：基于 `packages/plugin-sdk/` 实现（`implements AgentPlugin` + `runAgentPlugin`，零第三方依赖），实现 `rh-agent/1`，包含正常回显、工具调用模拟、提问与复用 SDK 三态去重完成 `ask_resolved`、错误触发词（`/fail`）与延迟 `session` 模式。
   - `examples/plugins/local-im/`：基于 `packages/plugin-sdk/` 实现（`implements ImPlugin` + `runImPlugin`，零第三方依赖），实现 `rh-im/1`，模拟独立的用户 ID 与私聊通道 ID 映射，经本地回环接口演示收发、编辑和模拟平台失败。
 
 ### 7.2 故意引入小错误并恢复的演示用例
@@ -632,13 +637,13 @@ target = "work/main"
 ### 两阶段验收与对比矩阵
 
 - **阶段 A（PR 6 核心验收）**：核心使用 `demo/baseline-agent` + 内置 `fake` IM；接入的核心示例插件为 `examples/plugins/echo-agent` 与 `examples/plugins/local-im`。
-- **阶段 B（全组插件合入后的最终全新目录零 Key 集成验收）**：将最终制品解压到全新临时目录，使用**无预填 `owner`、无预设 `mainChat`** 的初始演示配置接入组员交付的 `dsh`（离线 ACP 回放）、`agy`（离线回放）和 `weixin`（本地 `mock-weixin-server` HTTP 模拟模式）完成全流程验证；若某部署场景选择跳过 `rh pair` 直接预绑定主人，可将预填 `owner` 作为另一种配置方式单独验证，不替代首次配对演示。
+- **阶段 B（全组插件合入后的最终全新目录零 Key 集成验收）**：将最终制品解压到全新临时目录，使用**微信 Bot 未预填 `owner`、全局未设 `mainChat`** 的初始演示配置接入组员交付的 `dsh`（离线 ACP 回放）、`agy`（离线回放）和 `weixin`（本地 `mock-weixin-server` HTTP 模拟模式）完成全流程验证（若同一配置中的 `fake` Bot 仍按 `rh dev --fake` 带有自己的 `socket` 与 `owner`，不影响微信 Bot 的首次配对与自动设主窗口）；若某部署场景选择跳过 `rh pair` 直接预绑定主人，可将预填 `owner` 作为另一种配置方式单独验证，不替代首次配对演示。
 
 | 演示步骤 | 固定输入与操作 | 核对结果 |
 |---|---|---|
 | 1. 基线启动（无插件） | 使用 `demo/config.toml`（仅启用 `fake` IM + `demo/baseline-agent` + 本机看板 `127.0.0.1:7800` `auth = "none"`）启动核心 | 看板打开正常；运行 `rh doctor` 仅列出内置能力 |
 | 2. 接入前输入基线 | 向内置槽位发送固定样例输入：“列出当前目录并确认是否修改” | 基线假 agent 返回固定纯文本响应（无结构化工具协议输出，无额外平台通道） |
-| 3. 零改核心接入插件 | 核对 `git diff src/` 为空且核心二进制 SHA-256 不变；在**无 `owner`、无 `mainChat`** 的 `demo/config.toml` 启用独立构建好的插件并重启 `rhodium`，运行 `rh pair my-weixin` 后经本地模拟服务发送配对码及固定样例输入 | `rh doctor` 与看板列出新 agent 与 `weixin`；`weixin` 插件真实完成 `rh pair` 首次配对与**自动设主窗口**；随后分别验证两类无按钮纯文本交互——1) 选择题或选择面板（`/rh_use`/`/model`）显示数字编号、回复数字完成选择，2) 权限审批提示“允许”或“拒绝”（计划确认提示“批准”或“不批准”）、回复文字完成审批——并完成跨重启主动回推 |
+| 3. 零改核心接入插件 | 核对 `git diff src/` 为空且核心二进制 SHA-256 不变；在**微信 Bot 未预填 `owner`、全局未设 `mainChat`** 的 `demo/config.toml` 启用独立构建好的插件并重启 `rhodium`，运行 `rh pair my-weixin` 后经本地模拟服务发送配对码及固定样例输入 | `rh doctor` 与看板列出新 agent 与 `weixin`；`weixin` 插件真实完成 `rh pair` 首次配对与**自动设主窗口**；随后分别验证两类无按钮纯文本交互——1) 选择题或选择面板（`/rh_use`/`/model`）显示数字编号、回复数字完成选择，2) 权限审批提示“允许”或“拒绝”（计划确认提示“批准”或“不批准”）、回复文字完成审批——并完成跨重启主动回推 |
 | 4. 禁用与失败对照（§4.4） | 1) 将插件设 `enabled = false` 重启并向该槽位发消息；2) 用坏清单启动；3) 在运行中发 `/fail` 触发插件异常退出 | 核心进程始终存活且内置通道正常；禁用提示、坏清单 `rh doctor` 报错与崩溃续跑通知均与 §4.4 完全一致 |
 | 5. 现场捉虫演示（§7.2） | 引入小错误 -> 跑测试命令 -> 恢复 -> 重跑 | 先红后绿，可现场复现 |
 
@@ -685,7 +690,7 @@ target = "work/main"
     1. **获取绑定二维码**：调用 **`POST /ilink/bot/get_bot_qrcode?bot_type=3`**，请求体为 `{"local_token_list": []}`（可选附带至多 10 个本地旧令牌）；请求头携带 `Content-Type: application/json`、`AuthorizationType: ilink_bot_token`、`X-WECHAT-UIN`（随机 uint32 十进制串的 Base64 编码）、`iLink-App-Id: bot` 与 `iLink-App-ClientVersion`（`0x00MMNNPP` 编码十进制串，如 `3.0.1` -> `"196609"`），不带 `Authorization` 与 `base_info`。
     2. **长轮询扫码状态与验证码（PIN）**：调用 `GET /ilink/bot/get_qrcode_status?qrcode=<qrcode>`（35s 长轮询，仅携带应用头 `iLink-App-Id` 与 `iLink-App-ClientVersion`，不带 `Authorization`、`AuthorizationType`、`X-WECHAT-UIN`），按官方协议处理全部状态：`wait`、`scaned`、`confirmed`（保存 `bot_token`、`ilink_bot_id`、`baseurl`、`ilink_user_id`）、`expired`、`scaned_but_redirect`（切往 `https://<redirect_host>` 轮询）、`binded_redirect`（已绑定无新凭据）、含 `need_verifycode` 状态（终端提示输入手机展示的数字并在下次轮询带 `&verify_code=<digits>`，`scaned` 后清除）以及 `verify_code_blocked`（清除数字并重新 `POST` 取码，刷新计数超 3 次停止）。
   - **已鉴权业务请求公共头与 `base_info`**：`getupdates`、`sendmessage`、`getuploadurl` 统一携带 `Content-Type: application/json`、`Authorization: Bearer <bot_token>`、`AuthorizationType: ilink_bot_token`、`X-WECHAT-UIN`、`iLink-App-Id: bot`、`iLink-App-ClientVersion`；请求体均带 `base_info: { channel_version: "3.0.1/rhodium-weixin-0.1.0", bot_agent: "Rhodium" }`（将 `3.x.x` 版本号置于前三位，确保服务端识别）。
-  - **配置与启动分工**：插件提供独立的一次性终端扫码命令（如 `bun run plugins/weixin/login`），扫码成功后把 `token`（及可选 `baseUrl`、`cdnBaseUrl`、`accountId`）写入 `0600`（Windows 为本人私有 ACL）保护的 `config.toml` `[bots.<name>]`（清单声明 `requiredConfig: ["token"]`、`optionalConfig: ["baseUrl", "cdnBaseUrl", "accountId"]`）。启动时插件直接凭配置 `token` 在 `durations.pluginHandshake`（10s）内完成 `init` 握手，不阻塞等扫码；首次配对验收的配置保持**不预填 `owner`、不预设 `mainChat`**，以便完整运行 `rh pair my-weixin`。若运行中 `getupdates` 返回 `ret === -14` 或 `errcode === -14`（登录态过期），插件发送 `connected(up: false, error: "微信登录态已过期，请重新扫码更新 token")` 触发告警。
+  - **配置与启动分工**：插件提供独立的一次性终端扫码命令（如 `bun run plugins/weixin/login`），扫码成功后把 `token`（及可选 `baseUrl`、`cdnBaseUrl`、`accountId`）写入 `0600`（Windows 为本人私有 ACL）保护的 `config.toml` `[bots.<name>]`（清单声明 `requiredConfig: ["token"]`、`optionalConfig: ["baseUrl", "cdnBaseUrl", "accountId"]`）。启动时插件直接凭配置 `token` 在 `durations.pluginHandshake`（10s）内完成 `init` 握手，不阻塞等扫码；首次配对验收的配置保持**微信 Bot 未预填 `owner`、全局未设 `mainChat`**，以便完整运行 `rh pair my-weixin`。若运行中 `getupdates` 返回 `ret === -14` 或 `errcode === -14`（登录态过期），插件发送 `connected(up: false, error: "微信登录态已过期，请重新扫码更新 token")` 触发告警。
   - **运行期状态持久化**：增量同步游标 `get_updates_buf`（`kept` 键 `"sync_buf"`）与每位用户的最新 `context_token`（`kept` 键 `"ctx:<userId>"`）均经 `rh-im/1` 持久保存（核心按 `plugin:<botId>:` 自动隔离）。
 - **收发流程、批次游标推进与附件加解密**：
   - **入站长轮询与批次确认顺序**：持续调用 `POST /ilink/bot/getupdates`（请求体仅发送上次保存的 `get_updates_buf`，默认长轮询 `35s`）。当一次拉取返回同批多条消息 `[A, B, ...]` 与新游标 `nextBuf` 时，插件对批内每条消息依次：1) 先调 `kept_set("ctx:" + from_user_id, context_token)` 保存用户上下文（私聊天然满足 `inbound.chat === inbound.sender === from_user_id`；`item_list[]` 含文本/`ref_msg`、`voice_item.text` 转写或 `voice: true`、以及加密图片/文件/视频的 `attachmentId`）；2) 再通过 `ctx.inbound(msg)` **发出带回执的 `inbound` 请求并等待核心返回 `{ ok: true }`**。**只有当本批所有消息全部拿到核心 `{ ok: true }` 落库回执后，插件才调用 `kept_set("sync_buf", nextBuf)` 推进游标**，绝不越过核心尚未接收的消息。
@@ -713,7 +718,7 @@ target = "work/main"
     - `POST /ilink/bot/getupdates`（支持同批返回 A、B 多条消息与新游标，供验收“A 已落库回执后、B 未送达前中断重拉不丢不重”）；
     - `POST /ilink/bot/sendmessage`（校验 `Authorization: Bearer`、`base_info.channel_version` 与必填 `context_token`，并支持故障注入“服务端已收消息但断开 HTTP 连接/丢回执”以实测 `unknown` 不重发）；
     - `POST /ilink/bot/getuploadurl` 与本地 CDN `/upload` `/download`（覆盖 `upload_full_url`/`full_url` 与 AES-128-ECB 加解密）。
-  - CI 与助教零 Key 演示只需在**无 `owner`、无 `mainChat`** 的初始 `config.toml` 中填写占位 `token = "mock-weixin-token"` 并将 `baseUrl`、`cdnBaseUrl` 指向该本地模拟服务（预绑定 `owner` 仅作为跳过 `rh pair` 的另一种配置方式，不用于首次配对演示）。运行 `rh pair my-weixin` 后由测试脚本或演示控制台经模拟服务发送配对码，实测“首次配对 -> 自动设主窗口 -> 分别验证选择题编号选择与‘允许’/‘拒绝’文字审批 -> 重启恢复 `sync_buf` 与 `context_token` -> 主动回推”。
+  - CI 与助教零 Key 演示只需在**微信 Bot 未预填 `owner`、全局未设 `mainChat`** 的初始 `config.toml` 中填写占位 `token = "mock-weixin-token"` 并将 `baseUrl`、`cdnBaseUrl` 指向该本地模拟服务（预绑定 `owner` 仅作为跳过 `rh pair` 的另一种配置方式，不用于首次配对演示）。运行 `rh pair my-weixin` 后由测试脚本或演示控制台经模拟服务发送配对码，实测“首次配对 -> 自动设主窗口 -> 分别验证选择题编号选择与‘允许’/‘拒绝’文字审批 -> 重启恢复 `sync_buf` 与 `context_token` -> 主动回推”。
 
 ---
 
@@ -755,9 +760,9 @@ flowchart LR
 
 | PR 编号 | 范围与改动文件 | 前置依赖 | 预估规模 | 可并行性 | 验收标准 |
 |---|---|---|---|---|---|
-| **PR 1** | **公开契约、运行时 SDK 与最小可执行检查**：新增 `packages/plugin-sdk/`（`manifest.ts`、`stdio.ts`、`agent.ts`、`im.ts`、`index.ts`，含 `AgentPlugin`/`ImPlugin` 接口、`PluginSendFailedError` 与非阻塞控制分派的 `runAgentPlugin`/`runImPlugin` 运行时辅助，`inbound` 定义为带回执请求并保留 `unknown` 结局，零 `src/` 与第三方依赖）、SDK 运行时单测 `test/plugin-sdk.test.ts`、最小可执行 `scripts/plugin-conformance.ts` 与基于 SDK 的示例插件骨架（`examples/plugins/echo-agent`、`local-im`） | 无 | 小到中（约 1–1.5 人日） | 首步串行 | `packages/plugin-sdk/` 零外部与核心内部导入；`test/plugin-sdk.test.ts` 跑通等待 `ask` 时实时 `answer`/`interrupt`、`answer()` 拒绝清理收尾、`ctx.inbound()` 等回执且并发不死锁、丢回执返回 `unknown` 且不重发；最小契约检查对示例骨架通过 |
+| **PR 1** | **公开契约、运行时 SDK 与最小可执行检查**：新增 `packages/plugin-sdk/`（`manifest.ts`、`stdio.ts`、`agent.ts`、`im.ts`、`index.ts`，含 `AgentPlugin`/`ImPlugin` 接口、`AgentPluginRunOptions`（`interruptTimeoutMs` / `closeTimeoutMs`）、`PluginSendFailedError` 与非阻塞控制分派的 `runAgentPlugin`/`runImPlugin` 运行时辅助，`inbound` 定义为带回执请求并保留 `unknown` 结局，零 `src/` 与第三方依赖）、SDK 运行时单测 `test/plugin-sdk.test.ts`、最小可执行 `scripts/plugin-conformance.ts` 与基于 SDK 的示例插件骨架（`examples/plugins/echo-agent`、`local-im`） | 无 | 小到中（约 1–1.5 人日） | 首步串行 | `packages/plugin-sdk/` 零外部与核心内部导入；`test/plugin-sdk.test.ts` 跑通等待 `ask` 时实时 `answer`/`interrupt`、`answer()` 拒绝后保留 `cancelled` 状态拒收迟到重发包且本地 `interrupt` 超时限时退出（下游调用 1 次、确认 0 次）、`ctx.inbound()` 等回执且并发不死锁、丢回执返回 `unknown` 且不重发；最小契约检查对示例骨架通过 |
 | **PR 2** | **核心查找表放开、清单加载与合规检查**：放开 `src/contracts.ts`、`src/agents.ts`、`src/platforms.ts`、`src/tui.ts`、`src/router.ts`、`src/commands.ts`、`src/im-commands.ts`、`src/feishu.ts`、`src/windows-tui-launch.ts`；新增 `src/plugin-loader.ts`；扩展 `src/config.ts`（相对路径解析、超时期限与保留名含 `herdr`、禁拉起 `claude`）；增强 `src/doctor.ts` 对插件进程子树的 `--bare`/Anthropic 巡检 | PR 1 | 中（约 1.5–2 人日） | 合并后解锁 PR 3/4/5 | 覆盖合法清单、损坏 JSON、保留名（含 `herdr`）、禁 `claude` 启动命令、版本过低、`enabled = false` 与文档同款样例校验的单元测试通过 |
-| **PR 3** | **通用 Agent 插件驱动与幂等托管记录**：新增 `src/plugin-agent.ts`，并补齐基于 SDK 的完整 `examples/plugins/echo-agent/`（复用 SDK 按 `requestId` 两态去重重复 `answer`，暴露下游交付计数供回归断言）；更新 `src/runner.ts`、`src/transcript.ts` 接入 `PluginAgentDriver`，实现重开扫描截断残尾并统一 `fsync`（命中已有 `"k"` 须确认文件已同步后才推进 `outOffset`）、按 `holder.runId` + `lineEndOffset` 幂等落盘、`taken` 事务前读原文、重复 `answer` 至多交付一次、`ask_resolved` 闭合、`pending_asks` 对账、迟到 `session` 落库、`interrupt` 超时升级、`ask_timeout` 默认回答、`init.program` 与带空格路径 | PR 2 | 中大（约 2 人日） | 与 PR 4、PR 5 并行 | 跑通 §7.1 `plugin-agent.test.ts` 全部边界与恢复断言（含半行修复 `/api/messages` + `rh read` 双读、“已写未同步”调用顺序断言、重复 `answer` 交付计数 === 1 且成功前确认数 === 0），以及无下游 CLI 离线回放和带空格多目录测试 |
+| **PR 3** | **通用 Agent 插件驱动与幂等托管记录**：新增 `src/plugin-agent.ts`，并补齐基于 SDK 的完整 `examples/plugins/echo-agent/`（复用 SDK 按 `requestId` 三态去重重复 `answer`，暴露下游交付计数供回归断言）；更新 `src/runner.ts`、`src/transcript.ts` 接入 `PluginAgentDriver`，实现重开扫描截断残尾并统一 `fsync`（命中已有 `"k"` 须确认文件已同步后才推进 `outOffset`）、按 `holder.runId` + `lineEndOffset` 幂等落盘、`taken` 事务前读原文、重复 `answer` 至多交付一次、`ask_resolved` 闭合、`pending_asks` 对账、迟到 `session` 落库、`interrupt` 超时升级、`ask_timeout` 默认回答、`init.program` 与带空格路径 | PR 2 | 中大（约 2 人日） | 与 PR 4、PR 5 并行 | 跑通 §7.1 `plugin-agent.test.ts` 全部边界与恢复断言（含半行修复 `/api/messages` + `rh read` 双读、“已写未同步”调用顺序断言、重复 `answer` 交付计数 === 1 且成功前确认数 === 0），以及无下游 CLI 离线回放和带空格多目录测试 |
 | **PR 4** | **通用 IM 插件适配器与私聊往返**：新增 `src/plugin-im.ts`，并补齐基于 SDK 的完整 `examples/plugins/local-im/`；更新 `src/daemon.ts` 接入 `PluginImAdapter`、能力表校验、懒下载附件、`kept` 键隔离、`inbound` SQLite 落库回执 `{ ok: true }`、保留 `unknown` 不重发、退避熔断与私聊地址归一 | PR 2 | 中大（约 2 人日） | 与 PR 3、PR 5 并行 | 跑通 §7.1 `plugin-im.test.ts`，验证 `user-1` vs `dm-channel-99` 往返、同批 A/B 中断不丢不重（`sync_buf` 在整批回执后推进）、丢回执返回 `unknown` 不重发与陌生人零触发 |
 | **PR 5** | **看板动态元数据与跨平台本地模拟**：更新 `src/board.ts`（动态 `THROUGH` 正则与插件元数据接口）、`web/src/*`（`common.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`tools.tsx`/`write.tsx`/`faces.tsx` 通用渲染与隐藏插件 TUI/导入入口）、`src/fake-im.ts` 与 `src/dev.ts`（增加回环 TCP 与 Windows 打包路径修补） | PR 2 | 中（约 1.5 人日） | 与 PR 3、PR 4 并行 | 看板在未知 agent/platform 下正常展示徽章和托管对话记录；Windows/Linux 下 `rh dev --fake` 跑通 |
 | **PR 6** | **完整契约矩阵、跨平台 CI 与零 Key 演示**：扩展 `scripts/plugin-conformance.ts` 至完整 7+7 矩阵与文档示例校验；复用 `src/detached.ts`（`RHODIUM_TEST_DETACHED=1`）并开放 `holder/src/main.rs` Linux `probe`/`live.lock`；新增 `bunfig.ci.toml`、`scripts/ci-test.sh`、`.github/workflows/ci.yml`（迁移现有 Windows 必跑构建与 `smoke` 步骤并加入插件测试，保留预览打包与探针门控）并调整 `release.yml`；补全 `demo/` 无账号基线假 agent 与演示脚本 | PR 3, 4, 5 | 中（约 1.5 人日） | 汇聚收尾 | GitHub Actions 在 `main` 的 `push` 与 PR 上跑通 Linux 与 Windows 真实构建与测试并留有成功记录；阶段 A 零 Key 演示走通 |
@@ -771,7 +776,7 @@ flowchart LR
 | **核心与集成负责人** | 核心插件化 PR 1–6、公开契约与运行时 SDK（`packages/plugin-sdk/`）、契约测试器、`ci.yml` 与零 Key 基线演示包 | 审查三个插件 PR 的协议合规性、错误恢复与跨平台路径 | PR 1 锁定契约并交付运行时 SDK；PR 6 完成核心 CI 成功记录；全组插件合入后牵头全新目录零 Key 集成验收 |
 | **DeepSeek 插件负责人** | `plugins/dsh/`（可基于 `packages/plugin-sdk/` 实现 `AgentPlugin`：`dsh acp` 协议翻译、独立构建声明、录制 ACP 样例与 `dsh` 插件单元测试/契约测试） | 审查核心驱动 PR 或其他成员插件的边界与失败处理 | 完成 `dsh` PR 合并；通过 `scripts/plugin-conformance.ts` 与阶段 B 集成演示 |
 | **Antigravity 插件负责人** | 先行完成 `agy` 非 TTY 管道稳定性实测；`plugins/agy/`（基于 `packages/plugin-sdk/` 实现 `AgentPlugin`：`stream-json` 或备选 ACP 独立封装、录制样例与单元测试/契约测试） | 审查核心 PR 或 `dsh` / `weixin` PR 的测试覆盖与失败反馈 | 先交付管道实测结论，再完成 `agy` PR 合并并通过契约测试 |
-| **微信官方 Bot 插件负责人** | `plugins/weixin/`（基于 `packages/plugin-sdk/` 实现 `ImPlugin`：锁定官方 `openclaw-weixin` `ffc7ae16` 自绑定协议与长轮询、`inbound` 全批回执后再推 `sync_buf`、`context_token` 保守拒发与 `unknown` 语义、AES 加解密、`mock-weixin-server` 本地模拟服务、单元测试与契约测试） | 审查核心 IM 适配器 PR 或其他插件的错误处理与文档一致性 | 完成 `weixin` PR 合并，在无 `owner`/无 `mainChat` 本地模拟配置下跑通 `rh pair` 首配自动设主窗口、同批 A/B 不丢不重、编号选择与“允许”/“拒绝”审批、以及重启回推 |
+| **微信官方 Bot 插件负责人** | `plugins/weixin/`（基于 `packages/plugin-sdk/` 实现 `ImPlugin`：锁定官方 `openclaw-weixin` `ffc7ae16` 自绑定协议与长轮询、`inbound` 全批回执后再推 `sync_buf`、`context_token` 保守拒发与 `unknown` 语义、AES 加解密、`mock-weixin-server` 本地模拟服务、单元测试与契约测试） | 审查核心 IM 适配器 PR 或其他插件的错误处理与文档一致性 | 完成 `weixin` PR 合并，在微信 Bot 未预填 `owner`、全局未设 `mainChat` 的本地模拟配置下跑通 `rh pair` 首配自动设主窗口、同批 A/B 不丢不重、编号选择与“允许”/“拒绝”审批、以及重启回推 |
 
 **最终交付前统一验收节点（由全体核对，成品随最终提交一起产出）**：
 1. **全新目录零 Key 集成验收**：全组插件 PR 合入后，在全新空目录构建或解压运行包，验证不改动任何核心源码的前提下接入三个插件完成完整对比演示。
