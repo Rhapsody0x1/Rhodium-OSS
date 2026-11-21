@@ -3,7 +3,8 @@
 
 // ---- Agent drivers (architecture §6.1) ----
 
-export type AgentKind = "claude" | "pi" | "codex";
+export type BuiltinAgentKind = "claude" | "pi" | "codex";
+export type AgentKind = BuiltinAgentKind | (string & {});
 
 /** Every event names its conversation and agent process. proc goes up by one each time an
  *  agent process starts; events carrying an older proc than the current one are dropped. */
@@ -237,7 +238,8 @@ export interface AgentDriver {
 // ---- IM adapters (architecture §8.1). Adapters report what the platform can do;
 // the renderer and the router make every fallback decision (architecture §8). ----
 
-export type Platform = "qq" | "telegram" | "feishu" | "fake";
+export type BuiltinPlatform = "qq" | "telegram" | "feishu" | "fake";
+export type Platform = BuiltinPlatform | (string & {});
 
 export type Capabilities = {
   progress: "append" | "edit"; // QQ can only add messages; Telegram edits one message in place

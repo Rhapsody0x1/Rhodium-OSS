@@ -3,7 +3,7 @@
 import { expect, test } from "bun:test";
 import { getMaxUploadSize, MediaFileType } from "@tencent-connect/qqbot-nodejs";
 import { ONBOARD } from "../src/bot-flow";
-import type { AdapterDeps, Platform } from "../src/contracts";
+import type { AdapterDeps, BuiltinPlatform } from "../src/contracts";
 import { ADAPTERS } from "../src/daemon";
 import { FakeBot } from "../src/fake-im";
 import { FeishuAdapter } from "../src/feishu";
@@ -12,7 +12,7 @@ import { QQAdapter } from "../src/qq";
 import { TelegramAdapter } from "../src/telegram";
 import { exec } from "./instance";
 
-const PLATFORM_KEYS = Object.keys(PLATFORMS) as Platform[];
+const PLATFORM_KEYS = Object.keys(PLATFORMS) as BuiltinPlatform[];
 
 test("every platform has a constructor, and each builds its own adapter, with its row's capabilities: none falls back to another's", () => {
   expect(Object.keys(ADAPTERS)).toEqual(PLATFORM_KEYS);

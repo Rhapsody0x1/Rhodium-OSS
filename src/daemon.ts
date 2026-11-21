@@ -8,20 +8,21 @@ import { dlopen } from "bun:ffi";
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
-import { AGENT_KINDS, AGENTS } from "./agents";
+import { agentDef, allAgentKinds } from "./agents";
 import { avatarDir, errorKind, refreshAvatars } from "./avatars";
 import { botFlows } from "./bot-flow";
 import { inFront, serveBoard, type Fronts, type Hear } from "./board";
 import { version } from "../package.json";
 import { addBot, BUILD, COMMIT, fixedOwners, hasHerdr, locate, loadConfig, owners, paired, removeBot, renameTarget, setMainChat, type BotConfig, type Config } from "./config";
-import type { AdapterDeps, AgentKind, BoardAct, Connected, ImAdapter, InboundMessage, Input, Kept, OutboundMessage, Platform, RhCaller, SendResult } from "./contracts";
+import type { AdapterDeps, AgentKind, BoardAct, BuiltinPlatform, Connected, ImAdapter, InboundMessage, Input, Kept, OutboundMessage, Platform, RhCaller, SendResult } from "./contracts";
 import { createDoctor } from "./doctor";
 import { fakeBotFromConfig } from "./fake-im";
 import { makeFeishu } from "./feishu";
 import { keepFile, mediaLine, storeAttachments } from "./media";
 import { replyPictures, saidPictures } from "./reply-images";
 import { freeDisk, trace, upkeep } from "./ops";
-import { amid } from "./platforms";
+import { amid, isBuiltinPlatform } from "./platforms";
+import { loadPlugins, type PluginRegistry } from "./plugin-loader";
 import { makeQQ, msgSeq } from "./qq";
 import { clip } from "./render";
 import { BOARD, chatName, IN_TUI, menus, route, type Ctx, type Decision, type Effect, type Payload, type RhReply, type State, type Write } from "./router";
@@ -84,8 +85,9 @@ export function createLoop(opts: {
   dropBot?: Ctx["dropBot"];
   stepped?: () => void; // after each batch of inputs has committed and its effects are handed off
   pictures?: (conversation: string) => void; // the rows of the local pictures in what its agent said are written (architecture §8.3)
+  plugins?: PluginRegistry;
 }): Loop {
-  const { store, config, perform, capabilities = () => undefined, stepped = () => {}, retarget = () => null, dropBot = () => {}, front = () => false } = opts;
+  const { store, config, perform, capabilities = () => undefined, stepped = () => {}, retarget = () => null, dropBot = () => {}, front = () => false, plugins } = opts;
   const queue: Batch[] = [];
   let draining = false;
   const media = join(config.stateDir, "media");
@@ -184,20 +186,21 @@ export function createLoop(opts: {
             ),
             quoted: input.kind === "im" ? quoted(tx, store, input.message) : null,
             begun: input.kind === "agent" && input.event.type === "turn_start" && input.event.input ? begunBy(tx, input.event.input) : null,
-            models: Object.fromEntries(AGENT_KINDS.filter((a) => AGENTS[a].modelNames).map((a) => [a, namesOf(tx, a)])),
+            models: Object.fromEntries(allAgentKinds().filter((a) => agentDef(a).modelNames).map((a) => [a, namesOf(tx, a)])),
             modelInfo: JSON.parse(tx.get("meta", MODEL_INFO)?.value ?? "{}"),
           };
           const keep = (path: string, max: number) => keepFile(join(config.stateDir, "media"), path, max);
           const diskFree = () => freeDisk(config.stateDir);
           const herdr = () => hasHerdr(config);
           const tuiUnavailable = (agent: AgentKind) => {
+            if (!agentDef(agent).tui) return "该 agent 插件不支持终端模式。";
             if (!windows) return;
-            const program = config.programs[agent];
+            const program = config.programs[agent] ?? agentDef(agent).program;
             try { windowsAgentArgv(agent, [locate(program, config.agentPath) ?? program], config.agentPath); }
             catch (error) { return (error as Error).message; }
           };
           const inboundOf = (chat: string) => tx.find("inbound", { chat }).map((i) => i.id);
-          const d: Decision = route(state, input, { now: Date.now(), newId: ulid, newPairCode, config, capabilities, keepFile: keep, diskFree, herdr, tuiUnavailable, front, retarget, dropBot, inboundOf });
+          const d: Decision = route(state, input, { now: Date.now(), newId: ulid, newPairCode, config, capabilities, keepFile: keep, diskFree, herdr, tuiUnavailable, front, retarget, dropBot, inboundOf, plugins });
           for (const w of d.writes) apply(tx, w);
           for (const e of d.events) tx.append(e);
           // A message of the agent's is whole: its local pictures are checked and kept now, as rh send's
@@ -482,7 +485,7 @@ export function movedTo(n: number, total: number, from: string, to: string): str
 
 /** How the daemon makes each platform's adapter for a [bots.<name>] table (architecture §8.1): id is
  *  the bot's row id. Loaded with the IM SDKs, so by rhodium alone, not by rh. */
-export const ADAPTERS: Record<Platform, (id: string, name: string, bot: BotConfig, deps: AdapterDeps) => ImAdapter> = {
+export const ADAPTERS: Record<BuiltinPlatform, (id: string, name: string, bot: BotConfig, deps: AdapterDeps) => ImAdapter> = {
   qq: makeQQ,
   telegram: makeTelegram,
   feishu: makeFeishu,
@@ -529,6 +532,16 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     log("cannot load config", { path: configPath, error: (err as Error).message });
     process.exit(1);
   }
+  const plugins = loadPlugins(config.plugins, {
+    coreVersion: version,
+    agentPath: config.agentPath,
+    bots: config.bots,
+    programs: config.programs,
+    register: true,
+  });
+  for (const id of plugins.disabled) log("plugin disabled", { plugin: id });
+  for (const f of plugins.failed) log("plugin load failed", { plugin: f.id, error: f.error });
+  for (const err of plugins.configErrors) log("plugin config kind mismatch", { key: err.key, plugin: err.pluginId, error: err.error });
   // Run by hand, by rh dev or in a Herdr pane, the configured unit's journal is some other process's, if anything.
   if (detached || unitOf(process.pid) !== config.unit) config.unit = "";
   const directories = [...new Set([config.stateDir, config.socketDir, config.lockDir])];
@@ -667,6 +680,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     store,
     config,
     capabilities,
+    plugins,
     front: () => inFront(fronts),
     stepped: () => syncMenus(),
     pictures: (conversation) => hearing.forEach((hear) => hear(conversation, { type: "pictures" })),
@@ -737,19 +751,19 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
             (err) => answer(e.id, { ok: false, error: `读不了对话记录：${err}` }),
           );
         case "start":
-          return void runner.start(e.slot);
+          return void runner.start(e.slot).catch((err) => log("cannot start the slot", { slot: e.slot, error: String(err) }));
         case "deliver":
-          return void runner.deliver(e.conversation);
+          return void runner.deliver(e.conversation).catch((err) => log("cannot deliver to the agent", { conversation: e.conversation, error: String(err) }));
         case "stop":
           return void runner.stop(e.conversation, e.brake);
         case "interrupt":
-          return void runner.interrupt(e.conversation);
+          return void runner.interrupt(e.conversation).catch((err) => log("cannot interrupt the agent", { conversation: e.conversation, error: String(err) }));
         case "command":
-          return void runner.command(e);
+          return void runner.command(e).catch((err) => log("cannot run common command", { conversation: e.conversation, command: e.command, error: String(err) }));
         case "answer":
-          return void runner.answer(e.conversation, e.ask);
+          return void runner.answer(e.conversation, e.ask).catch((err) => log("cannot answer the agent", { conversation: e.conversation, ask: e.ask, error: String(err) }));
         case "approval":
-          return void runner.approval(e.conversation, e.on);
+          return void runner.approval(e.conversation, e.on).catch((err) => log("cannot switch approval mode", { conversation: e.conversation, error: String(err) }));
         case "send":
           return queueSend(e.outbound);
         case "edit":
@@ -938,6 +952,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     store,
     ready: recovered.promise,
     deaf,
+    plugins,
     notify(text) {
       log("rh doctor found problems", { report: text }); // also for an instance with no main chat
       loop.enqueue({ kind: "notice", text: `rh doctor 自检：\n${text}` });
@@ -980,6 +995,20 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
       tx.update("bot", { id }, { connState: null });
       return id;
     });
+    if (!isBuiltinPlatform(bot.platform)) {
+      const rec = plugins.plugins[bot.platform];
+      if (rec?.status === "loaded" && rec.manifest.kind !== "im") {
+        log("bot platform references a non-IM plugin; marking bot faulted", { bot: name, platform: bot.platform, kind: rec.manifest.kind });
+      } else if (rec?.status === "failed") {
+        log("bot platform plugin failed to load; marking bot faulted", { bot: name, platform: bot.platform, error: rec.error });
+      } else if (rec?.status === "disabled") {
+        log("bot platform plugin is disabled; marking bot faulted", { bot: name, platform: bot.platform });
+      } else {
+        log("plugin IM adapter not active before IM plugin runtime; marking bot faulted", { bot: name, platform: bot.platform });
+      }
+      store.tx((tx) => void tx.update("bot", { id }, { connState: "faulted" }));
+      return id;
+    }
     const deps: AdapterDeps = { kept: kept(store), seen: (chat, messageId) => store.tx((tx) => seen(tx, { bot: id, chat, messageId })), durations: config.durations };
     adapters.set(id, ADAPTERS[bot.platform](id, name, bot, deps));
     return id;

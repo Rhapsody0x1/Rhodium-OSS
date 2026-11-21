@@ -1,7 +1,7 @@
 // Commands typed in IM (product §5.6): which of the three kinds a /x is, and the one format the
 // common commands' results take in IM, the same on every agent (architecture §6.1). Lists to pick
 // from go as panels (src/panels.ts); the router shows them.
-import { AGENTS } from "./agents";
+import { agentDef } from "./agents";
 import { tilde } from "./commands";
 import type { AgentKind, Choice, CommandResult, ContextUse, QuotaWindow } from "./contracts";
 import { moment, money, percent, span, tokens as k } from "./panels";
@@ -32,7 +32,7 @@ export function statusText(r: Extract<CommandResult, { command: "status" }>, slo
   // model is the default's.
   const name = r.model ?? (r.effort ? "默认" : null);
   const model = name && r.effort ? `${name}${name.endsWith("）") ? "" : " "}${r.effort}` : name;
-  const settings = [md`Agent：${AGENTS[slot.agent as AgentKind]?.statusName ?? slot.agent}`, ...(model ? [md`模型：${model}`] : []), ...(r.ultracode ? ["已开启 ultracode"] : [])];
+  const settings = [md`Agent：${agentDef(slot.agent as AgentKind).statusName}`, ...(model ? [md`模型：${model}`] : []), ...(r.ultracode ? ["已开启 ultracode"] : [])];
   const c = r.context && contextUse(r.context);
   const state = [md`目录：\`${tilde(slot.dir)}\``, ...(c ? [md`上下文：${c[0]} ${c[1]}`] : [])];
   const full = (r.limits ?? []).filter((l) => l.usedPercent >= 80);
@@ -77,12 +77,13 @@ export function usageText(r: Extract<CommandResult, { command: "usage" }>, agent
   if (r.credits !== undefined) quota.push(md`**${r.credits.toFixed(2)}** credits 余额`);
   const s = r.session;
   // Claude's cost is what the tokens would cost at API prices, not what you pay (story 396).
-  const cost = s?.cost === undefined ? [] : [md`**${money(s.cost)}**${AGENTS[agent].apiPrice ? " 等效 API 价格" : ""}`];
+  const def = agentDef(agent);
+  const cost = s?.cost === undefined ? [] : [md`**${money(s.cost)}**${def.apiPrice ? " 等效 API 价格" : ""}`];
   const sections = [
-    ...(quota.length ? [md`## ${AGENTS[agent].name} 额度\n${quota.join("\n")}`] : []),
+    ...(quota.length ? [md`## ${def.name} 额度\n${quota.join("\n")}`] : []),
     ...(s ? [md`## 当前对话\n${[...cost, md`**${k(s.tokens.total)}** 总 Tokens 消耗`].join("\n")}`] : []),
   ];
-  return sections.join("\n\n") || `${AGENTS[agent].name} 没有用量可查。`;
+  return sections.join("\n\n") || `${def.name} 没有用量可查。`;
 }
 
 /** How long till a moment less than a day ahead, to follow what happens then: "（还有 2 小时 10 分）". */

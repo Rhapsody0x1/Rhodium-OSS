@@ -3,12 +3,12 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, linkSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { AGENT_KINDS } from "./agents";
-import type { AgentKind } from "./contracts";
+import type { AgentKind, BuiltinAgentKind } from "./contracts";
 import { nativeProcess } from "./tui-process";
 
 type PaneRequest = { agent: AgentKind; argv: string[]; env: Record<string, string>; unset: string[]; identity: string };
 
-const packages: Record<AgentKind, string[]> = {
+const packages: Partial<Record<BuiltinAgentKind, string[]>> = {
   claude: ["@anthropic-ai/claude-code"],
   pi: ["@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"],
   codex: ["@openai/codex"],
@@ -63,7 +63,7 @@ function managedPi(program: string, shim: string, args: string[], path: string, 
         marker.entrypoint?.type !== "script" || relative(program, marker.entrypoint.path) !== "" || digest(readFileSync(js, "utf8")) !== piLauncherJs) throw unsupported("pi");
     const version = readFileSync(join(root, "current-version"), "utf8").trim();
     if (!/^[0-9a-z._+-]+$/i.test(version) || version === "." || version === "..") throw unsupported("pi");
-    const name = packages.pi[0]!, pkg = join(root, "releases", version, "node_modules", name);
+    const name = packages.pi![0]!, pkg = join(root, "releases", version, "node_modules", name);
     const meta = JSON.parse(readFileSync(join(pkg, "package.json"), "utf8"));
     const inner = resolve(pkg, typeof meta.bin === "string" ? meta.bin : meta.bin.pi);
     const rel = relative(pkg, inner);
@@ -77,11 +77,12 @@ function managedPi(program: string, shim: string, args: string[], path: string, 
 
 /** Herdr can report node.exe for an external npm pane. Only the package's declared bin is the agent. */
 export function isWindowsAgentNodeEntry(kind: AgentKind, script: string | undefined): boolean {
-  if (!script || !isAbsolute(script) || !file(script)) return false;
+  const pkgs = packages[kind as BuiltinAgentKind];
+  if (!pkgs || !script || !isAbsolute(script) || !file(script)) return false;
   for (let dir = dirname(script); ; dir = dirname(dir)) {
     try {
       const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-      if (packages[kind].includes(manifest.name)) {
+      if (pkgs.includes(manifest.name)) {
         const bin = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.[kind];
         return typeof bin === "string" && relative(resolve(dir, bin), script) === "";
       }
@@ -96,6 +97,8 @@ export function windowsAgentArgv(kind: AgentKind, argv: string[], path = process
 }
 
 function launchFor(kind: AgentKind, argv: string[], path: string, localAppData?: string): Launch {
+  const pkgs = packages[kind as BuiltinAgentKind];
+  if (!pkgs) throw unsupported(kind);
   const [program, ...args] = argv;
   if (!program || !isAbsolute(program) || !file(program)) throw unsupported(kind);
   if (extname(program).toLowerCase() === ".exe" && executable(program)) return { argv };
@@ -108,7 +111,7 @@ function launchFor(kind: AgentKind, argv: string[], path: string, localAppData?:
   const shim = normalized(text);
   const dir = dirname(program);
   const modules = basename(dir).toLowerCase() === ".bin" ? dirname(dir) : join(dir, "node_modules");
-  for (const name of packages[kind]) {
+  for (const name of pkgs) {
     const pkg = join(modules, name);
     let manifest;
     try { manifest = JSON.parse(readFileSync(join(pkg, "package.json"), "utf8")); }

@@ -14,7 +14,7 @@ import { existsSync } from "node:fs";
 import { displayDirectory as tilde, expandHome, parentDirectory, sameDirectory, userHome } from "./paths";
 import { dirname, extname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { AGENT_KINDS, AGENTS, TYPING } from "./agents";
+import { AGENT_KINDS, agentDef, isBuiltinAgent, TYPING } from "./agents";
 import { askCard, askText, type AskCard, type AskPrompt } from "./asks";
 import { avatarDir } from "./avatars";
 import type { BotFlows } from "./bot-flow";
@@ -30,7 +30,7 @@ import { moment } from "./panels";
 import { agentCommands } from "./commands";
 import { AT_BOARD, askGone, contactOf, IN_TUI, resumeWaits, settingsOf, slotState, STATE, target, WEB_PAUSED, WEB_QUEUE, workspaceName, type Payload, type RhReply } from "./router";
 import { namesOf, type Ask, type Bot, type Chat, type Conversation, type Event, type Outbound, type Slot, type Store, type Tx } from "./store";
-import { PLATFORMS } from "./platforms";
+import { allPlatformLabels, platformDef } from "./platforms";
 import { splitSource, withoutSource } from "./prompt";
 import { paneSession } from "./tui";
 import { codeRef } from "./local";
@@ -310,7 +310,7 @@ async function importableAt(req: Request, store: Store, cfg: Config, herdrSocket
   if (!ownPage(req)) return new Response("只认看板自己的页面发来的请求。\n", { status: 403 });
   const agent = p.get("agent") as AgentKind;
   const words = (p.get("q") ?? "").trim();
-  if (!AGENT_KINDS.includes(agent) || (!p.get("dir") && !words)) return new Response("要 agent，和 dir 或 q。\n", { status: 400 });
+  if (!isBuiltinAgent(agent) || (!p.get("dir") && !words)) return new Response("要 agent，和 dir 或 q。\n", { status: 400 });
   const dir = p.get("dir") ? await pathOf(p.get("dir")!) : undefined;
   const search = words ? { words, full: p.get("full") === "1" } : undefined;
   const taken = used(store);
@@ -318,7 +318,7 @@ async function importableAt(req: Request, store: Store, cfg: Config, herdrSocket
   type Pane = { pane_id: string; agent_session?: { agent: string; value: string }; foreground_cwd?: string; cwd?: string };
   const slotsPanes = new Set(store.tx((tx) => tx.find("slot", { mode: "tui" })).map((s) => s.herdrPane));
   const panes =
-    AGENTS[agent].paneImport && hasHerdr(cfg)
+    agentDef(agent).paneImport && hasHerdr(cfg)
       ? ((await herdrSocket()
           .then((at) => request(at, "session.snapshot"))
           .then((r) => r.snapshot.panes as Pane[], () => [])) as Pane[]).filter((x) => {
@@ -364,7 +364,7 @@ async function importPreview(req: Request, p: URLSearchParams): Promise<Response
   const agent = p.get("agent") as AgentKind;
   const session = p.get("session") ?? "";
   const before = p.get("before") === null ? Infinity : count(p.get("before"));
-  if (!AGENT_KINDS.includes(agent) || Number.isNaN(before)) return new Response("要 agent，before 不对。\n", { status: 400 });
+  if (!isBuiltinAgent(agent) || Number.isNaN(before)) return new Response("要 agent，before 不对。\n", { status: 400 });
   // findConversations takes hex digits and "-" alone: no path, no glob.
   const file = /^[0-9a-f-]+$/i.test(session) ? (await findConversations(session)).find((c) => c.agent === agent && c.id === session)?.file : undefined;
   if (!file) return new Response("没有这段对话。\n", { status: 404 });
@@ -514,7 +514,7 @@ function topologyRows(store: Store, cfg: Config, now: number): TopologyData {
 /** Whether the chat writes tool lines in full: as /rh_verbose set it, else as the router has it by
  *  default, in full where the platform edits a message in place (Telegram's, Feishu's, and the fake
  *  IM's bots like them). */
-const verboseIn = (c: Chat, bot: BotConfig, cfg: Config) => (c.verbose ?? +(PLATFORMS[bot.platform].capabilities(bot, cfg.durations).progress === "edit")) === 1;
+const verboseIn = (c: Chat, bot: BotConfig, cfg: Config) => (c.verbose ?? +(platformDef(bot.platform)?.capabilities(bot, cfg.durations).progress === "edit")) === 1;
 
 /** A count from the query string: a whole number from 0 up, or NaN. */
 const count = (v: string | null) => (v !== null && /^\d{1,15}$/.test(v) ? Number(v) : NaN);
@@ -545,15 +545,17 @@ export type From = { platform: Platform; bot: string | null; botAvatar: string |
  *  as rh send's and reports', or when it has none, as what you type in the terminal. */
 export type Block = Exclude<Read, { kind: "user" }> | (Extract<Read, { kind: "user" }> & { from: From | null });
 
-// A source line naming a chat (router's chatName): the platform, the bot when it has several, which chat.
-const THROUGH = new RegExp(`^(${Object.values(PLATFORMS).map((p) => p.label).join("|")})(?: Bot (.+) 的| ?)(私聊|聊天窗口)(?:${SENT_AT}.*)?$`);
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** The bot and chat a source line names, as the bots are now (each by the name chats call it).
  *  Written when its platform had one bot, the line names none: the platform's only bot now, if it
  *  still has one. id null for a bot gone or one of several. null for a line naming no chat. */
 export function saidThrough(source: string | null, bots: { id: string; name: string; platform: Platform }[]): { platform: Platform; bot: string | null; id: string | null; private: boolean } | null {
-  const m = source === null ? null : THROUGH.exec(source);
-  const platform = m && (Object.keys(PLATFORMS) as Platform[]).find((p) => PLATFORMS[p].label === m[1]);
+  const labels = allPlatformLabels().sort((a, b) => b.label.length - a.label.length);
+  if (!labels.length) return null;
+  const through = new RegExp(`^(${labels.map((p) => escapeRegex(p.label)).join("|")})(?: Bot (.+) 的| ?)(私聊|聊天窗口)(?:${SENT_AT}.*)?$`);
+  const m = source === null ? null : through.exec(source);
+  const platform = m && labels.find((p) => p.label === m[1])?.id;
   if (!m || !platform) return null;
   const mine = bots.filter((b) => b.platform === platform);
   const bot = m[2] !== undefined ? mine.find((b) => b.name === m[2]) : mine.length === 1 ? mine[0] : undefined;
@@ -983,7 +985,7 @@ async function slotDetail(store: Store, cfg: Config, id: string, alive: BoardMet
       lifetime: s.lifetime,
       settings: settingsOf(s, cfg),
       // As /status names it (router's remembered); the default by the model it uses (story 407).
-      model: conv && AGENTS[conv.agent].modelNames ? (namesOf(tx, conv.agent)[s.model ?? "default"] ?? s.model) : s.model,
+      model: conv && agentDef(conv.agent).modelNames ? (namesOf(tx, conv.agent)[s.model ?? "default"] ?? s.model) : s.model,
       effort: s.effort,
       ultracode: s.ultracode === 1,
       pane: s.mode === "tui" ? s.herdrPane : null,

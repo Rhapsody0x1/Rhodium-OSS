@@ -2,7 +2,7 @@
 // `rh --skill`, IM's /rh_help and the command menus are all generated from it.
 // User-facing text is Chinese, like the rest of what the user reads.
 import { displayDirectory as tilde } from "./paths";
-import { AGENT_KINDS, AGENTS, DEFAULT_AGENT } from "./agents";
+import { AGENT_KINDS, AGENTS, agentDef, allAgentKinds, DEFAULT_AGENT, isBuiltinAgent } from "./agents";
 import { durations, parseDuration } from "./config";
 import type { AgentKind, Choice, Importable, MenuItem, RowButton } from "./contracts";
 import { moment, span, type Candidate } from "./panels";
@@ -380,7 +380,7 @@ export const IM_COMMANDS: ImCommandDef[] = [
     name: "rh_agent",
     usage: `${KINDS} [!]`,
     summary: "换 agent",
-    list: (l) => AGENT_KINDS.map((a) => ({ label: AGENTS[a].name, command: `/rh_agent ${a}`, current: a === l.agent })),
+    list: (l) => allAgentKinds().map((a) => ({ label: agentDef(a).name, command: `/rh_agent ${a}`, current: a === l.agent })),
     hint: () => "后面写 agent，例如 /rh_agent pi；加 ! 先打断当前回合",
   },
   { name: "rh_release", summary: "从 TUI 切回无头", hint: (s) => `后面只写槽位，例如 /rh_release ${s}；不写就是这里的槽位` },
@@ -429,9 +429,15 @@ export const IM_COMMANDS: ImCommandDef[] = [
 export const imCommand = (name: string) => IM_COMMANDS.find((c) => c.name === name);
 
 /** The agent's commands, as the / menu and the board's palette list them (product §5.7): no rh_ one,
- *  only those the agent takes; with no agent, only those every agent takes. */
-export const agentCommands = (agent?: AgentKind | null) =>
-  IM_COMMANDS.filter((c) => !c.name.startsWith("rh_") && (!c.agents || (!!agent && c.agents.includes(agent))));
+ *  only those the agent takes; with no agent, only those every built-in agent takes. */
+export const agentCommands = (agent?: AgentKind | null) => {
+  if (!agent || isBuiltinAgent(agent)) {
+    return IM_COMMANDS.filter((c) => !c.name.startsWith("rh_") && (!c.agents || (!!agent && c.agents.includes(agent))));
+  }
+  const def = agentDef(agent);
+  const allowed = new Set<string>(["new", "stop", "resume", ...(def.supportedCommands ?? [])]);
+  return IM_COMMANDS.filter((c) => !c.name.startsWith("rh_") && allowed.has(c.name) && (c.name !== "ultracode" || def.ultracode));
+};
 
 /** The / menu (product §5.7): the agent's commands, then /rh_help. */
 export const slashMenu = (agent?: AgentKind | null): MenuItem[] =>

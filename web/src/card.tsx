@@ -4,7 +4,7 @@ import { cn } from "cn";
 import { Box, ChartPie, ChevronDown, ChevronRight, Copy, FoldVertical, Gauge, Info, LoaderCircle, MessageSquare, RotateCcw, Square, SquarePen, X, type LucideIcon } from "lucide-react";
 import { Popover } from "@base-ui/react/popover";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { AGENTS } from "../../src/agents";
+import { agentDef } from "../../src/agents";
 import type { AgentKind, ContextUse, ExtraUsage, QuotaWindow, SessionUse, Tokens } from "../../src/contracts";
 import { moment, money, percent, span, tokens } from "../../src/panels";
 import type { InfoCard as Card, StatusCard } from "../../src/router";
@@ -296,7 +296,7 @@ export function QuotaPart({ agent, q }: { agent: AgentKind; q: { limits: QuotaWi
   const now = Date.now();
   if (!q.limits.length && !q.extra && q.credits === undefined) return null;
   return (
-    <Section icon={<AgentLogo agent={agent} />} title={`${AGENTS[agent].name} 额度`}>
+    <Section icon={<AgentLogo agent={agent} />} title={`${agentDef(agent).name} 额度`}>
       {q.limits.map((l, i) => (
         <Window key={i} l={l} now={now} />
       ))}
@@ -326,7 +326,7 @@ export function SessionPart({ agent, s }: { agent: AgentKind; s: SessionUse }) {
         <div className={ROW}>
           费用
           <span className="ml-auto font-semibold">{money(s.cost)}</span>
-          {AGENTS[agent].apiPrice && <span className="text-sm text-muted-foreground">等效 API 价格</span>}
+          {agentDef(agent).apiPrice && <span className="text-sm text-muted-foreground">等效 API 价格</span>}
         </div>
       )}
       <button aria-expanded={open} onClick={() => setOpen(!open)} className={cn(ROW, PRESS, "text-left")}>
@@ -418,7 +418,7 @@ export function Status({ s, run }: { s: StatusCard; run: (command: string) => Pr
       <Section icon={<Box className="size-3.5" />} title="模型设置">
         <div className={row}>
           Agent
-          <span className="ml-auto">{AGENTS[s.agent].statusName}</span>
+          <span className="ml-auto">{agentDef(s.agent).statusName}</span>
         </div>
         {(s.model || s.effort) && (
           <div className={row}>

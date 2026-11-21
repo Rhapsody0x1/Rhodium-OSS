@@ -4,10 +4,10 @@
 // construction (daemon.ts's ADAPTERS), and the bot-making flow's scan or check of a paste (bot-flow.ts's ONBOARD). A platform
 // missing from any of them does not compile. No imports but types: every rh call loads this.
 import type { BotConfig } from "./config";
-import type { Capabilities, Durations, Platform } from "./contracts";
+import type { BuiltinPlatform, Capabilities, Durations, Platform } from "./contracts";
 
 /** The platforms rh bot makes a bot on: all but the fake, which a test or rh dev runs. */
-export type Made = Exclude<Platform, "fake">;
+export type Made = Exclude<BuiltinPlatform, "fake">;
 
 export type PlatformDef = {
   label: string; // as Rhodium's own words call it: QQ, 飞书 (source lines, chat names)
@@ -89,7 +89,7 @@ export const feishuCapabilities = (editEvery: number): Capabilities => ({
   markdown: { extensions: ["html", "emoji"], links: "http" },
 });
 
-export const PLATFORMS: { [P in Platform]: PlatformDef & (P extends Made ? { bot: BotDef } : unknown) } = {
+export const PLATFORMS: { [P in BuiltinPlatform]: PlatformDef & (P extends Made ? { bot: BotDef } : unknown) } = {
   qq: {
     label: "QQ",
     capabilities: () => QQ_CAPABILITIES,
@@ -118,6 +118,45 @@ export const PLATFORMS: { [P in Platform]: PlatformDef & (P extends Made ? { bot
 /** The platforms rh bot makes a bot on, with how. */
 export const MADE = Object.fromEntries(Object.entries(PLATFORMS).flatMap(([p, def]) => ("bot" in def ? [[p, def.bot]] : []))) as Record<Made, BotDef>;
 
+const pluginPlatforms = new Map<string, PlatformDef>();
+
+export function registerPlatformPlugin(id: string, def: PlatformDef): void {
+  if (isBuiltinPlatform(id)) throw new Error(`cannot override builtin platform ${id}`);
+  pluginPlatforms.set(id, def);
+}
+
+export function unregisterPlatformPlugin(id: string): void {
+  pluginPlatforms.delete(id);
+}
+
+export function resetPlatformPlugins(): void {
+  pluginPlatforms.clear();
+}
+
+export function isBuiltinPlatform(p: string): p is BuiltinPlatform {
+  return Object.hasOwn(PLATFORMS, p);
+}
+
+export function isRegisteredPlatform(p: string): boolean {
+  return isBuiltinPlatform(p) || pluginPlatforms.has(p);
+}
+
+export function platformDef(p: Platform): PlatformDef | undefined {
+  if (isBuiltinPlatform(p)) return PLATFORMS[p];
+  return pluginPlatforms.get(p);
+}
+
+export function platformLabel(p: Platform): string {
+  return platformDef(p)?.label ?? p;
+}
+
+export function allPlatformLabels(): { id: Platform; label: string }[] {
+  return [
+    ...(Object.entries(PLATFORMS) as [BuiltinPlatform, PlatformDef][]).map(([id, def]) => ({ id, label: def.label })),
+    ...[...pluginPlatforms.entries()].map(([id, def]) => ({ id, label: def.label })),
+  ];
+}
+
 /** A [bots.<name>] table with platform = "fake" picks its capability table with like = one of the
  *  others. perChatPerSecond, the fake's own key, swaps the table's send limit for that rate, so tests
  *  need not wait out Telegram's one request a second. buttons = "false", its own too, takes the
@@ -127,7 +166,7 @@ export const MADE = Object.fromEntries(Object.entries(PLATFORMS).flatMap(([p, de
  *  sets draftTtl, so a test need not wait out Telegram's 30 s; stream, its own too, sets stream, so
  *  one need not wait out QQ's 9 minutes. */
 function fakeCapabilities(bot: BotConfig, durations: Durations): Capabilities {
-  const like = bot.like as Platform | undefined;
+  const like = bot.like as BuiltinPlatform | undefined;
   if (!like || like === "fake" || !Object.hasOwn(PLATFORMS, like)) {
     const likes = Object.keys(MADE).map((p) => `"${p}"`);
     throw new Error(`config: a fake bot needs like = ${likes.slice(0, -1).join(", ")} or ${likes.at(-1)}`);

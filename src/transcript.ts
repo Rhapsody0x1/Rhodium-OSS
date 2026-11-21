@@ -6,7 +6,8 @@ import { open, readdir, stat, type FileHandle } from "node:fs/promises";
 import { insideDirectory, localCandidate, localDrivePath, sameDirectory, userHome } from "./paths";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { plain, quoteOf, type AgentKind, type Used } from "./contracts";
+import { isBuiltinAgent } from "./agents";
+import { plain, quoteOf, type AgentKind, type BuiltinAgentKind, type Used } from "./contracts";
 import { pictureType, saveMedia, withoutMedia, type Media } from "./media";
 import { splitSource, withoutSource } from "./prompt";
 import { clip, describe as shownCall } from "./render";
@@ -737,6 +738,7 @@ const codexWindow = (w: any) => w && { usedPercent: w.used_percent, windowDurati
 
 /** What file, the agent's transcript, says of its context and quota, read back from its end (TranscriptMeter). */
 export async function meterIn(file: string, agent: AgentKind): Promise<TranscriptMeter> {
+  if (!isBuiltinAgent(agent)) return {};
   const found: TranscriptMeter = {};
   for (let at = Infinity; ; ) {
     const page = await readPage(file, at, 100, "backward");
@@ -817,7 +819,7 @@ type Format = {
 
 const codexHome = (home: string) => process.env.CODEX_HOME || join(home, ".codex");
 
-const FORMATS: Record<AgentKind, Format> = {
+const FORMATS: Record<BuiltinAgentKind, Format> = {
   claude: {
     root: (home) => process.platform === "win32" && process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, "projects") : join(home, ".claude/projects"),
     folder: (dir) => claudeProjectDir(dir),
@@ -870,13 +872,18 @@ async function codexNames(id?: string): Promise<Map<string, string>> {
   return names;
 }
 
+const formatOf = (agent: AgentKind): Format | undefined => (isBuiltinAgent(agent) ? FORMATS[agent] : undefined);
+
 /** What the agent ran on in its transcript file, of the lines since `since` or before it: claudeSettings, piSettings, codexSettings. */
-export const settingsIn = (agent: AgentKind, file: string, since: number, side: "after" | "before"): Promise<Used> => FORMATS[agent].settings(file, since, side);
+export const settingsIn = (agent: AgentKind, file: string, since: number, side: "after" | "before"): Promise<Used> => {
+  const f = formatOf(agent);
+  return f ? f.settings(file, since, side) : Promise.resolve({});
+};
 
 /** Every agent's conversations started in `dir`, most recently modified first. */
 export async function listConversations(dir: string): Promise<Conversation[]> {
   dir = resolve(dir);
-  const files = await Promise.all((Object.keys(FORMATS) as AgentKind[]).map(async (agent) => (await startedThere(dir, agent)).map((file) => describe(file, agent, FORMATS[agent].idOf(file)))));
+  const files = await Promise.all((Object.keys(FORMATS) as BuiltinAgentKind[]).map(async (agent) => (await startedThere(dir, agent)).map((file) => describe(file, agent, FORMATS[agent].idOf(file)))));
   const list = await Promise.all(files.flat().map((p) => p.catch(gone)));
   return list.filter((c) => c !== undefined).sort((a, b) => b.modifiedAt.getTime() - a.modifiedAt.getTime());
 }
@@ -892,7 +899,8 @@ function gone(e: any): undefined {
  *  Claude's subagents' files are not in the folder. */
 // ponytail: reads the first line of each of Codex's files at each look; keep them by mtime if that gets slow.
 async function startedThere(dir: string, agent: AgentKind): Promise<string[]> {
-  const f = FORMATS[agent];
+  const f = formatOf(agent);
+  if (!f) return [];
   if (f.folder) return jsonlFiles(sessionsDir(dir, agent));
   const heads = await Promise.all(
     (await globbed(agent, "")).map(async (file) => {
@@ -907,7 +915,8 @@ async function startedThere(dir: string, agent: AgentKind): Promise<string[]> {
 /** The agent's transcript file of conversation id, started in dir; null if there is none. Codex's, by
  *  its id alone, which no other directory's thread has. */
 export async function transcriptFile(dir: string, agent: AgentKind, id: string): Promise<string | null> {
-  const f = FORMATS[agent];
+  const f = formatOf(agent);
+  if (!f) return null;
   const files = f.folder ? await jsonlFiles(sessionsDir(resolve(dir), agent)) : await globbed(agent, id);
   return files.find((file) => f.idOf(file) === id) ?? null;
 }
@@ -917,13 +926,14 @@ export async function transcriptFile(dir: string, agent: AgentKind, id: string):
 export async function findConversations(prefix: string): Promise<{ agent: AgentKind; id: string; file: string }[]> {
   if (!/^[0-9a-f-]+$/i.test(prefix)) throw new Error(`not a conversation id: ${prefix}`); // no glob syntax
   const found: { agent: AgentKind; id: string; file: string }[] = [];
-  for (const agent of Object.keys(FORMATS) as AgentKind[]) for (const file of await globbed(agent, prefix)) found.push({ agent, id: FORMATS[agent].idOf(file), file });
+  for (const agent of Object.keys(FORMATS) as BuiltinAgentKind[]) for (const file of await globbed(agent, prefix)) found.push({ agent, id: FORMATS[agent].idOf(file), file });
   return found;
 }
 
 /** The agent's transcripts of the ids starting with prefix, which has no glob syntax, in any directory. */
 async function globbed(agent: AgentKind, prefix: string): Promise<string[]> {
-  const f = FORMATS[agent];
+  const f = formatOf(agent);
+  if (!f) return [];
   const files: string[] = [];
   try {
     for await (const file of new Bun.Glob(f.glob(prefix)).scan({ cwd: f.root(userHome()), absolute: true })) files.push(file);
@@ -935,6 +945,7 @@ async function globbed(agent: AgentKind, prefix: string): Promise<string[]> {
 
 /** Whether the agent has a transcript of conversation id, in whatever directory it was started. */
 export async function hasTranscript(agent: AgentKind, id: string): Promise<boolean> {
+  if (!isBuiltinAgent(agent)) return false;
   return (await findConversations(id)).some((c) => c.agent === agent && c.id === id);
 }
 
@@ -954,7 +965,8 @@ export async function startedIn(file: string): Promise<string | null> {
 
 /** Where the agent keeps the transcripts of conversations started in the (absolute) dir: Codex, all of them in one. */
 export function sessionsDir(dir: string, agent: AgentKind): string {
-  return join(FORMATS[agent].root(userHome()), FORMATS[agent].folder?.(process.platform === "win32" ? localDrivePath(dir) : dir) ?? "");
+  const f = formatOf(agent);
+  return f ? join(f.root(userHome()), f.folder?.(process.platform === "win32" ? localDrivePath(dir) : dir) ?? "") : "";
 }
 
 export type Message = { role: "user" | "assistant"; text: string };
@@ -1015,8 +1027,9 @@ export async function describe(file: string, agent: AgentKind, id: string): Prom
   let startedAt: Date | undefined;
   let first: string | undefined;
   // A session name, as pi's set with /name and renamed at will: the last one counts, so it reads to the end.
-  let name = await FORMATS[agent].nameOf?.(id);
-  const named = FORMATS[agent].named;
+  const f = formatOf(agent);
+  let name = await f?.nameOf?.(id);
+  const named = f?.named ?? false;
   for (let at = 0; startedAt === undefined || first === undefined || named; ) {
     const page = await readPage(file, at, 100, "forward");
     if (page.entries.length === 0) break;
@@ -1270,8 +1283,9 @@ export type Search = { words: string; full: boolean };
 /** agent's conversation in file as listed, if search (if any) finds it; else null. names: Codex's
  *  thread names. */
 export async function listed(file: string, agent: AgentKind, search?: Search, names?: Map<string, string>, signal?: AbortSignal): Promise<Listed | null> {
+  const f = formatOf(agent);
   const s = await summaryOf(file, agent, signal);
-  const id = FORMATS[agent].idOf(file);
+  const id = f ? f.idOf(file) : basename(file, ".jsonl");
   const title = titleOf(s, names?.get(id));
   let hit: Hit | null = null;
   if (search && !fold(title).includes(fold(search.words)) && !(search.full && (hit = await hitInFile(file, agent, search.words, signal)))) return null;
@@ -1291,6 +1305,8 @@ export async function importable(
   agent: AgentKind,
   o: { dir?: string; search?: Search; cursor?: string; skip: (id: string) => boolean; signal?: AbortSignal; budget?: number },
 ): Promise<{ list: Listed[]; cursor?: string; partial?: true }> {
+  const f = formatOf(agent);
+  if (!f) return { list: [] };
   const until = Date.now() + (o.budget ?? 2_000);
   const paths = o.dir ? await startedThere(o.dir, agent) : await globbed(agent, "");
   const files = (await Promise.all(paths.map(async (file) => ({ file, mtime: (await stat(file).catch(gone))?.mtimeMs }))))
@@ -1300,16 +1316,16 @@ export async function importable(
   const rest = files.filter((f) => f.mtime < mtime || (f.mtime === mtime && f.file > after));
   const names = agent === "codex" ? await codexNames() : undefined;
   const list: Listed[] = [];
-  const cursor = (f: { file: string; mtime: number }) => `${f.mtime} ${f.file}`;
-  for (const [i, f] of rest.entries()) {
+  const cursor = (item: { file: string; mtime: number }) => `${item.mtime} ${item.file}`;
+  for (const [i, item] of rest.entries()) {
     if (list.length === PAGE) return { list, cursor: cursor(rest[i - 1]!) };
     if (o.signal?.aborted) throw o.signal.reason;
-    if (!o.skip(FORMATS[agent].idOf(f.file))) {
-      const c = await listed(f.file, agent, o.search, names, o.signal).catch(gone);
+    if (!o.skip(f.idOf(item.file))) {
+      const c = await listed(item.file, agent, o.search, names, o.signal).catch(gone);
       // A Codex subagent's thread is its parent's (startedThere leaves it out of a directory's).
-      if (c && c.count > 0 && !summaries.get(f.file)?.subagent) list.push(c);
+      if (c && c.count > 0 && !summaries.get(item.file)?.subagent) list.push(c);
     }
-    if (Date.now() > until && i + 1 < rest.length) return { list, cursor: cursor(f), partial: true };
+    if (Date.now() > until && i + 1 < rest.length) return { list, cursor: cursor(item), partial: true };
   }
   return { list };
 }
@@ -1317,9 +1333,11 @@ export async function importable(
 /** How many of agent's conversations started in the absolute dir have something said and are not ones
  *  skip names, and when the newest last changed, as GET /api/folder has them. None for none. */
 export async function conversationsIn(dir: string, agent: AgentKind, skip: (id: string) => boolean): Promise<{ count: number; at: number } | undefined> {
+  const f = formatOf(agent);
+  if (!f) return undefined;
   let [count, at] = [0, 0];
   for (const file of await startedThere(dir, agent)) {
-    if (skip(FORMATS[agent].idOf(file))) continue;
+    if (skip(f.idOf(file))) continue;
     const mtime = await stat(file).then((s) => s.mtimeMs, gone);
     if (mtime === undefined || !(await hasMessage(file, agent).catch(gone))) continue;
     [count, at] = [count + 1, Math.max(at, mtime)];

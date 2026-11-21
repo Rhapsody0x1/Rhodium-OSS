@@ -3,10 +3,11 @@
 import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { checkWindowsPermissions, createPrivateWindows, windows, windowsRoot } from "./windows";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, dirname, join, resolve } from "node:path";
 import { version } from "../package.json";
 import { AGENTS } from "./agents";
-import type { AgentKind, Platform } from "./contracts";
+import type { AgentKind, BuiltinAgentKind, Platform } from "./contracts";
+import { isClaudeExecutable } from "./pi-pane-credentials";
 import type { Bot } from "./store";
 import { PLATFORMS } from "./platforms";
 
@@ -46,6 +47,9 @@ export const durations = {
   doctorEvery: "24h", // architecture §12, the daily rh doctor; never 0
   pairCode: "10m", // architecture §8.5, how long a code from rh pair works
   boardIdle: "10s", // architecture §11, how long the board keeps a quiet request open (Bun's idleTimeout, whole seconds)
+  pluginHandshake: "10s",
+  pluginInterrupt: "10s",
+  pluginRpc: "30s",
 };
 
 const limits = {
@@ -71,7 +75,7 @@ const defaults = { approval: false, crashResume: true, autoContinue: true, typeI
 
 // The agents' executables and Herdr's CLI: an absolute path, or a bare name looked up on PATH.
 // Tests point them at the fake agent and the fake Herdr.
-const programs = { ...(Object.fromEntries(Object.entries(AGENTS).map(([k, a]) => [k, a.program])) as Record<AgentKind, string>), herdr: "herdr" };
+const programs = { ...(Object.fromEntries(Object.entries(AGENTS).map(([k, a]) => [k, a.program])) as Record<BuiltinAgentKind, string>), herdr: "herdr" };
 
 /** Where a [programs] entry is, looked up afresh each time so an update reaches the next process:
  *  an absolute path as is, a bare name on PATH (the agents'); null if it is not there. */
@@ -166,6 +170,13 @@ const OWNER_KEY = crypto.getRandomValues(new Uint8Array(32));
  *  §8.5.1, §11): keyed, so it gives no account back, a Telegram one of a few digits say. */
 export const ownerCode = (account: string): string => new Bun.CryptoHasher("sha256", OWNER_KEY).update(account).digest("hex").slice(0, 8);
 
+export type PluginConfigEntry = {
+  path: string;
+  enabled: boolean;
+  config: Record<string, string>;
+  configError?: string;
+};
+
 export type Config = {
   stateDir: string; // rh.db and hold/<conversation>/
   socketDir: string; // rh socket and hold/<conversation>.sock
@@ -186,7 +197,8 @@ export type Config = {
   limits: typeof limits;
   defaults: typeof defaults;
   bots: Record<string, BotConfig>;
-  programs: typeof programs;
+  programs: typeof programs & Record<string, string>;
+  plugins: Record<string, PluginConfigEntry>;
   // closed: what is wrong in [board], which closes the board alone; it then listens on 127.0.0.1, on
   // the port given, or the default if that is what is wrong.
   // extra: the [[board.extra]] entries (ADR-0014), none while closed.
@@ -240,6 +252,61 @@ function overlay<T extends Record<string, unknown>>(where: string, base: T, give
   return out as T;
 }
 
+function parsePlugins(raw: unknown, configPath: string): Record<string, PluginConfigEntry> {
+  if (raw === undefined) return {};
+  if (!isTable(raw)) throw new Error("config: plugins must be a table");
+  const baseDir = dirname(resolve(configPath));
+  const out: [string, PluginConfigEntry][] = [];
+  for (const [id, entry] of Object.entries(raw)) {
+    if (!isTable(entry)) {
+      out.push([id, { path: "", enabled: true, config: {}, configError: `config: plugins.${id} must be a table` }]);
+      continue;
+    }
+    const errors: string[] = [];
+    for (const k of Object.keys(entry)) {
+      if (k !== "path" && k !== "enabled" && k !== "config") {
+        errors.push(`config: unknown key plugins.${id}.${k}`);
+      }
+    }
+    const rawEnabled = entry.enabled;
+    let enabled = true;
+    if (rawEnabled !== undefined) {
+      if (typeof rawEnabled !== "boolean") errors.push(`config: plugins.${id}.enabled must be a boolean`);
+      else enabled = rawEnabled;
+    }
+    const rawPath = entry.path;
+    let resolvedPath = "";
+    if (typeof rawPath !== "string" || !rawPath.trim()) {
+      if (enabled) errors.push(`config: plugins.${id}.path must be a non-empty string`);
+    } else {
+      resolvedPath = resolve(baseDir, rawPath);
+    }
+    const rawConfig = entry.config ?? {};
+    const cfgEntries: [string, string][] = [];
+    if (!isTable(rawConfig)) {
+      errors.push(`config: plugins.${id}.config must be a table`);
+    } else {
+      for (const [ck, cv] of Object.entries(rawConfig)) {
+        if (typeof cv !== "string") {
+          errors.push(`config: plugins.${id}.config.${ck} must be a string`);
+        } else {
+          cfgEntries.push([ck, cv]);
+        }
+      }
+    }
+    out.push([
+      id,
+      {
+        path: resolvedPath,
+        enabled,
+        config: Object.fromEntries(cfgEntries),
+        ...(errors.length ? { configError: errors.join("; ") } : {}),
+      },
+    ]);
+  }
+  return Object.fromEntries(out);
+}
+
 /** Where the socket directory is when the config does not say; `rh` looks there too. */
 export function defaultSocketDir(env: Record<string, string | undefined>): string {
   if (windows) return join(windowsRoot(env), "run");
@@ -253,9 +320,11 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
   else if (mode !== 0o600) {
     throw new Error(`config: ${path} has mode 0${mode.toString(8)}; it holds bot tokens, chmod it to 0600`);
   }
-  const { durations: d, limits: l, defaults: t, bots: b, programs: p, board: w, herdr: h, ...top } = Bun.TOML.parse(
+  const { durations: d, limits: l, defaults: t, bots: b, programs: p, plugins: pl, board: w, herdr: h, ...top } = Bun.TOML.parse(
     readFileSync(path, "utf8"),
   ) as Record<string, unknown>;
+
+  const plugins = parsePlugins(pl, path);
 
   const paths = overlay(
     "",
@@ -282,8 +351,9 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
     // rh send me is to you; rh send web was, and an agent still running may write it (product §5.9).
     if (name === "me") throw new Error("config: bots.me: a bot may not be named me: rh send me is to you; rename it");
     if (name === "web") throw new Error("config: bots.web: a bot may not be named web: an agent still running may write rh send web, which is gone; rename it");
-    if (!platforms.includes((bot as BotConfig).platform)) {
-      throw new Error(`config: bots.${name}.platform must be one of ${platforms.join(", ")}`);
+    const plat = (bot as BotConfig).platform;
+    if (!platforms.includes(plat) && !Object.hasOwn(plugins, plat)) {
+      throw new Error(`config: bots.${name}.platform must be one of ${[...platforms, ...Object.keys(plugins)].join(", ")}`);
     }
     const { owner } = bot as Record<string, unknown>;
     if (Array.isArray(owner)) {
@@ -302,9 +372,32 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
     throw new Error("config: mainChat must be <bot>/<chat id>, with the bot one of [bots]");
   }
 
-  const progs = overlay("programs.", programs, p);
-  for (const [k, v] of Object.entries(progs)) {
-    if (!isAbsolute(v) && (!v || v.includes("/"))) throw new Error(`config: programs.${k} must be an absolute path or a bare name`);
+  if (p !== undefined && !isTable(p)) throw new Error("config: programs. must be a table");
+  const progs: typeof programs & Record<string, string> = { ...programs };
+  for (const [k, v] of Object.entries(p ?? {})) {
+    const isBuiltinProg = Object.hasOwn(programs, k);
+    const hasPlugin = Object.hasOwn(plugins, k);
+    if (!isBuiltinProg && !hasPlugin) {
+      throw new Error(`config: unknown key programs.${k}`);
+    }
+    const failProg = (msg: string) => {
+      if (isBuiltinProg) throw new Error(msg);
+      const entry = plugins[k]!;
+      entry.configError = entry.configError ? `${entry.configError}; ${msg}` : msg;
+    };
+    if (typeof v !== "string") {
+      failProg(`config: programs.${k} must be a string`);
+      continue;
+    }
+    if (!isAbsolute(v) && (!v || v.includes("/"))) {
+      failProg(`config: programs.${k} must be an absolute path or a bare name`);
+      continue;
+    }
+    if (k !== "claude" && isClaudeExecutable(v)) {
+      failProg(`config: programs.${k} may not run claude`);
+      continue;
+    }
+    progs[k] = v;
   }
 
   const lim = overlay("limits.", limits, l);
@@ -339,6 +432,7 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
     defaults: overlay("defaults.", defaults, t),
     bots,
     programs: progs,
+    plugins,
     board: closed
       ? { ...board, port: isPort(web.port) ? web.port : board.port, closed, extra: [] }
       : { ...(web as BoardEntry), closed, extra: entries.slice(1) as BoardEntry[] },

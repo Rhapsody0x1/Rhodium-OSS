@@ -13,7 +13,8 @@ import { entryName, formatGB, formatMB, hasHerdr, locate, type BoardEntry, type 
 import { log } from "./daemon";
 import { request, sessionSocket } from "./herdr";
 import { daily, freeDisk } from "./ops";
-import { doctorBare } from "./pi-pane-credentials";
+import { doctorBare, auditPluginProcessTree } from "./pi-pane-credentials";
+import type { PluginRegistry } from "./plugin-loader";
 import { detached, holderExecutable } from "./detached";
 import { nativeHolders } from "./native-holders";
 import { sameDirectory } from "./paths";
@@ -388,8 +389,48 @@ async function entryFindings(e: BoardEntry, board: string, deaf: string | undefi
 // ponytail: a guess at "too big", well past limits.outRestartMB, past which an agent process goes between turns (architecture §4.3).
 const BIG_OUT_LOG = 512 * 2 ** 20;
 
+/** Reports configured plugin statuses and audits live plugin subtrees for Claude/bare/credential violations. */
+export function pluginFindings(
+  registry?: PluginRegistry,
+  runningPlugins: { id: string; pid: number }[] = [],
+): { info: string[]; findings: Finding[] } {
+  const info: string[] = [];
+  const findings: Finding[] = [];
+  for (const rec of Object.values(registry?.plugins ?? {})) {
+    if (rec.status === "loaded") {
+      info.push(`插件 ${rec.id}（${rec.manifest.kind} ${rec.manifest.version}）已加载`);
+    } else if (rec.status === "disabled") {
+      info.push(`插件 ${rec.id}：已禁用`);
+    } else {
+      findings.push({ level: "错误", text: `插件 ${rec.id} 加载失败：${rec.error}` });
+    }
+  }
+  for (const err of registry?.configErrors ?? []) {
+    findings.push({ level: "错误", text: err.error });
+  }
+  for (const { id, pid } of runningPlugins) {
+    for (const hit of auditPluginProcessTree(pid)) {
+      const why = [
+        hit.claudeExec && "拉起 claude",
+        hit.bare && "--bare / CLAUDE_CODE_SIMPLE",
+        hit.anthropic && "携带 ANTHROPIC_/CLAUDE 环境变量",
+      ].filter(Boolean);
+      if (why.length) {
+        findings.push({ level: "错误", text: `插件 ${id} 进程 ${hit.pid} 合规异常：${why.join("、")}` });
+      }
+    }
+  }
+  return { info, findings };
+}
+
 /** Runs every check. notify: something you should hear about even without asking. */
-async function check(cfg: Config, store: Store, deaf: ReadonlyMap<string, string>): Promise<{ text: string; notify: boolean }> {
+async function check(
+  cfg: Config,
+  store: Store,
+  deaf: ReadonlyMap<string, string>,
+  plugins?: PluginRegistry,
+  pluginPids: { id: string; pid: number }[] = [],
+): Promise<{ text: string; notify: boolean }> {
   const info: string[] = [];
   const found: Finding[] = [];
   const error = (text: string) => found.push({ level: "错误", text });
@@ -548,6 +589,9 @@ async function check(cfg: Config, store: Store, deaf: ReadonlyMap<string, string
   }
 
   found.push(...(await boardFindings(cfg.board, undefined, deaf)));
+  const plug = pluginFindings(plugins, pluginPids);
+  info.push(...plug.info);
+  found.push(...plug.findings);
 
   notify ||= found.some((f) => f.level === "错误");
   const lines = [...info, ...found.map((f) => `${f.level}：${f.text}`)];
@@ -562,7 +606,15 @@ async function check(cfg: Config, store: Store, deaf: ReadonlyMap<string, string
  * takeover is done, the holder rows say what the last rhodium left (architecture §5). deaf: the
  * board's entries that could not listen, by name, with why, as the daemon fills it.
  */
-export function createDoctor(o: { cfg: Config; store: Store; notify: (text: string) => void; ready: Promise<unknown>; deaf?: ReadonlyMap<string, string> }) {
+export function createDoctor(o: {
+  cfg: Config;
+  store: Store;
+  notify: (text: string) => void;
+  ready: Promise<unknown>;
+  deaf?: ReadonlyMap<string, string>;
+  plugins?: PluginRegistry;
+  pluginPids?: () => { id: string; pid: number }[];
+}) {
   let running: Promise<string> | null = null;
   const failed = (err: unknown) => log("rh doctor failed", { error: String(err) });
   /** Runs the checks, or joins the run under way, and resolves with the report. */
@@ -570,7 +622,7 @@ export function createDoctor(o: { cfg: Config; store: Store; notify: (text: stri
     if (running) return running;
     setMeta(o.store, LAST_RUN, String(Date.now()));
     return (running = o.ready
-      .then(() => check(o.cfg, o.store, o.deaf ?? new Map()))
+      .then(() => check(o.cfg, o.store, o.deaf ?? new Map(), o.plugins, o.pluginPids?.() ?? []))
       .then((r) => {
         if (!asked && r.notify) o.notify(r.text);
         return r.text;

@@ -9,7 +9,7 @@ import { cn } from "cn";
 import { Archive, ArchiveRestore, ArrowUp, Check, ChevronDown, CircleAlert, Copy, CornerUpRight, FileText, Info, Import, List, ListPlus, LoaderCircle, Paperclip, Pause, Pencil, Pin, PinOff, Play, Plus, Quote, RotateCw, Square, SquarePen, SquarePlus, SquareTerminal, Terminal, Trash2, Workflow, X, Zap, type LucideIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type RefObject, type UIEvent } from "react";
 import { useLocation } from "wouter";
-import { AGENTS, TYPING } from "../../src/agents";
+import { agentDef, TYPING } from "../../src/agents";
 import { parseCommand, plain, quoteOf, quoting, type AgentKind, type BoardAct } from "../../src/contracts";
 import type { Candidate } from "../../src/panels";
 import type { RhReply } from "../../src/router";
@@ -603,7 +603,7 @@ export function byPage(words: string, agent: AgentKind | null): "agent" | "model
   if (/^\/rh_help(\s|$)/.test(w)) return "help";
   if (/^\/(usage|context)$/.test(w)) return "meter";
   const name = /^\/(rh_agent|model|effort|ultracode)$/.exec(w)?.[1];
-  return !name || (name === "ultracode" && agent !== null && !AGENTS[agent].ultracode) ? null : name === "rh_agent" ? "agent" : "model";
+  return !name || (name === "ultracode" && agent !== null && !agentDef(agent).ultracode) ? null : name === "rh_agent" ? "agent" : "model";
 }
 
 /** Where you type to each slot shown, told words to put after what is there. */
