@@ -75,7 +75,7 @@ This MIT-licensed course edition was exported from `RhodiumTeam/Rhodium`'s Windo
    bun scripts/plugin-conformance.ts --manifest examples/plugins/local-im/plugin.json
    ```
 
-For the test-failure exercise, make a disposable checkout with `git worktree add --detach ../rhodium-bug-demo HEAD`, enter it, and run `bun install --frozen-lockfile`. In `src/plugin-loader.ts`, reverse the `>` in `compareSemver(manifest.minRhodium, opts.coreVersion) > 0`. Run `bun --config=bunfig.ci.toml test test/plugin-loader.test.ts` and observe the minimum-version assertion fail. In that disposable checkout run `git restore -- src/plugin-loader.ts` and repeat the test; it passes.
+For the test-failure exercise, make a disposable checkout with `git worktree add --detach ../rhodium-bug-demo HEAD`, enter it, and run `bun install --frozen-lockfile`. In `src/plugin-loader.ts`, change the `<` to `>` in `compareSemver(opts.coreVersion, manifest.minRhodium) < 0`. Run `bun --config=bunfig.ci.toml test test/plugin-loader.test.ts` and observe the minimum-version assertion fail. In that disposable checkout run `git restore -- src/plugin-loader.ts` and repeat the test; it passes.
 
 Linux and Windows CI run on PRs and pushes to main. To verify the native macOS process-tree audit and demo, select **Plugin CI → Run workflow → Run only the native macOS check**. The [plugin specification](docs/spec/plugins.md) defines the matrix and the two acceptance stages.
 

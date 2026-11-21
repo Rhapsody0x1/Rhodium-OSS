@@ -7,7 +7,8 @@ test.skipIf(!process.env.RHODIUM_TEST_EXE)("the packaged daemon runs the account
     stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 100_000,
   });
   const [out, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-  expect({ code, error }).toEqual({ code: 0, error: "" });
+  if (code !== 0) throw new Error(`Demo exited ${code}:\n${out}\n${error}`);
+  expect(error).toBe("");
   expect(out).toContain("PASS baseline");
   expect(out).toContain("PASS plugin approval");
   expect(out).toContain("PASS failure isolation");

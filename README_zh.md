@@ -75,7 +75,7 @@ Rhodium 提供命令行工具 `rh`，agent 自己也能直接调用：
    bun scripts/plugin-conformance.ts --manifest examples/plugins/local-im/plugin.json
    ```
 
-现场演示测试捉错时，用 `git worktree add --detach ../rhodium-bug-demo HEAD` 建一个临时副本，进入后执行 `bun install --frozen-lockfile`。在 `src/plugin-loader.ts` 中把 `compareSemver(manifest.minRhodium, opts.coreVersion) > 0` 的比较符改成 `< 0`，执行 `bun --config=bunfig.ci.toml test test/plugin-loader.test.ts`，观察最低版本断言失败。在这个临时副本内执行 `git restore -- src/plugin-loader.ts`，重跑同一测试，断言通过。
+现场演示测试捉错时，用 `git worktree add --detach ../rhodium-bug-demo HEAD` 建一个临时副本，进入后执行 `bun install --frozen-lockfile`。在 `src/plugin-loader.ts` 中把 `compareSemver(opts.coreVersion, manifest.minRhodium) < 0` 的比较符改成 `>`，执行 `bun --config=bunfig.ci.toml test test/plugin-loader.test.ts`，观察最低版本断言失败。在这个临时副本内执行 `git restore -- src/plugin-loader.ts`，重跑同一测试，断言通过。
 
 Linux 和 Windows 在提交 PR 和推送至 main 时自动检查。验证 macOS 原生进程树巡检和演示时，在 Actions 选择 **Plugin CI → Run workflow → Run only the native macOS check**。[插件规格](docs/spec/plugins.md) 列出了契约矩阵和两阶段验收内容。
 

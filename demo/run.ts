@@ -1,10 +1,12 @@
 // Exercise the shipped binary and both example plugins in a disposable, account-free instance.
+import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
+import { descendantPids } from "../scripts/lib/process-tree";
 import { createPrivateWindows, windows } from "../src/windows";
 
 const repo = resolve(import.meta.dir, "..");
@@ -108,10 +110,19 @@ async function demo() {
     };
     void pipe(dev.stdout, chunk => { printed += chunk; });
     void pipe(dev.stderr, chunk => { errors += chunk; });
-    await until(() => {
-      if (dev!.exitCode !== null) throw new Error("demo startup: " + errors + (existsSync(log) ? readFileSync(log, "utf8").slice(-1500) : ""));
-      return existsSync(log) && readFileSync(log, "utf8").split("\n").some(line => line.includes('"msg":"ready"') && JSON.parse(line).board === "127.0.0.1:" + boardPort);
-    }, "isolated board");
+    try {
+      await until(async () => {
+        if (dev!.exitCode !== null) throw new Error("rh dev exited: " + dev!.exitCode);
+        // A busy port belongs to us only if its daemon is a child of this launcher.
+        try {
+          const response = await fetch(board + "/api/rhodium", { redirect: "error", signal: AbortSignal.timeout(1200) });
+          return response.ok && descendantPids(dev!.pid).includes((await response.json()).pid);
+        } catch { return false; }
+      }, "isolated board");
+    } catch (err) {
+      const tail = existsSync(log) ? readFileSync(log, "utf8").slice(-1500) : "no dev.log";
+      throw new Error(`${(err as Error).message}: ${errors} ${tail}`);
+    }
     connected = true;
   }
   async function stop() {
@@ -163,8 +174,13 @@ async function demo() {
     const report = await doctor();
     for (const id of ["local-im", "echo-agent"]) if (!report.includes(id) || !(await meta()).some(p => p.id === id && p.status === "loaded")) throw new Error("missing plugin: " + id);
     inject(question);
-    const detail = async () => (await (await fetch(board + "/api/slot?id=" + slots[1])).json());
-    await until(async () => (await detail()).asks.length === 1, "echo approval");
+    // An open ask is visible on the board before the platform has received it. Type the IM answer only after delivery.
+    const db = new Database(join(state, "rh.db"), { readonly: true });
+    try {
+      const delivered = db.query("SELECT id FROM ask WHERE slot = ? AND status = 'open' AND pushedAt IS NOT NULL");
+      await until(() => posts.some(p => p.channel === "demo-dm-99" && p.message.text.includes("允许吗"))
+        && delivered.get(slots[1]!) !== null, "delivered echo approval");
+    } finally { db.close(); }
     inject("允许");
     await until(() => posts.some(p => p.channel === "demo-dm-99" && p.message.text.includes("Echo:")), "approved DM reply");
     const blocks = (await (await fetch(board + "/api/messages?slot=" + slots[1])).json()).blocks;

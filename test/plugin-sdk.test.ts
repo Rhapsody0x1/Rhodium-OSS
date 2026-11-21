@@ -1589,15 +1589,43 @@ process.stdin.resume();
     const early = await runConformance(file, undefined, "1500");
     expect(early.code).not.toBe(0);
     expect(early.stderr).toContain("before ask_resolved");
+    const childFile = join(dir, "helper.ts"), readyFile = join(dir, "helper-ready");
+    writeFileSync(childFile, `
+      import { writeFileSync, renameSync } from "node:fs";
+      const http = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(String(process.pid)) });
+      const ready = ${JSON.stringify(readyFile)};
+      writeFileSync(ready + ".tmp", http.url.href);
+      renameSync(ready + ".tmp", ready);
+      setTimeout(() => process.exit(0), 15000);
+    `);
     writeFileSync(script, `
+      import { spawn } from "node:child_process";
+      import { existsSync, readFileSync } from "node:fs";
       import { runAgentPlugin } from ${sdk}; import { EchoAgentPlugin } from ${echo};
-      const child = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 15000)"], {stdio: ["ignore","ignore","ignore"]});
+      // Without detached, Windows normally ends the helper together with its parent.
+      const child = spawn(process.execPath, [${JSON.stringify(childFile)}], {detached:true, windowsHide:true, stdio:"ignore"});
       child.unref();
+      const ready = ${JSON.stringify(readyFile)};
+      while (!existsSync(ready)) await Bun.sleep(5);
+      if (await (await fetch(readFileSync(ready, "utf8"), {proxy:""})).text() !== String(child.pid)) throw new Error("helper did not start");
       runAgentPlugin(new EchoAgentPlugin());
     `);
+    const url = () => readFileSync(readyFile, "utf8");
+    const ping = () => fetch(url(), {keepalive: false, proxy: "", signal: AbortSignal.timeout(1000)});
+    // Verify the fixture itself: with no checker managing it the helper really outlives the wrapper.
+    const control = Bun.spawn([process.execPath, script], {stdin: "pipe", stdout: "ignore", stderr: "pipe"});
+    control.stdin.write('{"type":"close"}\n');
+    control.stdin.end();
+    const [code, err] = await Promise.all([control.exited, new Response(control.stderr).text()]);
+    expect({code, err}).toEqual({code: 0, err: ""});
+    const pid = Number(await (await ping()).text());
+    expect(pid).toBeGreaterThan(0);
+    process.kill(pid, "SIGKILL");
+    rmSync(readyFile);
     const leaked = await runConformance(file, undefined, "1500");
     expect(leaked.code).not.toBe(0);
     expect(leaked.stderr).toContain("left a child process alive");
+    await expect(ping()).rejects.toThrow();
   }, 15_000);
 
   test("plain IM conformance accepts capability skips and verifies restored channel, cursor and context, connection and explicit refusal", async () => {
