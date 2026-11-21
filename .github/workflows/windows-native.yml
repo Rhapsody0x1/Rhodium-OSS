@@ -1,7 +1,9 @@
 name: Windows native exploration
 on:
   push:
-    branches: [windows-native]
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       repeat_pi_identity:
@@ -15,11 +17,11 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: windows-native-exploration-${{ inputs.herdr_tui_probe && 'herdr' || 'daemon' }}
+  group: windows-native-${{ github.ref }}-${{ inputs.herdr_tui_probe && 'herdr' || 'daemon' }}
   cancel-in-progress: true
 jobs:
   smoke:
-    if: github.ref == 'refs/heads/windows-native' && !inputs.herdr_tui_probe
+    if: ${{ !inputs.herdr_tui_probe }}
     runs-on: windows-2022
     timeout-minutes: 12
     steps:
@@ -86,7 +88,7 @@ jobs:
           compression-level: 0
           retention-days: 14
   herdr-tui:
-    if: github.ref == 'refs/heads/windows-native' && inputs.herdr_tui_probe
+    if: ${{ inputs.herdr_tui_probe }}
     runs-on: windows-2022
     timeout-minutes: 5
     steps:
