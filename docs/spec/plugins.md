@@ -1,6 +1,6 @@
 # 插件化规格
 
-这篇回答：Rhodium-OSS 怎么把 agent 驱动和 IM 适配器做成插件体系、插件协议与加载失败行为怎么定、怎么支持跨平台和 CI、如何零 Key 演示、三个组员插件对核心有什么要求、实现怎么拆 PR，以及哪些决策待拍板。
+这篇回答：Rhodium-OSS 怎么把 agent 驱动和 IM 适配器做成插件体系、插件协议与加载失败行为怎么定、怎么支持跨平台和 CI、如何零 Key 演示、三个组员插件对核心有什么要求、实现怎么拆 PR，以及已拍板的选型决策记录。
 
 前置阅读：[术语表](../../GLOSSARY.md)、[产品说明](../product.md)、[ADR-0002](../adr/0002-one-daemon-plus-holders.md)、[ADR-0007](../adr/0007-satori-for-bot-apps.md)、[ADR-0008](../adr/0008-own-im-adapters.md)、[ADR-0009](../adr/0009-no-acp.md)、[ADR-0011](../adr/0011-codex-private-app-server.md)、[ADR-0015](../adr/0015-out-of-process-plugins.md)、[架构](../architecture.md)、[IM 文字与交互规范](../im-style.md)、[v1 规格](v1.md)
 
@@ -66,10 +66,10 @@ flowchart TD
   end
 
   subgraph PluginIM["IM 侧扩展边界"]
-    PI["IM 插件进程<br/>(额外 IM / local-im)"]:::agent
+    PI["IM 插件进程<br/>(weixin / local-im)"]:::agent
     PLAT["外部 IM 平台或本地模拟服务"]:::ext
     PIM -- "stdio JSON-RPC (rh-im/1)" --> PI
-    PI -- "Gateway / REST" --> PLAT
+    PI -- "HTTP 长轮询 / REST" --> PLAT
   end
 ```
 
@@ -99,9 +99,9 @@ sequenceDiagram
   A-->>H: taken + turn_start + text_delta + tool_start + ask
   H-->>C: out + ack
   C->>C: taken 事务前读原输入 + 按幂等键写托管对话记录
-  C->>IM: send(过程消息 / 提问卡片)
-  U->>IM: 点击按钮回答提问
-  IM->>C: inbound(button)
+  C->>IM: send(过程消息 / 提问消息或纯文本编号选项)
+  U->>IM: 点击按钮或回复编号回答提问
+  IM->>C: inbound(button / text)
   C->>H: write(answer)
   H->>A: stdin(answer)
   A-->>H: ask_resolved + item + turn_end(reply)
@@ -265,24 +265,24 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 | `kept_get` | 请求 | 读取核心为本 Bot 持久化保存的断点、游标或私聊通道映射 | 参数：`{ key: string }`；返回：`{ value: string \| null }` |
 | `kept_set` | 请求 | 写入或删除本 Bot 的持久化键值（核心自动加 `plugin:<botId>:` 前缀隔离） | 参数：`{ key: string, value: string \| null }`；返回：`{ ok: true }` |
 
-#### 私聊地址归一与往返约定
+#### 私聊地址归一、会话上下文与往返约定
 
-现有 `src/router.ts` 在首次配对时依赖 `m.chat === m.sender` 自动将该私聊设为主窗口，后续的 `ownerChat()` 和主动推送也统一把私聊记录的 `platformChatId` 与 `owners` 中的用户 ID 直接匹配。为保证在“用户 ID 与私聊频道/房间 ID 分离”的平台（例如 Discord 的 `user.id` vs DM `channel.id`、Matrix 的 MXID vs `room_id`）上“配对 -> 主窗口 -> 重启 -> 主动发回原私聊”全部跑通，契约选定**由 IM 插件负责私聊地址归一与还原**（与核心内置的 `src/feishu.ts` 保持同一模式）：
+现有 `src/router.ts` 在首次配对时依赖 `m.chat === m.sender` 自动将该私聊设为主窗口，后续的 `ownerChat()` 和主动推送也统一把私聊记录的 `platformChatId` 与 `owners` 中的用户 ID 直接匹配。为保证各类外部 IM 平台都能跑通“配对 -> 主窗口 -> 重启 -> 主动发回原私聊”，契约统一采用**由 IM 插件负责私聊地址归一与出站上下文持久还原**（与核心内置的 `src/feishu.ts` 保持同一模式）：
 
-1. **入站归一**：收到私聊消息或私聊按钮交互时，IM 插件把 `inbound.sender` 与 `inbound.chat` **都填为平台用户 ID**，同时在发送 `inbound` 前通过内存缓存与 `kept_set("dm:" + userId, platformChannelId)` 持久化“用户 ID -> 平台私聊通道 ID”映射。
-2. **出站还原**：核心调用 `send(chat, ...)`、`edit(chat, ...)` 或 `drop_buttons(chat, ...)` 时，`chat` 传入的是用户 ID。插件按顺序解析实际投递目标：先查内存缓存 -> 未命中查 `kept_get("dm:" + chat)` -> 仍未命中（如首次配置了 `owner` 尚未收到入站就主动发消息）则调用平台接口按用户 ID 创建或获取私聊通道并写回 `kept_set`。
-3. 如此核心的 `chat` 表、主窗口绑定与跨重启主动消息路由完全不用区分平台地址模型，插件重启后通过 `kept_get` 也能立刻还原通道地址。
+1. **入站归一**：收到私聊消息或交互时，IM 插件把 `inbound.sender` 与 `inbound.chat` **都填为平台用户 ID**；若平台私聊通道/房间 ID 与用户 ID 分离，在发 `inbound` 前用 `kept_set("dm:" + userId, platformChannelId)` 持久化通道映射；若平台（例如微信官方 Bot `openclaw-weixin`）本身用 `from_user_id` 发私聊、但每次回复必须携带最近收到的 `context_token`，同样在发 `inbound` 前用 `kept_set("ctx:" + userId, contextToken)` 持久化上下文令牌（并持久化同步游标 `sync_buf`）。
+2. **出站还原**：核心调用 `send(chat, ...)`、`edit(chat, ...)` 或 `drop_buttons(chat, ...)` 时，`chat` 传入的是用户 ID。插件按顺序解析：先查内存缓存 -> 未命中查 `kept_get("dm:" + chat)` / `kept_get("ctx:" + chat)`；对地址分离平台必要时按用户 ID 创建或获取私聊通道并写回 `kept_set`，对依赖入站会话上下文的平台（如微信官方 Bot）若无已保存的 `context_token` 则明确返回 `{ status: "failed", error: ... }`。
+3. 如此核心的 `chat` 表、主窗口绑定与跨重启主动消息路由完全不用区分平台地址模型，插件重启后通过 `kept_get` 也能立刻还原通道或会话上下文。
 
 #### 输入输出示例（`rh-im/1`）
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"init","params":{"proto":1,"botId":"bot_01","botName":"my-discord","config":{"token":"redacted-at-runtime","guildPolicy":"dm-only"}}}
-{"jsonrpc":"2.0","id":1,"result":{"proto":1,"capabilities":{"progress":"edit","editEvery":1000,"finalEdit":true,"buttons":true,"maxButtons":25,"sendLimit":{"kind":"rate","perChatPerSecond":2},"menu":{"scope":"global","maxItems":50},"maxTextLength":2000,"maxFileBytes":{"image":10485760,"file":26214400},"markdown":{"extensions":[]}}}}
+{"jsonrpc":"2.0","id":1,"method":"init","params":{"proto":1,"botId":"bot_01","botName":"my-weixin","config":{"token":"redacted-at-runtime","baseUrl":"https://ilinkai.weixin.qq.com"}}}
+{"jsonrpc":"2.0","id":1,"result":{"proto":1,"capabilities":{"progress":"append","buttons":false,"sendLimit":{"kind":"rate","perChatPerSecond":1},"menu":{"scope":"global","maxItems":0},"maxTextLength":2000,"maxFileBytes":{"image":10485760,"file":26214400},"markdown":null}}}
 {"jsonrpc":"2.0","method":"connected","params":{"up":true}}
-{"jsonrpc":"2.0","id":10,"method":"kept_set","params":{"key":"dm:user-1","value":"dm-channel-99"}}
+{"jsonrpc":"2.0","id":10,"method":"kept_set","params":{"key":"ctx:wx-user-1","value":"ctx-tok-99"}}
 {"jsonrpc":"2.0","id":10,"result":{"ok":true}}
-{"jsonrpc":"2.0","method":"inbound","params":{"chat":"user-1","messageId":"msg-900","sender":"user-1","text":"你好","at":1763690000000}}
-{"jsonrpc":"2.0","id":2,"method":"send","params":{"chat":"user-1","message":{"text":"收到，已交给槽位处理。"}}}
+{"jsonrpc":"2.0","method":"inbound","params":{"chat":"wx-user-1","messageId":"msg-900","sender":"wx-user-1","text":"你好","at":1763690000000}}
+{"jsonrpc":"2.0","id":2,"method":"send","params":{"chat":"wx-user-1","message":{"text":"收到，已交给槽位处理。"}}}
 {"jsonrpc":"2.0","id":2,"result":{"status":"sent","messageId":"msg-901"}}
 ```
 
@@ -344,7 +344,7 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 | `manifestVersion` | 通用 | 固定整数 `1` |
 | `kind` | 通用 | 只能是 `"agent"` 或 `"im"` |
 | `id` | 通用 | 匹配 `^[a-z][a-z0-9_-]{0,31}$`，且不能与保留内置名冲突 |
-| `name` | 通用 | 展示名称（非空字符串，例如 `"Discord"`、`"Antigravity"`） |
+| `name` | 通用 | 展示名称（非空字符串，例如 `"微信官方 Bot"`、`"Antigravity"`） |
 | `statusName` / `label` | 各自 | agent 清单用 `statusName`（`/status` 显示名）；IM 清单用 `label`（来源行与看板平台名） |
 | `version` | 通用 | SemVer 版本号（`x.y.z`） |
 | `protocol` | 通用 | agent 必须为 `"rh-agent/1"`，IM 必须为 `"rh-im/1"` |
@@ -392,14 +392,15 @@ enabled = true
 # 仅示范可选静态配置，严禁在文档或测试样例中填写真实密钥
 fixture = "./fixtures/dsh-acp.jsonl"
 
-[plugins.discord]
-path = "./plugins/discord"
+[plugins.weixin]
+path = "./plugins/weixin"
 enabled = true
 
-[bots.my-discord]
-platform = "discord"
+[bots.my-weixin]
+platform = "weixin"
 token = "ENV_OR_0600_LOCAL_SECRET"
-owner = "1234567890"
+# 本地零 Key 模拟测试时可填 baseUrl = "http://127.0.0.1:18080" 与 cdnBaseUrl = "http://127.0.0.1:18080/c2c"
+owner = "wx-user-id"
 target = "work/main"
 ```
 
@@ -412,7 +413,7 @@ target = "work/main"
 ### 4.3 两阶段版本与契约校验
 
 1. **阶段 1（启动期静态校验）**：`rhodium` 读取 `config.toml` 后，对每条启用的 `[plugins.<id>]` 读取 `<path>/plugin.json`。校验 JSON 合法性、`manifestVersion === 1`、`kind`、`id` 与配置键名一致、非保留名（含 `herdr`）、非重复 ID、`protocol` 匹配、`minRhodium <= 当前核心版本`、不指向 `claude`、启动命令第 0 项可定位，以及 `requiredConfig` 项是否齐全。
-2. **阶段 2（运行期握手校验）**：拉起插件进程后，核心在 `durations.pluginHandshake`（默认 `10s`）内等待 `ready`（agent）或 `init` 结果（IM），强制校验返回 `proto === 1`；对于 IM 插件，还必须用结构检查函数核验其 `capabilities`（如 `progress` 仅允许 `"append" | "edit"`、`sendLimit`、`maxTextLength`、`maxFileBytes` 等必选字段类型合法，防止残缺能力表让渲染器崩溃）。
+2. **阶段 2（运行期握手校验）**：拉起插件进程后，核心在 `durations.pluginHandshake`（默认 `10s`）内等待 `ready`（agent）或 `init` 结果（IM），强制校验返回 `proto === 1`；对于 IM 插件，还必须用结构检查函数核验其 `capabilities`（如 `progress` 仅允许 `"append" | "edit"`、`markdown` 允许为 `null` 或合法结构、`sendLimit`、`maxTextLength`、`maxFileBytes` 等必选字段类型合法，既保证纯文本平台如微信官方 Bot 通过校验，又防止残缺能力表让渲染器崩溃）。
 3. **演进兼容策略**：在 `/1` 协议家族内只允许新增可选字段，通信双方必须忽略不认识的字段；不兼容的破坏性变更升级到 `rh-agent/2` 或 `rh-im/2`，当前版本不要求同时运行多代协议。
 
 ### 4.4 禁用与失败行为矩阵
@@ -494,7 +495,7 @@ target = "work/main"
   - **PR 1 提前交付最小可执行检查**：随公开契约包一起交付清单校验 + 环境变量防泄漏 + 握手 + 正常单回合/单消息往返 + 优雅退出检查，让三位组员在各自插件开工第一天就能运行自测；
   - **PR 6 扩展为完整 7+7 黑盒契约矩阵**（用法：`bun scripts/plugin-conformance.ts --manifest <path/to/plugin.json> [--config <json>] [--timeout 10000]`）：
     - **Agent 插件 7 项检查**：1) 清单字段与静态合规检查（非保留名、启动命令与 `program` 不得指向 `claude`）；2) 环境变量中无敏感凭据泄漏；3) 握手成功并在超时内回传 `ready`；4) 正常一轮问答；5) 提问、首次交付成功后发 `ask_resolved` 闭环与重复同一 `requestId` 的 `answer` 去重（处理中不提前确认），或不支持命令规范响应；6) 打断 `interrupt` 与优雅关闭 `close`（及子进程无残留）；7) 畸形/超限输入与模拟失败错误回报规范。
-    - **IM 插件 7 项检查**：1) 清单与能力表校验；2) `init` 握手并在超时内发 `connected`；3) `send` 正常文本与超长/Markdown 边界处理；4) `edit` / `drop_buttons` / `set_menu` 按能力声明一致表现；5) `kept_get` / `kept_set` 读写闭环（含私聊通道映射验证）；6) 模拟发送失败时返回规范 `{ status: "failed" }` 而非进程崩溃；7) `shutdown` 优雅退出且无残留进程。
+    - **IM 插件 7 项检查**：1) 清单与能力表校验；2) `init` 握手并在超时内发 `connected`；3) `send` 正常文本与超长/纯文本分片/Markdown（含 `markdown: null`）边界处理；4) `edit` / `drop_buttons` / `set_menu` 按能力声明一致表现（未声明支持的能力跳过对应调用，如纯文本追加型平台仅测 `send`）；5) `kept_get` / `kept_set` 读写闭环（含私聊通道映射、同步游标与上下文令牌持久化验证）；6) 模拟发送失败或缺少会话上下文时返回规范 `{ status: "failed" }` 而非进程崩溃；7) `shutdown` 优雅退出且无残留进程。
 - **核心内置最小示例插件（随仓库提交，供 CI 与演示复现）**：
   - `examples/plugins/echo-agent/`：零依赖脚本，实现 `rh-agent/1`，包含正常回显、工具调用模拟、提问与 `ask_resolved`（含同一进程内按 `requestId` 去重重复 `answer`，处理中合并等待、首次交付成功后才发 `ask_resolved`）、错误触发词（`/fail`）与延迟 `session` 模式。
   - `examples/plugins/local-im/`：零依赖脚本，实现 `rh-im/1`，模拟独立的用户 ID 与私聊通道 ID 映射，经本地回环接口演示收发、编辑和模拟平台失败。
@@ -535,7 +536,7 @@ target = "work/main"
      - 原生 holder 与跨平台烟测（`hold`、`windows-paths`、`session-processes`、`tui-process`、`windows-tui-launch`、`windows-native`、`native-holders`、`pi-pane-credentials`）
      - Windows 下的 `plugin-loader`、`plugin-agent`、`plugin-im`、`plugin-env` 与示例插件契约测试（实测带空格路径、混合大小写环境键过滤、`.cmd` / 隐藏窗口启动与 UTF-8 解析）
 3. **`macos-check`（`macos-14`）**：
-   - 作为可选项（见 §11），默认配置 `workflow_dispatch` 按需触发。
+   - 已定为 `workflow_dispatch` 手动触发（见 §11 决策 4），不随普通 `push` 与 PR 自动运行。
 
 ---
 
@@ -546,13 +547,13 @@ target = "work/main"
 ### 两阶段验收与对比矩阵
 
 - **阶段 A（PR 6 核心验收）**：核心使用 `demo/baseline-agent` + 内置 `fake` IM；接入的核心示例插件为 `examples/plugins/echo-agent` 与 `examples/plugins/local-im`。
-- **阶段 B（全组插件合入后的最终全新目录零 Key 集成验收）**：将最终制品解压到全新临时目录，接入组员交付的 `dsh`（离线 ACP 回放）、`agy`（离线回放）和额外 IM（本地模拟模式）完成全流程验证。
+- **阶段 B（全组插件合入后的最终全新目录零 Key 集成验收）**：将最终制品解压到全新临时目录，接入组员交付的 `dsh`（离线 ACP 回放）、`agy`（离线回放）和 `weixin`（本地 `mock-weixin-server` HTTP 模拟模式）完成全流程验证。
 
 | 演示步骤 | 固定输入与操作 | 核对结果 |
 |---|---|---|
 | 1. 基线启动（无插件） | 使用 `demo/config.toml`（仅启用 `fake` IM + `demo/baseline-agent` + 本机看板 `127.0.0.1:7800` `auth = "none"`）启动核心 | 看板打开正常；运行 `rh doctor` 仅列出内置能力 |
 | 2. 接入前输入基线 | 向内置槽位发送固定样例输入：“列出当前目录并确认是否修改” | 基线假 agent 返回固定纯文本响应（无结构化工具协议输出，无额外平台通道） |
-| 3. 零改核心接入插件 | 核对 `git diff src/` 为空且核心二进制 SHA-256 不变；在 `demo/config.toml` 启用独立构建好的插件并重启 `rhodium`，发送同一组固定样例输入 | `rh doctor` 与看板列出新 agent 与新 IM；新 agent 产生真实的工具调用折叠与提问交互；新 IM 插件完成私聊配对、自动设主窗口与跨重启主动回推 |
+| 3. 零改核心接入插件 | 核对 `git diff src/` 为空且核心二进制 SHA-256 不变；在 `demo/config.toml` 启用独立构建好的插件并重启 `rhodium`，发送同一组固定样例输入 | `rh doctor` 与看板列出新 agent 与 `weixin`；新 agent 产生工具调用折叠与提问交互；`weixin` 插件经本地模拟服务完成私聊配对、自动设主窗口、纯文本编号回答提问与跨重启主动回推 |
 | 4. 禁用与失败对照（§4.4） | 1) 将插件设 `enabled = false` 重启并向该槽位发消息；2) 用坏清单启动；3) 在运行中发 `/fail` 触发插件异常退出 | 核心进程始终存活且内置通道正常；禁用提示、坏清单 `rh doctor` 报错与崩溃续跑通知均与 §4.4 完全一致 |
 | 5. 现场捉虫演示（§7.2） | 引入小错误 -> 跑测试命令 -> 恢复 -> 重跑 | 先红后绿，可现场复现 |
 
@@ -588,14 +589,36 @@ target = "work/main"
   5. **环境变量隔离与不碰现有面板**：核心拉起插件时剥离 `HERDR_*` 与 Anthropic 凭据变量，插件在测试和运行时严格禁止读写用户正在使用的 Herdr 会话或系统守护进程，也不得拉起或包装 `claude`。
   6. **支持单回合式或常驻式封装**：如果 `agy` 最终走的是单回合命令行模式，插件包装进程自己保持常驻并讲 `rh-agent/1`，在每次收到 `send` 时按保存的 `session` 续接外部命令，核心无需感知下游是否每次重建子进程。
 
-### 9.3 额外 IM 插件
+### 9.3 微信官方 Bot 插件（`weixin`）
 
-- **平台推荐**：推荐 **Discord**（或备选 **Matrix** / **Slack Socket Mode**）。Discord 的 Bot 申请免国内企业主体审核、开发者门户几分钟可创建 Bot 并使用官方 Gateway 长连接（无需公网 HTTPS Webhook 回调域名）、支持消息编辑、`inline` 按钮与单聊测试，最适合课程周期并满足跨平台无公网部署要求。
-- **对核心的要求**：
-  1. **标准 `rh-im/1` 能力接入**：核心仅依赖插件声明的能力表，自动完成过程消息推送（`progress: "edit"`）、超长分片（Discord 2000 字上限）、Markdown 转义和按钮交互。
-  2. **私聊地址归一与持久化映射**：当平台用户 ID 与私聊频道/房间 ID 不同（如 Discord 的 `user.id` vs DM `channel.id`）时，核心要求插件按 §3.3 归一契约令入站 `chat === sender`，并通过 `kept_get`/`kept_set` 持久化映射，使首次配对设主窗口和重启后主动回推无需修改核心路由表即可工作。
-  3. **凭据字段无写死约束**：核心不限制 `[bots.<name>]` 的凭证键名，将用户填写的任意字符串键经 `init.params.config` 透传给插件，同时在日志和错误消息中统一打码不回显。
-  4. **不强求全量平台能力**：即便额外 IM 不支持底栏按钮行（`menu.row` 留空）、不支持斜杠菜单同步（`menu.maxItems: 0`）或不支持内联按钮（`buttons: false`），核心渲染器必须依据能力表自动降级为纯文本数字编号选项，保证核心路径 100% 可用。
+- **官方接口定位与参考实现**：
+  - 采用腾讯微信官方 **`openclaw-weixin`（iLink Bot / 个人微信 ClawBot 插件）HTTP 长轮询接口**（参考开源项目 `AstrBot` 的 `astrbot/core/platform/sources/weixin_oc/` 实现）。默认业务根地址 `https://ilinkai.weixin.qq.com`，默认媒体 CDN 根地址 `https://novac2c.cdn.weixin.qq.com/c2c`，`bot_type = "3"`；需新版手机微信（iOS >= 8.0.70 / Android >= 8.0.69，内含 ClawBot 插件）。
+  - 该接口通过手机扫码与出向 HTTPS 长轮询接入，不需要微信公众号的公网 HTTPS Webhook 域名与 IP 白名单，也不需要企业微信主体认证，适合单机部署。
+- **凭据获取、鉴权头与持久态（绝不阻塞 `init` 握手）**：
+  - **扫码登录接口**：调 `GET /ilink/bot/get_bot_qrcode?bot_type=3` 获取 `qrcode` 与二维码链接 `qrcode_img_content`（有效期 5 分钟）；轮询 `GET /ilink/bot/get_qrcode_status?qrcode=<qrcode>`（带请求头 `iLink-App-ClientVersion: 1`），手机确认（`status: "confirmed"`）后拿到 `bot_token`、`ilink_bot_id`（Bot 账号 ID）、可选动态 `baseurl` 与扫码用户 `ilink_user_id`。
+  - **请求鉴权头**：业务请求统一携带 `Authorization: Bearer <bot_token>`、`AuthorizationType: ilink_bot_token` 及随机 32 位整数转字符串后 Base64 编码的 `X-WECHAT-UIN`。
+  - **配置与启动分工**：插件提供独立的一次性终端扫码命令（如 `bun run plugins/weixin/login`），扫码成功后把 `token`（及可选 `baseUrl`、`cdnBaseUrl`、`accountId`）写入 `0600`（Windows 为本人私有 ACL）保护的 `config.toml` `[bots.<name>]`（清单声明 `requiredConfig: ["token"]`、`optionalConfig: ["baseUrl", "cdnBaseUrl", "accountId"]`）。核心拉起插件后可直接凭配置 `token` 在 `durations.pluginHandshake`（10s）内完成 `init` 握手，不因等待人工扫码而超时熔断；若运行中接口返回 `errcode: -14`（登录态过期），插件发送 `connected(up: false, error: "微信登录态已过期，请重新扫码更新 token")` 触发告警并等待用户更新凭据。
+  - **运行期状态持久化**：增量同步游标 `get_updates_buf`（`sync_buf`）与每位用户的最新回复上下文令牌 `context_token` 均经 `rh-im/1` 的 `kept_set`/`kept_get` 由核心持久保存（按 `plugin:<botId>:` 前缀隔离）。
+- **收发流程与附件加解密**：
+  - **入站长轮询**：启动后持续调用 `POST /ilink/bot/getupdates`（携带 `get_updates_buf`，默认长轮询超时 `35s`），解析 `msgs[]` 中的 `from_user_id`（私聊天然满足 `inbound.chat === inbound.sender === from_user_id`）、`message_id`/`msg_id`、`create_time_ms`、`context_token` 与 `item_list[]`：`type=1` 为文本（可附带 `ref_msg` 引用），`type=2`/`4`/`5` 为加密图片/文件/视频，`type=3` 为语音（若携带微信云端转写 `voice_item.text` 则转为文本入站，否则标记 `voice: true` 由核心按“暂不支持语音”提示）。插件先经 `kept_set` 持久化 `ctx:<userId>`（最新 `context_token`）与 `sync_buf`，再发出 `inbound`。
+  - **附件懒下载与加解密**：入站媒体只携带不透明 `attachmentId`，待核心校验发送者为主人并反调 `fetch_attachment` 时，插件才请求 CDN `/download?encrypted_query_param=...`，并用消息给出的密钥执行 **AES-128-ECB（PKCS7 去填充）**解密落盘，防止陌生人投递大文件耗尽带宽与磁盘。
+  - **出站发送与 `context_token` 约束**：调用 `POST /ilink/bot/sendmessage`（`message_type: 2`、`message_state: 2`）发送文本或媒体引用，请求必须携带目标用户最近一次入站保存的 `context_token`。发图或文件前先调 `POST /ilink/bot/getuploadurl` 获取上传参数，在本地以 AES-128-ECB + PKCS7 加密后 `POST` 到 CDN 换回 `x-encrypted-param` 再发 `sendmessage`。首次配对（用户发送配对码）自然建立并持久化 `context_token`，此后重启与主动通知可直接回推；若目标用户从未发过消息（内存中与 `kept_get` 均无 `context_token`），插件必须明确返回 `{ status: "failed", error: "缺少 context_token，请先在微信向 Bot 发送一条消息" }`，不崩溃也不假报成功。
+- **微信官方 Bot 能力边界与核心自动降级**：
+  微信 `openclaw-weixin` 接口功能精简、不支持原地改消息与交互组件。以下能力差异全部通过 `Capabilities` 声明由 Rhodium 核心渲染器与路由自动降级处理，插件侧无需自写降级逻辑：
+
+  | 平台能力差异 | 微信插件 `Capabilities` 声明 | 核心侧自动降级行为 |
+  |---|---|---|
+  | 不支持编辑已发消息、流式原地刷新、草稿预览与折叠卡片 | `progress: "append"`（省略 `editEvery`、`finalEdit`、`draftTtl`、`stream`、`panels`） | 核心走 `src/render.ts` `append()`/`finish()`，按段落追加发送新消息，把工具调用浓缩为顶部 `[🔧 ...]` 工具行，不调用 `edit` |
+  | 不支持内联回调按钮与复制按钮 | `buttons: false`（省略 `maxButtons`、`copy`） | 核心把审批、选择题、计划确认及 `/rh_use`/`/model`/`/resume` 选择面板自动渲染为**纯文本数字编号选项**，用户直接回复数字作答；核心不调用 `drop_buttons` / `answer_press` |
+  | 不支持 `/` 命令菜单同步与底栏快捷按钮行 | `menu: { scope: "global", maxItems: 0 }`（无 `row`） | 核心跳过 `set_menu` / `set_row` 调用；用户在微信直接输入 `/rh_help`、`/status`、`/model` 等文本命令照常由核心路由解析 |
+  | 不支持 Markdown 与扩展富文本标签 | `markdown: null` | 核心仅发送纯文本 `text`（通过 `src/render.ts` 与 `plain()` 剥除多余标记），不附带 Markdown 载荷 |
+  | 单条消息长度上限、附件上限与发送频率限制 | `maxTextLength: 2000`、`maxFileBytes: { image: 10485760, file: 26214400 }`、`sendLimit: { kind: "rate", perChatPerSecond: 1 }` | 核心自动按换行与代码块边界分段、拦超限文件并按每秒 1 条节奏限流排队 |
+  | 仅 1 对 1 私聊、无头像资料获取接口 | 入站固定私聊（`chat === sender`）；`profile` 返回 `{}` | 核心正常兼容空头像，主窗口绑定与跨重启主动回推照常工作 |
+
+- **无 Key / 无微信账号的本地模拟和演示方式**：
+  - `plugins/weixin/` 内置零外部依赖本地 HTTP 模拟服务（`mock-weixin-server`，监听 `127.0.0.1:<port>`），完整实现 `GET /ilink/bot/get_bot_qrcode`、`GET /ilink/bot/get_qrcode_status`、`POST /ilink/bot/getupdates`（长轮询）、`POST /ilink/bot/sendmessage`（校验 `Authorization: Bearer` 与必填 `context_token`）、`POST /ilink/bot/getuploadurl` 及本地 CDN `/upload` `/download`（含 AES-128-ECB 加解密核验）。
+  - CI 与助教零 Key 演示只需在 `config.toml` 的 `[bots.my-weixin]` 填写占位 `token = "mock-weixin-token"` 并将 `baseUrl`、`cdnBaseUrl` 指向该本地模拟服务；**插件与真实微信走完全同一套 HTTP 长轮询、持久化和加解密代码路径**，无需真实微信账号、无需扫码、无需公网访问。
+  - 单元测试与演示脚本通过本地控制端口向 `mock-weixin-server` 注入模拟用户入站消息（配对码、文本命令、数字编号审批回复、加密图片、以及模拟 `errcode: -14` 登录过期与缺 `context_token` 失败场景），实时捕获核心发出的纯文本分段回复与解密后的附件内容，可现场完整复现“配对 -> 主窗口 -> 纯文本编号答提问 -> 重启恢复 `sync_buf` 与 `context_token` -> 主动回推”。
 
 ---
 
@@ -603,7 +626,7 @@ target = "work/main"
 
 ### 10.1 PR 规划与依赖关系
 
-方案拍板后，将核心插件化与配套工具拆分为 6 个独立 PR。PR 1 不碰核心 `src/` 业务代码，先冻结公开契约与最小可执行契约检查器，合入后三位组员即可据此同步开工各自插件，核心内部改造（PR 2 -> PR 3/4/5 -> PR 6）并行推进：
+按已拍板方案，将核心插件化与配套工具拆分为 6 个独立 PR。PR 1 不碰核心 `src/` 业务代码，先冻结公开契约与最小可执行契约检查器，合入后三位组员即可据此同步开工各自插件，核心内部改造（PR 2 -> PR 3/4/5 -> PR 6）并行推进：
 
 ```mermaid
 flowchart LR
@@ -620,7 +643,7 @@ flowchart LR
 
   M1["组员插件：dsh"]:::ext
   M2["组员插件：agy"]:::ext
-  M3["组员插件：额外 IM"]:::ext
+  M3["组员插件：weixin"]:::ext
 
   P1 --> P2
   P2 --> P3
@@ -652,8 +675,8 @@ flowchart LR
 |---|---|---|---|
 | **核心与集成负责人** | 核心插件化 PR 1–6、公开契约包 `packages/plugin-sdk/`、契约测试器、`ci.yml` 与零 Key 基线演示包 | 审查三个插件 PR 的协议合规性、错误恢复与跨平台路径 | PR 1 锁定契约；PR 6 完成核心 CI 成功记录；全组插件合入后牵头全新目录零 Key 集成验收 |
 | **DeepSeek 插件负责人** | `plugins/dsh/`（`dsh acp` 协议翻译、独立构建声明、录制 ACP 样例与 `dsh` 插件单元测试/契约测试） | 审查核心驱动 PR 或其他成员插件的边界与失败处理 | 完成 `dsh` PR 合并；通过 `scripts/plugin-conformance.ts` 与阶段 B 集成演示 |
-| **Antigravity 插件负责人** | 先行完成 `agy` 非 TTY 管道稳定性实测；`plugins/agy/`（`stream-json` 或备选 ACP 独立封装、录制样例与单元测试/契约测试） | 审查核心 PR 或 `dsh` / 额外 IM PR 的测试覆盖与失败反馈 | 先交付管道实测结论，再完成 `agy` PR 合并并通过契约测试 |
-| **额外 IM 插件负责人** | `plugins/discord/`（或拍板后的额外 IM 插件：`rh-im/1` 实现、私聊通道映射、本地模拟测试桩与单元测试/契约测试） | 审查核心 IM 适配器 PR 或其他插件的错误处理与文档一致性 | 完成额外 IM PR 合并，跑通“配对 -> 主窗口 -> 重启 -> 主动回推”验证 |
+| **Antigravity 插件负责人** | 先行完成 `agy` 非 TTY 管道稳定性实测；`plugins/agy/`（`stream-json` 或备选 ACP 独立封装、录制样例与单元测试/契约测试） | 审查核心 PR 或 `dsh` / `weixin` PR 的测试覆盖与失败反馈 | 先交付管道实测结论，再完成 `agy` PR 合并并通过契约测试 |
+| **微信官方 Bot 插件负责人** | `plugins/weixin/`（`openclaw-weixin` / iLink Bot HTTP 长轮询、`context_token` 与 `sync_buf` 持久化、AES 附件加解密、`mock-weixin-server` 本地模拟服务、单元测试与契约测试） | 审查核心 IM 适配器 PR 或其他插件的错误处理与文档一致性 | 完成 `weixin` PR 合并，在本地模拟服务下跑通“配对 -> 主窗口 -> 纯文本编号回答提问 -> 重启 -> 主动回推”验证 |
 
 **最终交付前统一验收节点（由全体核对，成品随最终提交一起产出）**：
 1. **全新目录零 Key 集成验收**：全组插件 PR 合入后，在全新空目录构建或解压运行包，验证不改动任何核心源码的前提下接入三个插件完成完整对比演示。
@@ -664,32 +687,19 @@ flowchart LR
 
 ---
 
-## 11. 待拍板的问题
+## 11. 已拍板的决策记录
 
-说明：两类插件均走独立进程、agent 插件跑在现有 `rh-hold` 内、插件配置 `path` 支持相对路径、核心统一写幂等托管对话记录、Linux CI 测试复用 `src/detached.ts` 等架构与实现细节已按审查意见直接定入本规格正文。以下 4 项选型决策需最终拍板：
+以下 4 项选型决策已于 2026-11-21 拍板定案，连同正文既定架构（两类插件独立进程、`agent` 插件跑在 `rh-hold` 内、插件配置 `path` 支持相对路径、核心写幂等托管对话记录、Linux CI 复用 `src/detached.ts`）一起作为实现与验收基线：
 
-1. **额外 IM 插件选哪个平台**
-   - **选项 A（推荐）**：**Discord**。
-     - 理由：开发者后台几分钟可申请测试 Bot，免企业资质审核，官方 Gateway 支持 WebSocket 长连接无需公网回调域名，具备编辑、按钮和富文本等差异化能力，且团队和助教易复现。
-   - **选项 B**：**Matrix**。
-     - 理由：开放联邦协议、可本地起轻量 homeserver 做纯离线演示；但生态 SDK 体积和同步状态复杂度高于 Discord。
-   - **选项 C**：**Slack（Socket Mode）**。
-     - 理由：支持长连接无需公网域名，能力丰富；但创建 App 与工作区权限配置略琐碎。
-   - **选项 D**：钉钉 / 企业微信。
-     - 代价：企业认证与审批周期长，且不方便助教本地验证。
+1. **额外 IM 插件选型：微信官方 Bot（`plugins/weixin/`）—— 已定**
+   - **决策结果**：放弃此前候选的 Discord、Matrix、Slack、钉钉、企业微信，改做**微信官方 Bot**（参考 `AstrBot` 的 `weixin_oc` 实现，接入腾讯微信官方 `openclaw-weixin` / iLink Bot 长轮询接口，见 §9.3）。
+   - **取舍依据**：功能边界小、无需公网 HTTPS Webhook 域名与企业资质审核，不支持编辑消息与内联按钮之处正好完整展示 Rhodium 核心按 `Capabilities` 自动降级（追加纯文本与数字编号选项）的能力，且内置 `mock-weixin-server` 可在无账号无 Key 下复现全部流程。
 
-2. **Antigravity（`agy`）对接协议与排雷策略**
-   - **选项 A（推荐）**：组员开工先花半天实测 `agy` 在非 TTY 管道下 `--input-format stream-json --output-format stream-json` 是否稳定；**稳定则首选 `stream-json`**（与 `dsh` 的 ACP 形成真双协议对比），**卡死则切换包装 `agy acp`**（由 `agy` 插件自己独立翻译，不与 `dsh` 共用代码），**均不通则改接 Gemini CLI / OpenCode**。
-   - **选项 B**：跳过测试，直接全部改用 `agy acp`。
-     - 代价：若 `stream-json` 本机已修好则错失差异更大的第二协议形态。
-   - **选项 C**：直接放弃 `agy`，从一开始就换成 Gemini CLI（`gemini --acp`）或 OpenCode（`opencode acp`）。
+2. **Antigravity（`agy`）对接协议与排雷策略 —— 已定（按原推荐方案 A）**
+   - **决策结果**：组员开工先花半天实测 `agy` 在非 TTY 管道下 `--input-format stream-json --output-format stream-json` 是否稳定；**稳定则首选 `stream-json`**（与 `dsh` 的 ACP 形成真双协议对比），**卡死则切换包装 `agy acp`**（由 `agy` 插件独立翻译，不与 `dsh` 共用代码），**均不通则改接 Gemini CLI（`gemini --acp`）或 OpenCode（`opencode acp`）**。
 
-3. **组员插件代码的仓库组织方式**
-   - **选项 A（推荐）**：放在 `Rhodium-OSS` 同仓库的 `plugins/<name>/` 目录下，各自有独立的 `package.json`（或依赖声明）、独立构建命令和 `plugin.json`，不导入核心 `src/`；通过独立的 PR 提交与互相 Review。
-     - 理由：完全契合课程单一提交 ZIP 打包、GitHub Actions CI 统一校验、PR 交叉 Review 与零核心源码修改核验的要求。
-   - **选项 B**：三个插件各建独立的外部 Git 仓库，最终提交时以子目录复制或 submodule 拼进课程提交 ZIP。
-     - 代价：增加 submodule / 跨仓同步与统一 CI 跑契约测试的复杂度。
+3. **组员插件代码的仓库组织方式 —— 已定（按原推荐方案 A）**
+   - **决策结果**：放在 `Rhodium-OSS` 同仓库的 `plugins/<name>/` 目录下（`plugins/dsh/`、`plugins/agy/`、`plugins/weixin/`），各自持有独立的 `package.json`（或依赖声明）、独立构建命令与 `plugin.json`，不导入核心 `src/`；通过各自独立的 PR 提交与交叉 Review 合入。
 
-4. **macOS CI 触发策略**
-   - **选项 A（推荐）**：`push` 与 PR 自动跑 **`linux-check`（`ubuntu-24.04`）** 与 **`windows-check`（`windows-2022`）**，`macos-check`（`macos-14`）设为 `workflow_dispatch` 手动触发（节省私有仓库 10 倍 Runner 分钟数）。
-   - **选项 B**：每次 `push` 与 PR 同时自动跑齐 Linux、Windows、macOS 三平台流水线。
+4. **macOS CI 触发策略 —— 已定（按原推荐方案 A）**
+   - **决策结果**：`push` 与 PR 自动触发 **`linux-check`（`ubuntu-24.04`）** 与 **`windows-check`（`windows-2022`）**；**`macos-check`（`macos-14`）** 设为 `workflow_dispatch` 手动触发，避免平时每次提交消耗大量 macOS Runner 分钟数。

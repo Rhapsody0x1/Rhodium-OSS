@@ -4,7 +4,7 @@
 
 前置阅读：[术语表](../../GLOSSARY.md)、[产品说明](../product.md)、[调研摘要](../research.md)、[ADR-0002](0002-one-daemon-plus-holders.md)、[ADR-0007](0007-satori-for-bot-apps.md)、[ADR-0008](0008-own-im-adapters.md)、[ADR-0009](0009-no-acp.md)、[ADR-0011](0011-codex-private-app-server.md)
 
-状态：提案（2026-11-21，待拍板）
+状态：已采纳（2026-11-21）
 
 Rhodium-OSS 为扩展新的 agent 种类与新的 IM 平台提供[插件](../../GLOSSARY.md)机制。无论 agent 插件还是 IM 插件，都以独立操作系统进程运行，通过标准输入输出（stdio）上的按行 JSON [插件协议](../../GLOSSARY.md)与核心进程 `rhodium` 通信。
 
@@ -25,7 +25,7 @@ flowchart TD
   HD -- "stdin / stdout (rh-agent/1)" --> AP
   AP -- "stdio / API" --> CLI
   RH -- "stdin / stdout (rh-im/1)" --> IP
-  IP -- "WebSocket / HTTP" --> PLT
+  IP -- "HTTP 长轮询 / WebSocket" --> PLT
 ```
 
 ## 1. 决定
