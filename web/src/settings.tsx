@@ -6,6 +6,8 @@ import { useQuery } from "@tanstack/react-query";
 import { cn } from "cn";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useState, useSyncExternalStore, type ReactNode } from "react";
+import { DEFAULT_AGENT } from "../../src/agents";
+import { useAgent } from "./metadata";
 import { THEME, THEMES, useTheme } from "./common";
 import { json, type BoardData } from "./data";
 import { canRemind, reminding, remindBy } from "./unread";
@@ -40,10 +42,11 @@ const useTerminalBoard = () => useQuery({ queryKey: ["board"], queryFn: () => js
 /** Whether the three ways to switch a slot to the terminal show (the key under where you type, 切到终端
  *  in a row's menu and the topology's): 终端入口 on, and Herdr there. A slot already in the terminal
  *  keeps its own, and /rh_tui typed still goes. */
-export function useTerminalEntry(): boolean {
+export function useTerminalEntry(agent: string | null): boolean {
   const on = useEntry();
   const board = useTerminalBoard();
-  return on && !board?.noHerdr;
+  const { tui } = useAgent(agent ?? DEFAULT_AGENT);
+  return tui && on && !board?.noHerdr;
 }
 
 /** A gear that opens the settings card on side of it: over it at the sidebar's foot, under it in the

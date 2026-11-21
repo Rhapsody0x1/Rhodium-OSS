@@ -5,7 +5,7 @@ import { Slider } from "@base-ui/react/slider";
 import { cn } from "cn";
 import { Bot, Box, Brain, ChartPie, Check, ChevronRight, FoldVertical, Gauge, History, Info, LoaderCircle, Search, Slash, Square, SquarePen, Workflow, type LucideIcon } from "lucide-react";
 import { Fragment, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { AGENT_KINDS } from "../../src/agents";
+import { useAgents } from "./metadata";
 import type { AgentKind } from "../../src/contracts";
 import type { Candidate } from "../../src/panels";
 import type { RhReply } from "../../src/router";
@@ -123,6 +123,7 @@ const Now = () => <Check aria-label="现在" className="size-4 shrink-0 text-run
  *  (#761): the agents, the one now ticked. The other picked switches to it, a new conversation; while a
  *  turn runs it asks first: once the turn is over, or cutting it short. */
 export function AgentSheet({ open, anchor, close, agent, turn, send }: { open: boolean; anchor: RefObject<HTMLElement | null>; close: () => void; agent: AgentKind; turn: boolean; send: Send }) {
+  const agents = useAgents();
   const [picked, setPicked] = useState<AgentKind | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   if (!open && (picked || pressed)) (setPicked(null), setPressed(null));
@@ -137,10 +138,10 @@ export function AgentSheet({ open, anchor, close, agent, turn, send }: { open: b
   return (
     <PopFrame open={open} anchor={anchor} label="换 agent" icon={Bot} title="Agent" close={close}>
       <div className="grid px-2 pb-2">
-        {AGENT_KINDS.map((a) => (
+        {agents.map(({ id: a, name }) => (
           <button key={a} disabled={pressed !== null} onClick={() => (a === agent ? close() : turn ? setPicked(a) : void go(a, a))} className={cn(ROW, picked === a && "bg-accent")}>
             <AgentLogo agent={a} className="size-5" />
-            <span className="min-w-0 flex-1 truncate">{agentName(a)}</span>
+            <span className="min-w-0 flex-1 truncate">{agentName(a, name)}</span>
             {pressed === a ? <Spinning /> : a === agent && <Now />}
           </button>
         ))}
@@ -177,7 +178,7 @@ function resting(all: Candidate[]) {
  *  key are the card's foot, in sight however long the list (story 520). Over MANY models, a search
  *  box on top finds them by name or group, the keyboard taken at once only with a mouse (story 528).
  *  Models of more than one group, pi's providers, under a header each that folds them (story 529). */
-export function ModelSheet({ open, anchor, close, send }: { open: boolean; anchor: RefObject<HTMLElement | null>; close: () => void; send: Send }) {
+export function ModelSheet({ open, anchor, close, send, effort = true, ultraCode = true }: { effort?: boolean; ultraCode?: boolean; open: boolean; anchor: RefObject<HTMLElement | null>; close: () => void; send: Send }) {
   const [models, setModels] = useState<Candidate[] | null>(null);
   const [query, setQuery] = useState("");
   const [folded, setFolded] = useState<Set<string | undefined>>(new Set());
@@ -205,8 +206,8 @@ export function ModelSheet({ open, anchor, close, send }: { open: boolean; ancho
       toast(r.ok ? r.text : r.error, !r.ok);
     });
     // A model with no levels has none to show; neither has one the agent could not say.
-    void send("/effort").then((r) => opening.current === at && setLevels((r.ok && r.panel?.candidates) || []));
-    askUltra(at);
+    if (effort) void send("/effort").then((r) => opening.current === at && setLevels((r.ok && r.panel?.candidates) || []));
+    if (ultraCode) askUltra(at);
     return () => void opening.current++;
   }, [open]);
   const askUltra = (at: number) =>
@@ -227,7 +228,7 @@ export function ModelSheet({ open, anchor, close, send }: { open: boolean; ancho
     if (opening.current !== at) return;
     setPressed(null);
     if (!r.ok) return toast(r.error, true);
-    askUltra(at);
+    if (ultraCode) askUltra(at);
     if (r.panel?.candidates.length) {
       setModels((all) => all && all.map((m) => ({ ...m, current: m === c })));
       return setLevels(r.panel.candidates);

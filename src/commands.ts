@@ -430,12 +430,12 @@ export const imCommand = (name: string) => IM_COMMANDS.find((c) => c.name === na
 
 /** The agent's commands, as the / menu and the board's palette list them (product §5.7): no rh_ one,
  *  only those the agent takes; with no agent, only those every built-in agent takes. */
-export const agentCommands = (agent?: AgentKind | null) => {
+export const agentCommands = (agent?: AgentKind | null, negotiated?: readonly string[]) => {
   if (!agent || isBuiltinAgent(agent)) {
     return IM_COMMANDS.filter((c) => !c.name.startsWith("rh_") && (!c.agents || (!!agent && c.agents.includes(agent))));
   }
   const def = agentDef(agent);
-  const allowed = new Set<string>(["new", "stop", "resume", ...(def.supportedCommands ?? [])]);
+  const allowed = new Set<string>(["new", "stop", "resume", ...(negotiated ?? def.supportedCommands ?? [])]);
   return IM_COMMANDS.filter((c) => !c.name.startsWith("rh_") && allowed.has(c.name) && (c.name !== "ultracode" || def.ultracode));
 };
 

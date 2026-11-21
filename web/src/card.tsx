@@ -8,6 +8,7 @@ import { agentDef } from "../../src/agents";
 import type { AgentKind, ContextUse, ExtraUsage, QuotaWindow, SessionUse, Tokens } from "../../src/contracts";
 import { moment, money, percent, span, tokens } from "../../src/panels";
 import type { InfoCard as Card, StatusCard } from "../../src/router";
+import { useAgent } from "./metadata";
 import { AgentLogo, ModelName, ROOM } from "./common";
 import { toast } from "./toast";
 import { buttonVariants } from "./components/ui/button";
@@ -294,9 +295,10 @@ function Usage({ u }: { u: Extract<Card, { command: "usage" }> }) {
  *  with none of them. */
 export function QuotaPart({ agent, q }: { agent: AgentKind; q: { limits: QuotaWindow[]; extra?: ExtraUsage; credits?: number } }) {
   const now = Date.now();
+  const { name } = useAgent(agent);
   if (!q.limits.length && !q.extra && q.credits === undefined) return null;
   return (
-    <Section icon={<AgentLogo agent={agent} />} title={`${agentDef(agent).name} 额度`}>
+    <Section icon={<AgentLogo agent={agent} />} title={`${name} 额度`}>
       {q.limits.map((l, i) => (
         <Window key={i} l={l} now={now} />
       ))}
@@ -395,6 +397,7 @@ const ACTIONS: Record<string, [LucideIcon, string]> = { "/stop": [Square, "停�
  *  windows at 80% or more under them; the directory tapped is copied, the context tapped opens
  *  /context's card; then what can be done now. */
 export function Status({ s, run }: { s: StatusCard; run: (command: string) => Promise<void> }) {
+  const { statusName } = useAgent(s.agent);
   const full = (s.limits ?? []).filter((l) => l.usedPercent >= 80);
   const now = Date.now();
   const c = s.context;
@@ -418,7 +421,7 @@ export function Status({ s, run }: { s: StatusCard; run: (command: string) => Pr
       <Section icon={<Box className="size-3.5" />} title="模型设置">
         <div className={row}>
           Agent
-          <span className="ml-auto">{agentDef(s.agent).statusName}</span>
+          <span className="ml-auto">{statusName}</span>
         </div>
         {(s.model || s.effort) && (
           <div className={row}>

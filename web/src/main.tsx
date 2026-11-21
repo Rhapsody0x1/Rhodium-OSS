@@ -5,7 +5,7 @@
 // to move it; in maximize mode (?full, spec web-maximize) a sidebar of the slots takes their place.
 // A medium screen's chat is always in maximize mode.
 // On every page ⌘K opens the jump box, and with a chat open Alt+↑↓ goes to the slot above or below.
-import { QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { lazy, StrictMode, Suspense, useEffect, useRef, useState, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 import { Route, Router, Switch, useLocation, useRoute } from "wouter";
@@ -14,6 +14,7 @@ import { BoardPage, nextSlot } from "./board";
 import { BoardHeader, boardKey, chatAt, goHash, HOME, recent, ROOM, slotHash, TopBar, useMedia, WIDE } from "./common";
 import { builds, follow, json, lastReload, posting, prefetch, queryClient, refresh, reload, reloadAgain, reloadNow, unsent, type BoardData } from "./data";
 import "./index.css";
+import { Metadata } from "./metadata";
 import { RhodiumPage } from "./rhodium";
 import { watch } from "./unread";
 
@@ -111,6 +112,10 @@ function App() {
   const wide = useMedia(WIDE);
   const [location] = useLocation();
   const chatSlot = chatAt(location, room);
+  const { data: metadata } = useQuery({
+    queryKey: ["board"], queryFn: () => json<BoardData>("api/board"), select: b => b.metadata,
+    enabled: q => !chatSlot || q.state.data === undefined,
+  });
   // A wide or medium screen's topology with a slot's chat beside it (?chat).
   const chatOf = location.startsWith("/topology") && chatSlot ? chatSlot : undefined;
   // Maximize mode: a wide screen's as asked, a medium screen's always, with no split. A phone has none:
@@ -124,7 +129,7 @@ function App() {
   }, [location]);
   useEffect(() => void (chatSlot && recent.add(chatSlot)), [chatSlot]);
   return (
-    <Switch>
+    <Metadata.Provider value={metadata}><Switch>
       {/* On a phone the chat fills the screen, its top bar in place of the board's; on a wide or medium
           screen the board stays while the chat's code comes. Keyed, so another slot's starts afresh. */}
       <Route path={SLOT}>
@@ -148,7 +153,7 @@ function App() {
       <Route>
         <Home live={live} />
       </Route>
-    </Switch>
+    </Switch></Metadata.Provider>
   );
 }
 

@@ -1230,7 +1230,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
         waiting.set(id, reply);
         loop.enqueue({ kind: "board", id, act: a });
       });
-    const started = serveBoard(store, config, hearing, undefined, act, fronts, { ask: (c, why) => void runner.meter(c, why), alive: runner.alive }, flows);
+    const started = serveBoard(store, config, hearing, undefined, act, fronts, { ask: (c, why) => void runner.meter(c, why), alive: runner.alive, pluginCommands: c => runner.pluginCaps(c)?.commands }, flows, plugins);
     board = started.servers.map((s) => `${s.hostname}:${s.port}`).join(", ");
     for (const [entry, why] of started.deaf) deaf.set(entry, why);
   } catch (err) {

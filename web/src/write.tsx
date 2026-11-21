@@ -9,7 +9,7 @@ import { cn } from "cn";
 import { Archive, ArchiveRestore, ArrowUp, Check, ChevronDown, CircleAlert, Copy, CornerUpRight, FileText, Info, Import, List, ListPlus, LoaderCircle, Paperclip, Pause, Pencil, Pin, PinOff, Play, Plus, Quote, RotateCw, Square, SquarePen, SquarePlus, SquareTerminal, Terminal, Trash2, Workflow, X, Zap, type LucideIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type RefObject, type UIEvent } from "react";
 import { useLocation } from "wouter";
-import { agentDef, TYPING } from "../../src/agents";
+import { agentDef, isBuiltinAgent, TYPING } from "../../src/agents";
 import { parseCommand, plain, quoteOf, quoting, type AgentKind, type BoardAct } from "../../src/contracts";
 import type { Candidate } from "../../src/panels";
 import type { RhReply } from "../../src/router";
@@ -421,7 +421,7 @@ export function RowMenu({ c, at, close, make }: { c: Card; at: { x: number; y: n
   const [renaming, setRenaming] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [taking, setTaking] = useState(false);
-  const entry = useTerminalEntry();
+  const entry = useTerminalEntry(c.agent);
   // In a turn, as inTurn has it, by the state the board names.
   const turn = ["启动中", "运行中", "需要你"].includes(c.state);
   const pin: Choice = c.pinnedAt === null ? { icon: Pin, label: "置顶", run: () => void run({ kind: "pin", slot: c.id, on: true }) } : { icon: PinOff, label: "取消置顶", run: () => void run({ kind: "pin", slot: c.id, on: false }) };
@@ -689,6 +689,8 @@ export function Composer({ slot, turn, archived, switchable, log, changed, comma
   const [, navigate] = useLocation();
   const max = useContext(Max);
   const send = (text: string) => act({ kind: "say", slot, text });
+  const plugin = agent !== null && !isBuiltinAgent(agent);
+  const supports = (name: string) => !plugin || commands.some(c => c.name === name);
   const picker = useRef<HTMLInputElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
   const ring = useRef<HTMLButtonElement>(null);
@@ -779,6 +781,7 @@ export function Composer({ slot, turn, archived, switchable, log, changed, comma
   /** Does what the page does itself for words (byPage), and says whether there was any. */
   const own = (words: string) => {
     const p = byPage(words, agent);
+    if ((p === "model" || p === "meter") && (!supports(words.trim().slice(1)) || (p === "model" && !supports("model")))) return false;
     if (p === "agent" || p === "model" || p === "meter") sheet(p);
     else if (p === "help") (type("/"), box.current?.focus());
     // On a wide screen the list goes beside the chat; on a phone, in its place; in maximize mode the
@@ -797,7 +800,7 @@ export function Composer({ slot, turn, archived, switchable, log, changed, comma
     box.current?.focus();
   };
   /** Picked from the palette (story 297): one the page does itself it does; the rest go as typed. */
-  const pick = (c: Command) => (byPage(`/${c.name}`, agent) ? (type(""), own(`/${c.name}`)) : void go(`/${c.name}`));
+  const pick = (c: Command) => (own(`/${c.name}`) ? type("") : void go(`/${c.name}`));
   const halt = async () => {
     setBusy(true);
     const r = await act({ kind: "common", slot, name: "stop" });
@@ -851,7 +854,7 @@ export function Composer({ slot, turn, archived, switchable, log, changed, comma
       {reply?.panel && <Answer r={reply} name={/^\/(\S+)/.exec(reply.said)?.[1] ?? ""} close={() => setShown(null)} pick={(c) => choose(c, reply)} />}
       {agent && <AgentSheet open={shown === "agent"} anchor={agentKey} close={() => setShown((s) => (s === "agent" ? null : s))} agent={agent} turn={turn} send={send} />}
       {/* With a mouse its search box took the keyboard: closed, the caret is back where you type. */}
-      <ModelSheet open={shown === "model"} anchor={modelKey} close={() => (setShown((s) => (s === "model" ? null : s)), matchMedia("(pointer: fine)").matches && box.current?.focus())} send={send} />
+      <ModelSheet effort={supports("effort")} ultraCode={supports("ultracode")} open={shown === "model"} anchor={modelKey} close={() => (setShown((s) => (s === "model" ? null : s)), matchMedia("(pointer: fine)").matches && box.current?.focus())} send={send} />
       <MeterPop
         slot={slot}
         open={shown === "meter"}
@@ -861,7 +864,7 @@ export function Composer({ slot, turn, archived, switchable, log, changed, comma
         live={live}
         agent={agent}
         // A slot in the terminal has no 压缩 here (spec web-import-composer "上下文和额度").
-        compact={terminal ? undefined : async () => (setShown(null), show(await send("/compact"), "/compact"))}
+        compact={terminal || !supports("compact") ? undefined : async () => (setShown(null), show(await send("/compact"), "/compact"))}
       />
       <div data-box className="chat-column relative mx-auto rounded-3xl border bg-card shadow-xs">
         {list.length > 0 && <Palette list={list} at={Math.min(at, list.length - 1)} pick={pick} point={setAt} />}
@@ -929,7 +932,7 @@ export function Composer({ slot, turn, archived, switchable, log, changed, comma
               <button ref={agentKey} data-pop aria-label="换 agent" aria-expanded={shown === "agent"} onClick={() => sheet("agent", true)} className="hover-round grid size-11 shrink-0 place-items-center">
                 <AgentLogo agent={agent} className="size-5" />
               </button>
-              <button ref={modelKey} data-pop aria-label="模型和思考强度" aria-expanded={shown === "model"} onClick={() => sheet("model", true)} className="flex h-11 min-w-0 items-center gap-1 rounded-full pr-2 pl-3 text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:-outline-offset-6 focus-visible:outline-ring">
+              {supports("model") && <button ref={modelKey} data-pop aria-label="模型和思考强度" aria-expanded={shown === "model"} onClick={() => sheet("model", true)} className="flex h-11 min-w-0 items-center gap-1 rounded-full pr-2 pl-3 text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:-outline-offset-6 focus-visible:outline-ring">
                 <span ref={named} className="truncate">
                   <ModelName name={model ?? "默认"} />
                 </span>
@@ -940,7 +943,7 @@ export function Composer({ slot, turn, archived, switchable, log, changed, comma
                 )}
                 {ultracode && <Workflow data-drop="ultracode" aria-label="ultracode" className="size-3.5 shrink-0" />}
                 <ChevronDown className="size-3.5 shrink-0" />
-              </button>
+              </button>}
             </>
           )}
           {switchable && (

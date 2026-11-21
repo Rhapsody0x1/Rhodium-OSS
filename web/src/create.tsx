@@ -12,7 +12,8 @@ import { Dialog } from "@base-ui/react/dialog";
 import { ArrowDown, ArrowUp, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, FileDiff, Folder, GitBranch, House, Import, LoaderCircle, MessageSquare, Search, SquarePlus, SquareTerminal } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { useLocation } from "wouter";
-import { AGENT_KINDS, DEFAULT_AGENT } from "../../src/agents";
+import { useAgents } from "./metadata";
+import { isBuiltinAgent, AGENT_KINDS, DEFAULT_AGENT } from "../../src/agents";
 import type { DirsData, FolderData, ImportableData, ImportPreviewData, ImportRow } from "../../src/board";
 import type { AgentKind } from "../../src/contracts";
 import type { RhReply } from "../../src/router";
@@ -367,6 +368,7 @@ export function NewSlot({ open, close, ws, inWs, done }: From) {
   // null: as yet untouched, the default.
   const [typed, setName] = useState<string | null>(null);
   const [agent, setAgent] = useState<AgentKind>(DEFAULT_AGENT);
+  const hasPlugins = useAgents().some(a => !isBuiltinAgent(a.id));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useFresh(open, () => (setName(null), setAgent(DEFAULT_AGENT), setError(null)));
@@ -387,7 +389,7 @@ export function NewSlot({ open, close, ws, inWs, done }: From) {
   return (
     <Form open={open} close={close} title="新建槽位" error={error} submit={() => void submit()} pinned={!fixed} tall={!fixed && !wide}>
       {picker}
-      <div className="flex gap-2">
+      <div className={cn("flex gap-2", hasPlugins && "flex-col items-start")}>
         <input aria-label="槽位名" placeholder="槽位名" value={name} onChange={(e) => setName(e.target.value)} autoCapitalize="off" spellCheck={false} className={FIELD} />
         <AgentPick agent={agent} pick={setAgent} />
       </div>
@@ -399,14 +401,16 @@ export function NewSlot({ open, close, ws, inWs, done }: From) {
 }
 
 /** The agents, by logo, one picked. */
-function AgentPick({ agent, pick, className }: { agent: AgentKind; pick: (a: AgentKind) => void; className?: string }) {
+function AgentPick({ agent, pick, importing = false }: { agent: AgentKind; pick: (a: AgentKind) => void; importing?: boolean }) {
+  const agents = useAgents().filter(a => !importing || a.importable);
   return (
-    <div role="radiogroup" aria-label="agent" className={cn("flex shrink-0 overflow-hidden rounded-lg border", className)}>
-      {AGENT_KINDS.map((a) => (
-        <button key={a} type="button" role="radio" aria-checked={agent === a} onClick={() => pick(a)} className={cn("focus-child grid size-11 place-items-center transition focus-visible:opacity-100", agent === a ? "bg-secondary" : "opacity-40 grayscale hover:opacity-70")}>
+    <div role="radiogroup" aria-label="agent" className="flex max-w-full shrink-0 flex-wrap overflow-hidden rounded-lg border">
+      {agents.map(({ id: a, name }) => (
+        <button key={a} type="button" role="radio" aria-label={isBuiltinAgent(a) ? undefined : name} title={name} aria-checked={agent === a} onClick={() => pick(a)} className={cn("focus-child flex h-11 min-w-11 max-w-full items-center justify-center transition focus-visible:opacity-100", agent === a ? "bg-secondary" : "opacity-40 grayscale hover:opacity-70")}>
           <span className="grid size-9 place-items-center rounded-md">
             <AgentLogo agent={a} className="size-5" />
           </span>
+          {!isBuiltinAgent(a) && <span className="truncate pr-2 text-sm">{name}</span>}
         </button>
       ))}
     </div>
@@ -707,7 +711,7 @@ function ImportSheet({ open, close, ws, inWs, done }: From) {
         {picker}
         <div className="flex gap-2">
           <input aria-label="槽位名" placeholder="槽位名" value={shownName} onChange={(e) => setName(e.target.value)} autoCapitalize="off" spellCheck={false} className={FIELD} />
-          <AgentPick agent={agent} pick={setAgent} />
+          <AgentPick agent={agent} pick={setAgent} importing />
         </div>
         <div className="flex min-w-0 items-center gap-3">
           <label className="flex h-11 min-w-0 flex-1 items-center gap-2 rounded-full bg-muted px-3.5 text-muted-foreground focus-within:text-foreground">
