@@ -260,20 +260,26 @@ function isClaudeTarget(target: string): boolean {
   return CLAUDE_SCRIPT_RE.test(basenameOfPath(unquoted));
 }
 
-function tokenizeShellSegment(segment: string): string[] {
-  const tokens: string[] = [];
+// ponytail: recognize simple quoted arguments and command separators; use a shell parser if nested syntax is needed.
+function* shellCommands(segment: string, windowsCmd: boolean): Generator<string[]> {
+  let tokens: string[] = [];
   let cur = "";
   let quote: '"' | "'" | null = null;
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]!;
     if (quote) {
       if (ch === quote) quote = null;
-      else if (ch === "\\" && quote === '"' && i + 1 < segment.length) cur += segment[++i]!;
+      else if (!windowsCmd && ch === "\\" && quote === '"' && i + 1 < segment.length) cur += segment[++i]!;
       else cur += ch;
-    } else if (ch === '"' || ch === "'") {
+    } else if (ch === '"' || (!windowsCmd && ch === "'")) {
       quote = ch;
-    } else if (ch === "\\" && i + 1 < segment.length) {
+    } else if (!windowsCmd && ch === "\\" && i + 1 < segment.length) {
       cur += segment[++i]!;
+    } else if (";|&\n`()".includes(ch)) {
+      if (cur) tokens.push(cur);
+      if (tokens.length) yield tokens;
+      tokens = [];
+      cur = "";
     } else if (/\s/.test(ch)) {
       if (cur) {
         tokens.push(cur);
@@ -284,12 +290,11 @@ function tokenizeShellSegment(segment: string): string[] {
     }
   }
   if (cur) tokens.push(cur);
-  return tokens;
+  if (tokens.length) yield tokens;
 }
 
-function shellCommandLaunchesClaude(cmdStr: string): boolean {
-  for (const seg of cmdStr.split(/(?:;|&&|\|\||[|&\n`()]|\$\()/)) {
-    const tokens = tokenizeShellSegment(seg);
+function shellCommandLaunchesClaude(cmdStr: string, windowsCmd = false): boolean {
+  for (const tokens of shellCommands(cmdStr, windowsCmd)) {
     let idx = 0;
     while (idx < tokens.length) {
       const tok = tokens[idx]!;
@@ -382,6 +387,7 @@ export function launchesClaude(argv: string[]): boolean {
     for (let i = 1; i < argv.length; i++) {
       const a = argv[i]!;
       const lower = a.toLowerCase();
+      if (exe === "cmd" && /^\/[dsq]$/.test(lower)) continue;
       if (
         lower === "-c" ||
         lower === "/c" ||
@@ -389,7 +395,7 @@ export function launchesClaude(argv: string[]): boolean {
         lower === "-command" ||
         /^-[a-z]*c$/.test(lower)
       ) {
-        return i + 1 < argv.length ? shellCommandLaunchesClaude(argv[i + 1]!) : false;
+        return i + 1 < argv.length ? shellCommandLaunchesClaude(argv[i + 1]!, exe === "cmd") : false;
       }
       if (!a.startsWith("-")) return isClaudeTarget(a);
     }

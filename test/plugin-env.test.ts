@@ -158,6 +158,14 @@ describe("plugin process subtree compliance audit and doctor findings", () => {
     }
   });
 
+  test("quoted search alternatives are arguments, not pipeline commands", () => {
+    expect(launchesClaude(["bash", "-lc", 'rg "pi|claude|codex" README.md'])).toBe(false);
+  });
+
+  test("cmd dispatches its command after the startup switches", () => {
+    expect(launchesClaude(["cmd.exe", "/d", "/s", "/c", '"C:\\Program Files\\Tools\\claude.cmd" --version'])).toBe(true);
+  });
+
   test("descendantPids, auditPluginProcessTree, and pluginFindings catch rogue descendant process", async () => {
     const tmpHome = mkdtempSync(join(tmpdir(), "rhodium-proc-"));
     dirs.push(tmpHome);
