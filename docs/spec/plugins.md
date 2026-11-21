@@ -13,7 +13,7 @@
 ### 1.2 本期做什么
 
 - **两类扩展点**：支持接入新的 agent 种类（经 `rh-agent/1` 协议）和新的 IM 平台（经 `rh-im/1` 协议），内置三家 agent（Claude、pi、Codex）与内置 IM（QQ、Telegram、飞书、fake）保持原生实现不变。
-- **显式清单加载与失败隔离**：在 `config.toml` 中通过 `[plugins.<id>]` 登记插件目录，读取并校验 `plugin.json` [插件清单](../../GLOSSARY.md) 与版本要求；配置失败、清单损坏、运行崩溃均隔离在单个插件内。
+- **显式清单加载与失败隔离**：在 `config.toml` 中通过 `[plugins.<id>]` 登记插件目录，读取并校验 `plugin.json` [插件清单](../../GLOSSARY.md)与版本要求；配置失败、清单损坏、运行崩溃均隔离在单个插件内。
 - **核心内部表开放化**：放开 `AgentKind` 与 `Platform` 联合类型限制，为非内置种类在对话记录、终端切换、设置带回、看板图标等查找表提供安全默认值。
 - **公开契约包与契约测试器**：提供零内部依赖的 TypeScript 契约包与语言无关的黑盒[契约测试](../../GLOSSARY.md)脚本，随仓库附带两个最小示例插件（`echo-agent` 与 `local-im`）。
 - **跨平台支持、自动化 CI 与零 Key 演示**：确保 Linux、Windows、macOS 可用；补全 GitHub Actions 构建与测试流程；提供不依赖任何真实 API Key 和真实 IM 账号的完整可重复演示路径。
@@ -33,7 +33,7 @@
 
 ### 2.1 总体架构
 
-核心与插件之间采用全独立进程架构（选择依据见 [ADR-0015](../adr/0015-out-of-process-plugins.md)）。核心把插件当作黑盒协议对端，插件只能通过[插件协议](../../GLOSSARY.md)与核心交互，不能导入 `src/` 内部任何代码。
+核心与插件之间采用全独立进程架构（选择依据与信任边界见 [ADR-0015](../adr/0015-out-of-process-plugins.md)）。核心把插件当作黑盒协议对端，插件只能通过[插件协议](../../GLOSSARY.md)与核心交互，不能导入 `src/` 内部任何代码。
 
 ```mermaid
 flowchart TD
@@ -75,7 +75,7 @@ flowchart TD
 
 ### 2.2 关键业务流程与故障分支
 
-下图展示一条消息经 IM 插件进入核心、送入跑在托管进程中的 Agent 插件、完成工具调用与提问、再返回 IM 的完整链路，以及重启重放与崩溃续跑两条关键恢复分支：
+下图展示一条消息经 IM 插件进入核心、送入跑在托管进程中的 Agent 插件、完成工具调用与提问、再返回 IM 的完整链路，以及重启重放与崩溃续跑两条关键恢复分支（`rh-hold` 只转发和落盘原始字节，托管对话记录由 `rhodium` 核心按幂等键写入，与 [ADR-0002](../adr/0002-one-daemon-plus-holders.md) 一致）：
 
 ```mermaid
 sequenceDiagram
@@ -86,10 +86,10 @@ sequenceDiagram
   participant A as Agent 插件 (rh-agent/1)
 
   U->>IM: 发送私聊消息
-  IM->>C: inbound (chat, sender, messageId, text)
-  C->>C: 去重 + 主人(owner)校验 + 路由到槽位
+  IM->>C: inbound (chat==sender, messageId, text)
+  C->>C: 去重 + owners.includes(sender) 校验 + 路由到槽位
   opt 首次启动或唤醒槽位
-    C->>H: launchHolder + start(argv, 剥离敏感环境变量)
+    C->>H: launchHolder(runId) + start(argv, 清洗敏感环境变量)
     H->>A: 启动插件并写入 init
     A-->>H: ready(proto: 1, session, capabilities)
     H-->>C: out (ready)
@@ -97,20 +97,22 @@ sequenceDiagram
   C->>H: write(send)
   H->>A: stdin (send)
   A-->>H: taken + turn_start + text_delta + tool_start + ask
-  H-->>C: out + ack + 写入托管对话记录
+  H-->>C: out + ack
+  C->>C: taken 事务前读原输入 + 按幂等键写托管对话记录
   C->>IM: send(过程消息 / 提问卡片)
   U->>IM: 点击按钮回答提问
   IM->>C: inbound(button)
   C->>H: write(answer)
   H->>A: stdin(answer)
-  A-->>H: item + turn_end(reply)
-  H-->>C: out(turn_end)
+  A-->>H: ask_resolved + item + turn_end(reply)
+  H-->>C: out(ask_resolved, item, turn_end)
+  C->>C: 按幂等键写托管对话记录 + 提交 outOffset
   C->>IM: send / edit(最终回复)
 
   Note over C,H: 异常分支 1：rhodium 重启
   C->>H: hello(offset) 重连
   H-->>C: 重放错过的 out.log 行
-  C->>C: 重建 session 与待答 ask 列表，生成 pending_asks 对账
+  C->>C: 按 ask_resolved/cancel 区分已答/待答 ask，跳过已写幂等键的记录
 
   Note over H,A: 异常分支 2：Agent 插件回合中崩溃
   A--xH: 进程非零退出
@@ -126,10 +128,10 @@ sequenceDiagram
 
 | 能力领域 | 核心统一承担（插件无需自写） | 插件自己实现 | 不支持或降级说明 |
 |---|---|---|---|
-| 进程与重启托管 | `rh-hold` 保活、`out.log` 落盘与重启重放、`taken`/`written` 投递状态跟踪、`pending_asks` 重建对账 | 按行消费 stdin、按行写 stdout | 不要求插件实现日志重放或连接恢复服务端 |
-| 槽位生命周期 | 空闲回收（`idleReap`）、崩溃自动续跑、连续崩溃熔断、并发上限（`maxRunning`）、定时任务 | 在 `close` 时正常清理下游进程并退出 | — |
-| 对话记录与展示 | 写入[托管对话记录](../../GLOSSARY.md)，驱动网页对话页、`rh read`、槽位时间线 `/resume` | 通过 `turn_start` / `item` / `tool_start` / `turn_end` 报出标准事件 | 不支持 `rh import` 扫盘导入；不接管已有外部进程 |
-| 合规与安全 | 保留内置名称、剥离 `ANTHROPIC_*` 等凭据环境变量、IM 主人校验、配对流程、来源行与系统提示拼装 | IM 插件原样透传发送者 ID；Agent 插件读取 `init.systemPromptFile` | 不允许任何非 `claude` 插件获取 Claude 订阅凭据 |
+| 进程与重启托管 | `rh-hold` 保活、`out.log` 落盘与重启重放、`taken`/`written` 投递状态跟踪、`pending_asks` 重建与对账 | 按行消费 stdin、按行写 stdout；收到 `answer` 并交付后发出 `ask_resolved` | 不要求插件实现日志重放或连接恢复服务端 |
+| 槽位生命周期 | 空闲回收（`idleReap`）、崩溃自动续跑、连续崩溃熔断、并发上限（`maxRunning`）、定时任务、`interrupt` 超时回收 | 在 `close` 时正常清理下游进程并退出 | — |
+| 对话记录与展示 | 按幂等键写入[托管对话记录](../../GLOSSARY.md)，驱动网页对话页、`rh read`、槽位时间线 `/resume` | 通过 `turn_start` / `item` / `tool_start` / `turn_end` 报出标准事件 | 不支持 `rh import` 扫盘导入；不接管已有外部进程 |
+| 合规与安全 | 保留内置名称（含 `herdr`）、清洗环境变量（含 Windows 混合大小写过滤）、集中执行配对、主人校验（`owners.includes(m.sender)`）与投递决定、`rh doctor` 巡检插件进程子树 | IM 插件承担平台账号身份认证并原样上报发送者 ID（私聊归一为用户 ID）；Agent 插件读取 `init.systemPromptFile`，遵守三条红线（不得拉起 `claude` 或包装 Claude Code、不得用 Claude 订阅、仅本人触发） | 插件属于用户显式信任代码；不允许任何非内置 `claude` 驱动获取 Claude 订阅凭据 |
 | 路由与渲染降级 | 消息排队、分段截断、Markdown 降级纯文本、工具折叠、`/rh_*` 命令、按钮分页、发送限流与超时记 `unknown` | 如实声明 `Capabilities`（agent 能力或 IM 平台能力） | 插件 IM 不支持 `qq_quota`、不支持 `rh bot` 扫码建 Bot |
 | 终端与专属特性 | 统一拒绝提示（切 TUI、`/ultracode` 等） | — | 不支持切 Herdr TUI；不支持 Claude 订阅额度窗口自动续跑 |
 
@@ -141,10 +143,10 @@ Agent 插件由 `rh-hold` 直接作为子进程拉起。进程内通过 stdin（
 
 | 消息 `type` | 说明 | 关键字段 |
 |---|---|---|
-| `init` | 启动后发出的第一条消息，用于握手与传参 | `proto: 1`、`conv`、`session: { new: string } \| { resume: string }`、`cwd`、`systemPromptFile`、`approval: boolean`、`model?: string \| null`、`effort?: string \| null`、`resumed?: boolean`、`config: Record<string, string>` |
+| `init` | 启动后发出的第一条消息，用于握手与传参 | `proto: 1`、`conv`、`session: { new: string } \| { resume: string }`、`cwd`、`systemPromptFile`、`program?: string \| null`（来自 `[programs.<id>]` 覆盖值或清单 `program`）、`approval: boolean`、`model?: string \| null`、`effort?: string \| null`、`resumed?: boolean`、`config: Record<string, string>` |
 | `send` | 发送一条用户或内部消息开始或加入回合 | `id`、`text`、`human: boolean`、`mode: "turn" \| "steer"`、`images?: { mimeType: string; data: string }[]` |
-| `interrupt` | 中断当前正在进行的回合（对应 `/stop` 或 `!`） | 无额外字段；插件中断后仍需正常发出本回合的 `turn_end` |
-| `answer` | 把用户的回答或审批决定交给插件 | `requestId`、`answer`（与核心 `AskAnswer` 同构：`permission` / `question` / `plan`） |
+| `interrupt` | 中断当前正在进行的回合（对应 `/stop` 或 `!`） | 无额外字段；插件取消下游回合后应尽快发出 `turn_end` |
+| `answer` | 把用户的回答、审批决定或 `ask_timeout` 默认回答交给插件 | `requestId`、`answer`（与核心 `AskAnswer` 同构：`permission` / `question` / `plan`） |
 | `approval` | 在进程运行中切换审批模式（仅当 `capabilities.liveApproval` 为真时调用） | `on: boolean` |
 | `command` | 执行插件声明支持的通用命令（例如 `model`、`effort`、`compact`、`usage`、`context`、`status`） | `id`、`name`、`args: string` |
 | `close` | 通知插件优雅关闭下游进程并退出 | 无额外字段；若 `durations.stopGrace` 内未退出，核心依次发 `TERM`、`KILL` |
@@ -157,12 +159,14 @@ Agent 插件由 `rh-hold` 直接作为子进程拉起。进程内通过 stdin（
 | `fatal` | 启动或握手阶段无法继续（如找不到下游 CLI 或配置错误） | `message: string`、`retryable?: boolean`（为 `false` 时核心直接报出原因，不做无意义的反复重启） |
 | `taken` | 确认插件已将 `id` 对应的 `send` 写进下游对话（崩溃时不再重发提示） | `inputId: string` |
 | `turn_start` | 一个新回合开始；若 `ready.session` 为 `null`，可在首回合补报 `session` | `input?: string`、`session?: string` |
+| `session` | 独立补报下游分配的真实会话 ID（用于启动与回合开始之后才拿到 ID 的 agent） | `session: string` |
 | `text_delta` | 助手回答的流式正文增量 | `text: string` |
 | `tool_start` | 发起工具调用（结果尚未返回，可能随后触发 `ask`） | `id: string`、`name: string`、`input: unknown` |
 | `item` | 一条完整助手消息或一次工具调用完成 | `item: { kind: "message"; text: string } \| { kind: "tool"; id?: string; name: string; input: unknown; result?: { text: string; error?: boolean } }` |
 | `ask` | 向用户提问或请求工具审批 | `requestId: string`、`kind: "question" \| "plan" \| "permission"`、`tool: string`、`input: unknown`、`toolUse?: string` |
+| `ask_resolved` | 确认插件已消费 `requestId` 对应的 `answer` 并交付给下游（闭合该提问，防止重放重弹） | `requestId: string` |
 | `ask_cancel` | 下游撤回一个尚未回答的提问 | `requestId: string` |
-| `turn_end` | 回合结束并空闲，触发最终回复推送与后续排队消息投递 | `reply?: string`、`background?: boolean` |
+| `turn_end` | 回合结束并空闲，触发最终回复推送与后续排队消息投递；也可附带迟到 `session` | `reply?: string`、`background?: boolean`、`session?: string` |
 | `usage` | 上报上下文窗口或单轮 token 用量 | `inputTokens?: number`、`outputTokens?: number`、`contextTokens?: number`、`maxContextTokens?: number` |
 | `command_result` | 对应 `command` 请求的结构化结果 | `id: string`、`ok: boolean`、`result?: CommandResult`、`error?: string` |
 | `error` | 运行期非致命协议或下游错误提示 | `detail: string`、`recoverable?: boolean` |
@@ -170,12 +174,15 @@ Agent 插件由 `rh-hold` 直接作为子进程拉起。进程内通过 stdin（
 #### 输入输出示例（`rh-agent/1`）
 
 ```json
-{"type":"init","proto":1,"conv":"01JXYZ0001","session":{"new":"conv-uuid-1"},"cwd":"/tmp/demo","systemPromptFile":"/tmp/state/prompt/slot1.md","approval":false,"model":null,"effort":null,"resumed":false,"config":{"mockFixture":"/tmp/dsh-sample.jsonl"}}
+{"type":"init","proto":1,"conv":"01JXYZ0001","session":{"new":"conv-uuid-1"},"cwd":"/tmp/demo","systemPromptFile":"/tmp/state/prompt/slot1.md","program":"dsh","approval":false,"model":null,"effort":null,"resumed":false,"config":{"fixture":"/tmp/dsh-sample.jsonl"}}
 {"type":"ready","proto":1,"session":"conv-uuid-1","capabilities":{"liveApproval":false,"steer":false,"commands":["model","status","context"]}}
 {"type":"send","id":"in-001","text":"[来自 网页]\n列出当前目录","human":true,"mode":"turn"}
 {"type":"taken","inputId":"in-001"}
 {"type":"turn_start","input":"in-001"}
 {"type":"tool_start","id":"tc-1","name":"list_dir","input":{"path":"."}}
+{"type":"ask","requestId":"req-1","kind":"permission","tool":"list_dir","input":{"path":"."},"toolUse":"tc-1"}
+{"type":"answer","requestId":"req-1","answer":{"kind":"permission","allow":true}}
+{"type":"ask_resolved","requestId":"req-1"}
 {"type":"item","item":{"kind":"tool","id":"tc-1","name":"list_dir","input":{"path":"."},"result":{"text":"README.md\nsrc/"}}}
 {"type":"text_delta","text":"当前目录包含 README.md 和 src/。"}
 {"type":"item","item":{"kind":"message","text":"当前目录包含 README.md 和 src/"}}
@@ -184,10 +191,37 @@ Agent 插件由 `rh-hold` 直接作为子进程拉起。进程内通过 stdin（
 
 #### 关键运行语义
 
+- **迟到会话 ID 上报与落库时点**：部分外部 agent 只有在首回合运行中甚至回合结束时才能拿到真实会话 ID。插件可以在 `ready.session` 先填 `null`，随后在 `turn_start.session`、独立的 `{"type":"session","session":"<id>"}` 事件或 `turn_end.session` 中上报真实 ID。`PluginAgentDriver` 收到任意非空 `session` 立即更新 `info.session`；`src/runner.ts` 的 `output()` 在处理该输出行所在的同一数据库事务里，只要 `driver.info.session` 有效且库中 `conversation.sessionId` 仍为空，立即落库写入 `conversation.sessionId`。此后无论进程重启还是空闲回收，下一进程启动时都会以 `session: { resume: "<id>" }` 续接。
 - **`steer: false` 降级**：如果插件在 `ready.capabilities.steer` 声明不支持插话（或省略该字段），路由在当前回合未结束时把新消息先留在队列里（不标失败），待 `turn_end` 到达后再以 `mode: "turn"` 写入；以 `!` 开头打断时，核心先发 `interrupt`，待旧回合 `turn_end` 到来后再发新消息。
-- **通用命令子集与自动拒绝**：只有列入 `ready.capabilities.commands`（且交集于插件清单静态声明）的通用命令才会转发 `command` 到插件。`new` 与 `resume` 始终由核心自己处理；`stop` 固定映射为 `interrupt`；未声明支持的命令（例如 `/ultracode`、`/compact`）由核心直接向用户返回“该 agent 不支持此命令”，不惊动插件进程。
-- **动态会话 ID 与重启重建**：部分 agent 只有在首回合启动后才会给出自己的会话 ID，此时插件可以在 `ready` 里传 `session: null`，再在第一次 `turn_start` 携带 `session` 字符串，核心即落库记录。`rhodium` 重启连接旧 `rh-hold` 时，`PluginAgentDriver` 在重放 `out.log` 过程中重新收集尚未配对的 `ask` 列表，并在重放完成时统一向主循环发出 `pending_asks`，插件侧无需任何重放或状态恢复代码。
-- **核心托管对话记录**：由于插件的底层格式各异甚至不可读（例如加密或私有数据库），核心在每收到用户 `taken`、`item`、`turn_end` 时，同步将标准化条目追加到 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`，格式复用内置的对话块结构，因此看板对话页、折叠工具行、`rh read` 和 `/resume` 列表对所有插件 agent 开箱即用。
+- **`interrupt` 语义、超时兜底与 `close` 宽限关系**：
+  - 正常路径：`interrupt` 只中断当前回合、不杀插件进程；插件终止下游本轮运行后应尽快发出 `turn_end`（不带最终回复），让槽位回到空闲并继续投递排队的后续消息。
+  - 超时升级：新增配置 `durations.pluginInterrupt`（默认 `"10s"`），独立于 `durations.stopGrace`（默认 `"5s"`）。发出 `interrupt` 后若超过 `pluginInterrupt` 仍未收到 `turn_end`，`PluginAgentDriver` 判定插件卡死并强制关停进程：按 `close` 流程先发 `{"type":"close"}` 与 `eof()`，等待 `durations.stopGrace`；未退出则依次 `TERM`、再等 `durations.stopGrace`、最后 `KILL`。进程退出后路由清掉 `interruptedAt` 并拉起新进程投递排队的后续消息。
+- **`ask` 超时（`ask_timeout`）行为**：沿用现有 `src/router.ts` 与 `src/asks.ts` 的 `timeoutAnswer()` 逻辑，不新增协议消息类型。当未答提问超过 `durations.askTimeout`（默认 `30m`，`0s` 不超时）时，核心自动通过标准 `answer` 消息向插件下发默认回答：
+  - `permission`：`{ "kind": "permission", "allow": false, "message": "用户暂时无法回答，请按你的最佳判断继续" }`；
+  - `plan`：`{ "kind": "plan", "approve": false, "message": "用户暂时无法回答，没有批准这个计划。请用 rh send me 把计划摘要发给用户（你是子槽位时，写在最终回复里），然后停下来，等用户回复再继续。" }`；
+  - `question`：`{ "kind": "question", "answers": { "<问题>": "用户暂时无法回答，请按你的最佳判断继续" } }`。
+  - 核心同步在 IM 撤掉提问按钮；插件照常消费该 `answer` 并回报 `ask_resolved`。
+- **区分尚待回答与已回答的 `ask`（重启恢复与对账）**：
+  - `PluginAgentDriver` 在重放或实时读取 `out.log` 时维护当前进程的未闭合提问集合：收到 `ask` 加入集合；收到 `ask_resolved`、`ask_cancel`、对应 `toolUse` 的完成 `item` 或 `turn_end` 时移出集合。
+  - `rhodium` 重启重连 `rh-hold` 并重放完 `out.log` 后，`replayed()` 只把仍留在未闭合集合中的提问作为 `pending_asks` 发给路由：
+    - 若崩溃前用户已答且核心已交付（数据库状态为 `delivered`），`out.log` 里已有 `ask_resolved`，根本不会出现在 `pending_asks`；即便进程恰好在写出 `ask_resolved` 前崩掉，路由在处理 `pending_asks` 时也会比对数据库 `state.listed`（包含已 `delivered` 记录），绝不重复弹出旧提问；
+    - 若崩溃前用户已答但尚未交付插件（数据库状态为 `answered`，`out.log` 无 `ask_resolved`），它仍在 `pending_asks` 中，路由会立即触发重新下发 `answer`。
+- **通用命令子集与自动拒绝**：只有列入 `ready.capabilities.commands`（且与清单静态声明一致）的通用命令才会转发 `command` 到插件。`new` 与 `resume` 始终由核心自己处理；`stop` 固定映射为 `interrupt`；未声明支持的命令（例如 `/ultracode`、`/compact`）由核心直接向用户返回“该 agent 不支持此命令”，不惊动插件进程。
+- **核心托管对话记录（唯一写入者、幂等去重与用户输入获取时序）**：
+  - **为什么统一托管**：各家插件 agent 的本地记录格式各异（有的写自有格式 JSONL，有的不落盘或结构随版本变化），由核心统一记录在 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`，让网页对话页、`rh read` 和槽位时间线 `/resume` 无需为每家插件单独写解析器，展示格式也完全一致。
+  - **唯一写入者**：仅由 `rhodium` 核心（`src/runner.ts` 调用 `src/transcript.ts`）写入；`rh-hold` 保持只转发和落盘字节，不解析协议。
+  - **稳定幂等键（消除“写文件后、提交数据库 `outOffset` 前崩溃”的重复）**：
+    - `launchHolder` 每次拉起新进程时生成一个进程运行标识 `runId`（ULID，持久化在 `holder` 表中，同一次运行的重连保持不变，下次新起进程换新值）；
+    - 写入托管记录 JSONL 的每条条目携带唯一幂等键 `"k"`：
+      - 用户/内部输入条目：`k = "in:" + inputId`；
+      - 插件输出事件条目（`tool_start`、`item`、`turn_end`）：`k = "out:" + runId + ":" + lineEndOffset`（`lineEndOffset = pos + nl + 1`，即该行在本次 `out.log` 中的精确结束字节偏移）。
+    - **三道去重防线**：
+      1. `replay === true`（`pos + nl < l.seen`）的已处理行只恢复驱动内存状态，不触发托管记录写盘；
+      2. 写入层（`src/transcript.ts`）按对话缓存已落盘的 `"k"` 集合（首次打开文件时扫描已有行加载），遇到相同 `"k"` 直接跳过；
+      3. 读取层（`/api/messages` 与 `rh read`）按 `"k"` 去重并忽略文件末尾因异常断电截断的半行不完整 JSON。
+  - **用户输入获取时序（消除 `taken` 清空正文的竞态）**：
+    - 在 `src/runner.ts` 处理 `taken` 事件、**调用 `loop.batch()` 提交数据库事务（`router.ts` 会在此事务把 `agentInput` 的 `body` 和 `images` 置为 `null`）之前**，先从 `store` 读取该 `inputId` 尚未清空的 `body`、`images` 与发送时间，以 `k = "in:" + inputId` 幂等追加写入托管对话记录；
+    - 如果上次进程恰好在“写出 `taken` 后、提交数据库事务前”崩溃，`agentInput.body` 与 `images` 仍完整保存在数据库里，重启重放 `out.log`（此时 `replay === false`）依然能取回完整原文写入；若数据库事务已提交，则 `outOffset` 已前进（`replay === true`）且 `"in:" + inputId` 已落盘，不会重复也不会丢失。
 
 ---
 
@@ -200,8 +234,8 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 | 方法 `method` | 必填性 | 说明 | 主要参数与返回值 |
 |---|---|---|---|
 | `init` | 必选 | 进程启动后的首次握手，核心校验平台能力表 | 参数：`{ proto: 1, botId, botName, config }`；返回：`{ proto: 1, capabilities: Capabilities }` |
-| `send` | 必选 | 发送一条文本、Markdown、按钮或文件消息 | 参数：`{ chat, message: OutboundMessageWire }`（其中本地文件已打包为 `path` 与 `name`，由插件读取上传）；返回：`SendResult` |
-| `edit` | 按能力 | 编辑已发出的消息（仅当 `capabilities.progress === "edit"` 或 `stream` 时调用） | 参数：`{ chat, messageId, message }`；返回：`SendResult` |
+| `send` | 必选 | 发送一条文本、Markdown、按钮或文件消息 | 参数：`{ chat, message: OutboundMessageWire }`（本地文件以 `path` 与 `name` 传入，由插件读取上传）；返回：`SendResult` |
+| `edit` | 按能力 | 编辑已发出的消息（仅当 `capabilities.progress === "edit"` 或声明了 `capabilities.stream` 时调用；`Capabilities.progress` 仅取 `"append" \| "edit"`，流式能力由独立字段 `stream?: number` 声明） | 参数：`{ chat, messageId, message }`；返回：`SendResult` |
 | `drop_buttons` | 按能力 | 撤掉已发消息上的按钮（仅当 `capabilities.buttons` 为真时调用） | 参数：`{ chat, messageId }`；返回：`SendResult` |
 | `answer_press` | 按能力 | 应答一次按钮回调（仅当 `capabilities.buttons` 为真时调用） | 参数：`{ chat, press, text }`；返回：`{ ok: true }` |
 | `fetch_attachment` | 按需 | 在核心确认发送者为主人后，拉取入站附件内容到指定临时目录 | 参数：`{ attachmentId, destPath }`；返回：`{ ok: true, size, mimeType? }` |
@@ -215,9 +249,17 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 | 名称 | 类型 | 说明 | 主要载荷 |
 |---|---|---|---|
 | `connected` | 通知 | 汇报连接建立或断线状态（用于看板状态点与故障统计） | `{ up: boolean, error?: string }` |
-| `inbound` | 通知 | 上报一条外部平台收到的消息或按钮按下事件 | `{ chat, messageId, sender, text, at, quote?, ref?, button?, voice?, attachments?: { id, kind, name?, mimeType? }[] }` |
-| `kept_get` | 请求 | 读取核心为本 Bot 持久化保存的断点或游标键值 | 参数：`{ key: string }`；返回：`{ value: string \| null }` |
+| `inbound` | 通知 | 上报一条外部平台收到的消息或按钮按下事件（私聊固定令 `chat === sender`） | `{ chat, messageId, sender, text, at, quote?, ref?, button?, voice?, attachments?: { id, kind, name?, mimeType? }[] }` |
+| `kept_get` | 请求 | 读取核心为本 Bot 持久化保存的断点、游标或私聊通道映射 | 参数：`{ key: string }`；返回：`{ value: string \| null }` |
 | `kept_set` | 请求 | 写入或删除本 Bot 的持久化键值（核心自动加 `plugin:<botId>:` 前缀隔离） | 参数：`{ key: string, value: string \| null }`；返回：`{ ok: true }` |
+
+#### 私聊地址归一与往返约定
+
+现有 `src/router.ts` 在首次配对时依赖 `m.chat === m.sender` 自动将该私聊设为主窗口，后续的 `ownerChat()` 和主动推送也统一把私聊记录的 `platformChatId` 与 `owners` 中的用户 ID 直接匹配。为保证在“用户 ID 与私聊频道/房间 ID 分离”的平台（例如 Discord 的 `user.id` vs DM `channel.id`、Matrix 的 MXID vs `room_id`）上“配对 -> 主窗口 -> 重启 -> 主动发回原私聊”全部跑通，契约选定**由 IM 插件负责私聊地址归一与还原**（与核心内置的 `src/feishu.ts` 保持同一模式）：
+
+1. **入站归一**：收到私聊消息或私聊按钮交互时，IM 插件把 `inbound.sender` 与 `inbound.chat` **都填为平台用户 ID**，同时在发送 `inbound` 前通过内存缓存与 `kept_set("dm:" + userId, platformChannelId)` 持久化“用户 ID -> 平台私聊通道 ID”映射。
+2. **出站还原**：核心调用 `send(chat, ...)`、`edit(chat, ...)` 或 `drop_buttons(chat, ...)` 时，`chat` 传入的是用户 ID。插件按顺序解析实际投递目标：先查内存缓存 -> 未命中查 `kept_get("dm:" + chat)` -> 仍未命中（如首次配置了 `owner` 尚未收到入站就主动发消息）则调用平台接口按用户 ID 创建或获取私聊通道并写回 `kept_set`。
+3. 如此核心的 `chat` 表、主窗口绑定与跨重启主动消息路由完全不用区分平台地址模型，插件重启后通过 `kept_get` 也能立刻还原通道地址。
 
 #### 输入输出示例（`rh-im/1`）
 
@@ -225,15 +267,17 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 {"jsonrpc":"2.0","id":1,"method":"init","params":{"proto":1,"botId":"bot_01","botName":"my-discord","config":{"token":"redacted-at-runtime","guildPolicy":"dm-only"}}}
 {"jsonrpc":"2.0","id":1,"result":{"proto":1,"capabilities":{"progress":"edit","editEvery":1000,"finalEdit":true,"buttons":true,"maxButtons":25,"sendLimit":{"kind":"rate","perChatPerSecond":2},"menu":{"scope":"global","maxItems":50},"maxTextLength":2000,"maxFileBytes":{"image":10485760,"file":26214400},"markdown":{"extensions":[]}}}}
 {"jsonrpc":"2.0","method":"connected","params":{"up":true}}
-{"jsonrpc":"2.0","method":"inbound","params":{"chat":"dm-user-1","messageId":"msg-900","sender":"user-1","text":"你好","at":1763690000000}}
-{"jsonrpc":"2.0","id":2,"method":"send","params":{"chat":"dm-user-1","message":{"text":"收到，已交给槽位处理。"}}}
+{"jsonrpc":"2.0","id":10,"method":"kept_set","params":{"key":"dm:user-1","value":"dm-channel-99"}}
+{"jsonrpc":"2.0","id":10,"result":{"ok":true}}
+{"jsonrpc":"2.0","method":"inbound","params":{"chat":"user-1","messageId":"msg-900","sender":"user-1","text":"你好","at":1763690000000}}
+{"jsonrpc":"2.0","id":2,"method":"send","params":{"chat":"user-1","message":{"text":"收到，已交给槽位处理。"}}}
 {"jsonrpc":"2.0","id":2,"result":{"status":"sent","messageId":"msg-901"}}
 ```
 
 #### 安全与可靠性约定
 
 - **单 Bot 凭据隔离**：`init.params.config` 只包含这个 `[bots.<name>]` 表和对应 `[plugins.<id>.config]` 的非内部字段（剔除 `platform`、`target`、`owner`），不经命令行参数传递，也不写入日志。
-- **主人验证与懒下载**：IM 插件不在本地做主人白名单判断，也不自主触发路由。`inbound` 通知里如果带有文件或图片，只能先给核心一个不透明 `attachmentId`；核心验证 `sender` 确实属于该 Bot 的 `owners`（或配对码流程合法）后，才反向调用 `fetch_attachment` 落盘，防止陌生人恶意投递大文件耗尽磁盘或流量。
+- **平台认证与核心主人校验分工**：平台侧消息来源的身份认证由 IM 插件承担并原样填充 `sender`；配对码拦截、主人校验（`owners.includes(m.sender)`）、去重和路由决定全部留在 `rhodium` 核心执行。陌生人的 `inbound` 绝不触发 agent。带附件的消息只传不透明 `attachmentId`，核心确认发送者为主人后才反调 `fetch_attachment` 落盘，防止陌生人投递大文件耗尽资源。
 - **消息去重与发送兜底**：核心保留统一的 `seen(chat, messageId)` 检查，避免插件断线重连后重复提交同一条入站消息。`send` / `edit` RPC 超过 `durations.pluginRpc`（默认 `30s`）无响应时，核心按“结局不明（`unknown`）”落库，绝不自动重发。
 - **进程看守与熔断**：IM 插件进程在运行中意外退出时，核心按 `1s`、`2s`、`4s`、`8s`、`16s`、`30s` 指数退避重启；若连续未发出 `connected(up: true)` 即退出或持续报错达 `limits.botFailures`（默认 5 次），核心停止重启，将该 Bot 标为 `faulted` 并在主窗口和看板发出告警。
 
@@ -243,18 +287,18 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 
 为让 TypeScript/JavaScript 插件作者获得强类型提示、同时绝对不依赖核心内部实现（满足课程“不依赖核心内部代码”的硬要求），核心仓库抽取独立子包 `packages/plugin-sdk/`（零运行期第三方依赖，不从 `src/` 导入任何文件）：
 
-- `manifest.ts`：`PluginManifest` 类型定义与 `validateManifest(json)` 纯函数校验器。
+- `manifest.ts`：`PluginManifest` 类型定义与 `validateManifest(json)` 纯函数校验器（含保留名与禁止拉起 `claude` 校验）。
 - `agent.ts`：`rh-agent/1` 的消息联合类型（`CoreToAgentMessage`、`AgentToCoreMessage`）与行级 JSONL 读写帮助函数。
-- `im.ts`：`rh-im/1` 的 JSON-RPC 方法与能力表类型（复用与核心同源对齐的 `Capabilities`、`SendResult`、`OutboundMessage` 等纯契约结构）。
+- `im.ts`：`rh-im/1` 的 JSON-RPC 方法与能力表类型（与核心对齐的 `Capabilities`、`SendResult`、`OutboundMessage` 等纯契约结构）。
 - 非 JS/TS 插件（例如 Python、Go、Rust 编写的插件）不需要引用该包，直接按 3.2 与 3.3 的 JSON 行协议实现即可。
 
 ---
 
 ## 4. 加载、配置、版本校验与失败行为
 
-### 4.1 插件目录与清单文件 `plugin.json`
+### 4.1 插件目录、清单 `plugin.json` 与启动契约
 
-核心不自动扫描 `$HOME` 或全局目录来“猜测加载”未知代码。每个插件以目录形式放在用户可控的本地位置（例如仓库内开发的 `plugins/<id>/` 或安装目录），目录根下必须有一个 `plugin.json` 清单文件：
+核心不自动扫描 `$HOME` 或全局目录来“猜测加载”未知代码。每个插件以目录形式放在用户显式配置的本地位置（如 `plugins/<id>/`），目录根下必须有一个 `plugin.json` 清单文件：
 
 ```json
 {
@@ -267,9 +311,9 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
   "protocol": "rh-agent/1",
   "minRhodium": "1.5.0",
   "program": "dsh",
-  "command": ["bun", "run", "dist/index.js"],
+  "command": ["bun", "run", "${PLUGIN_DIR}/dist/index.js"],
   "commandByPlatform": {
-    "win32": ["bun.exe", "run", "dist/index.js"]
+    "win32": ["bun.exe", "run", "${PLUGIN_DIR}/dist/index.js"]
   },
   "capabilities": {
     "liveApproval": false,
@@ -281,7 +325,7 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 }
 ```
 
-清单字段约束：
+#### 清单字段约束
 
 | 字段 | 适用种类 | 说明与校验规则 |
 |---|---|---|
@@ -293,14 +337,26 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 | `version` | 通用 | SemVer 版本号（`x.y.z`） |
 | `protocol` | 通用 | agent 必须为 `"rh-agent/1"`，IM 必须为 `"rh-im/1"` |
 | `minRhodium` | 通用 | 最低核心版本号（SemVer）；核心版本低于该值则拒绝加载 |
-| `command` / `commandByPlatform` | 通用 | 启动入口数组（至少 1 项）；其中相对路径按清单所在目录解析；按 `process.platform` 优先取 `commandByPlatform` |
-| `program` | 仅 `agent` | 默认下游可执行程序名，可被 `config.toml` 的 `[programs]` 覆盖 |
+| `command` / `commandByPlatform` | 通用 | 启动参数数组（至少 1 项）；支持占位符 `${PLUGIN_DIR}` 展开为清单所在目录的规范绝对路径；按 `process.platform` 优先取 `commandByPlatform`；禁止指向 `claude` |
+| `program` | 仅 `agent` | 默认下游可执行程序名，可被 `config.toml` 的 `[programs]` 覆盖；禁止写为 `claude` |
 | `capabilities` | 通用 | 静态能力声明：agent 声明支持的命令和 `liveApproval`；IM 声明默认 `Capabilities` 供 `config` 检查，运行期以握手回传为准 |
-| `requiredConfig` / `optionalConfig` | 通用 | 声明插件期望在 `[plugins.<id>.config]` 或 `[bots.<name>]` 中提供的键名列表；核心用于启动前拼写检查与脱敏提示 |
+| `requiredConfig` / `optionalConfig` | 通用 | 声明插件期望在 `[plugins.<id>.config]` 或 `[bots.<name>]` 中提供的键名列表；核心用于启动前检查与脱敏提示 |
 
-保留内置名称清单（禁止插件覆盖）：
-- **Agent 保留名**：`claude`、`pi`、`codex`
+#### 保留内置名称与合规禁止项
+
+- **Agent 保留名**：`claude`、`pi`、`codex`、`herdr`（`herdr` 已被 `config.toml` 的 `[programs].herdr` 占用，避免同名插件占用宿主的终端宿主配置键）
 - **IM 保留名**：`qq`、`telegram`、`feishu`、`fake`、`me`、`web`
+- **静态合规拒绝**：清单的 `program` 与 `command` / `commandByPlatform` 的可执行文件名及参数中不得出现 `claude`（包括 `claude`、`claude.exe`、`claude.cmd`），防止以插件形式包装 Claude Code。
+
+#### 实际启动契约与带空格路径解析
+
+1. **区分“插件入口程序”与“下游外部 CLI”**：
+   - `src/runner.ts` 在启动槽位前，只按 `command[0]`（经 `${PLUGIN_DIR}` 展开）查找和等待**插件入口程序**（裸命令名如 `"bun"` / `"bun.exe"` 经 `cfg.agentPath` 走 `locate()`；含路径分隔符或绝对路径直接检查文件是否存在）。
+   - **下游外部 CLI**（`manifest.program`，可被 `[programs.<id>]` 覆盖）在启动槽位前**不做存在性拦截**，而是通过 `init.program` 传递给插件。这样插件在离线回放/Mock 模式下即使本机未安装真实 `dsh` / `agy` 也能正常启动跑通；在真实模式下由插件自己依据 `init.program` 定位下游程序，找不到时向核心发送 `fatal(retryable: false)` 并报错。
+2. **跨目录与带空格路径解析**：
+   - Agent 插件进程的工作目录（`cwd`）是**槽位工作目录**（可能带有空格，且与插件所在目录不同）。
+   - 因此清单中的相对脚本或相对二进制不得依赖 `cwd`，一律通过 **`${PLUGIN_DIR}`** 引用插件清单所在目录（例如 `["bun", "run", "${PLUGIN_DIR}/dist/index.js"]`），由核心按 `path.resolve(pluginDir, ...)` 展开为完整绝对路径，并直接以参数数组传给 `rh-hold` / `Bun.spawn`（**绝不经过 shell 拼接**）。
+   - 核心同时向插件进程注入环境变量 `RHODIUM_PLUGIN_DIR`（插件清单所在规范绝对路径），方便插件定位随包附带的相对路径资源或配置。
 
 ### 4.2 配置文件 `config.toml`
 
@@ -309,6 +365,7 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 ```toml
 [durations]
 pluginHandshake = "10s"
+pluginInterrupt = "10s"
 pluginRpc = "30s"
 
 [programs]
@@ -335,15 +392,15 @@ target = "work/main"
 ```
 
 规则说明：
-- `path` 支持绝对路径或相对 `config.toml` 所在目录的路径（是否允许相对路径在 §11 作为待拍板项确认）。
+- `[plugins.<id>].path` 支持绝对路径，也支持**相对于 `config.toml` 所在目录**的相对路径（读取配置后由核心统一 `resolve` 为规范绝对路径，方便课程演示包在任意解压目录直接运行，无需脚本改写配置；生产环境仍推荐使用绝对路径）。
 - `enabled` 默认为 `true`；设为 `false` 时核心不加载该插件，视为显式禁用。
 - IM 插件 Bot 所需的密钥放在 `0600`（Windows 为本人私有 ACL）保护的 `config.toml` `[bots.<name>]` 表中，沿用既有安全模型。
 - 每次启用、禁用、修改清单或修改插件配置均需重启 `rhodium` 生效（与 `config.toml` 其他配置修改约定一致）。
 
 ### 4.3 两阶段版本与契约校验
 
-1. **阶段 1（启动期静态校验）**：`rhodium` 读取 `config.toml` 后，对每条启用的 `[plugins.<id>]` 读取 `<path>/plugin.json`。校验 JSON 合法性、`manifestVersion === 1`、`kind`、`id` 与配置键名一致、非保留名、非重复 ID、`protocol` 匹配、`minRhodium <= 当前核心版本`、启动命令文件可定位，以及 `requiredConfig` 项是否齐全。
-2. **阶段 2（运行期握手校验）**：拉起插件进程后，核心在 `durations.pluginHandshake`（默认 `10s`）内等待 `ready`（agent）或 `init` 结果（IM），强制校验返回 `proto === 1`；对于 IM 插件，还必须用结构检查函数核验其 `capabilities`（如 `progress`、`sendLimit`、`maxTextLength`、`maxFileBytes` 等必选字段类型合法，防止残缺能力表让渲染器崩溃）。
+1. **阶段 1（启动期静态校验）**：`rhodium` 读取 `config.toml` 后，对每条启用的 `[plugins.<id>]` 读取 `<path>/plugin.json`。校验 JSON 合法性、`manifestVersion === 1`、`kind`、`id` 与配置键名一致、非保留名（含 `herdr`）、非重复 ID、`protocol` 匹配、`minRhodium <= 当前核心版本`、不指向 `claude`、启动命令第 0 项可定位，以及 `requiredConfig` 项是否齐全。
+2. **阶段 2（运行期握手校验）**：拉起插件进程后，核心在 `durations.pluginHandshake`（默认 `10s`）内等待 `ready`（agent）或 `init` 结果（IM），强制校验返回 `proto === 1`；对于 IM 插件，还必须用结构检查函数核验其 `capabilities`（如 `progress` 仅允许 `"append" | "edit"`、`sendLimit`、`maxTextLength`、`maxFileBytes` 等必选字段类型合法，防止残缺能力表让渲染器崩溃）。
 3. **演进兼容策略**：在 `/1` 协议家族内只允许新增可选字段，通信双方必须忽略不认识的字段；不兼容的破坏性变更升级到 `rh-agent/2` 或 `rh-im/2`，当前版本不要求同时运行多代协议。
 
 ### 4.4 禁用与失败行为矩阵
@@ -353,9 +410,9 @@ target = "work/main"
 | 场景 | 触发条件 | 核心行为与日志 | 对用户与槽位/Bot 的外显表现 |
 |---|---|---|---|
 | 显式禁用 | `[plugins.<id>]` 设 `enabled = false` | 不读取入口、不注册到可用列表、不启动进程；记 `info` 日志 `plugin disabled` | `rh doctor` 标注 `已禁用`；对应新建槽位拒绝并提示“插件 `<id>` 已禁用”；若旧槽位历史对话用了该插件，发消息时提示“插件 `<id>` 已禁用，请启用或切换对话”；若 `[bots.<name>]` 引用它，跳过连接并标出原因 |
-| 清单或静态校验失败 | 路径不存在、`plugin.json` 缺失或损坏、字段非法、保留名冲突、`minRhodium` 不满足、缺 `requiredConfig` | 隔离该插件，核心继续正常启动；`pluginRegistry` 记录状态 `failed` 与脱敏错误；记 `error` 日志 `plugin load failed` | 看板顶部与 `rh doctor` 列出该插件及具体原因；向依赖它的槽位或 `rh new --agent <id>` 返回明确中文错误“插件 `<id>` 加载失败：<具体原因>” |
+| 清单或静态校验失败 | 路径不存在、`plugin.json` 缺失或损坏、字段非法、保留名冲突、指向 `claude`、`minRhodium` 不满足、缺 `requiredConfig` | 隔离该插件，核心继续正常启动；`pluginRegistry` 记录状态 `failed` 与脱敏错误；记 `error` 日志 `plugin load failed` | 看板顶部与 `rh doctor` 列出该插件及具体原因；向依赖它的槽位或 `rh new --agent <id>` 返回明确中文错误“插件 `<id>` 加载失败：<具体原因>” |
 | Agent 插件握手超时 / `fatal` / 坏输出 | 超出 `pluginHandshake` 未回 `ready`、`ready.proto !== 1`、收到 `fatal` 或非法 JSON 行 | 终止该子进程（`TERM`->`KILL`）；`retryable: false` 时直接落为未运行并停止无意义续跑；非法 JSON 行触发 `protocol_error` 并按协议异常上报 | 槽位回到 `off`/`crashed`，向联系窗口与看板事件发送脱敏故障通知（附 `err.log` 末行） |
-| Agent 插件回合中崩溃或卡死 | 进程意外非零退出，或关闭阶段超时 | 经托管进程写出 `exit`；走核心现有崩溃续跑逻辑，10 分钟内连续崩溃 3 次触发熔断；关闭超时则 `TERM` 后 `KILL` | 触发续跑时发状态提示；达熔断上限后停在未运行状态并告知用户需手动恢复 |
+| Agent 插件回合中崩溃或中断卡死 | 进程意外非零退出，或收到 `interrupt` 超过 `pluginInterrupt`（10s）仍不回 `turn_end` | 经托管进程写出 `exit`；意外退出走核心现有崩溃续跑逻辑，10 分钟内连续崩溃 3 次触发熔断；中断卡死先升为 `close` 再 `TERM`/`KILL` 后重启投递排队消息 | 触发续跑时发状态提示；达熔断上限后停在未运行状态并告知用户需手动恢复 |
 | IM 插件握手失败 / 能力表非法 | 找不到命令、`init` 超时、能力表校验不通过 | 中止启动该 Bot 的适配器，不计入在线适配器，核心其余 Bot 与看板正常服务；记 `error` 日志 `plugin im init failed` | 该 Bot 状态标为 `faulted`（故障），在看板拓扑图/列表亮故障点，并在主窗口（若有）发出通知 |
 | IM 插件运行期崩溃或 RPC 超时 | 运行中退出，或 `send`/`edit` 超过 `pluginRpc`（30s）未响应 | 运行崩溃按退避重连，连续失败达 `limits.botFailures`（5 次）熔断标 `faulted`；单次 RPC 超时将出站记录标记为 `unknown`，绝不重发 | 看板显示重连中或故障，主窗口收一条故障通知；`rh send` 回执写明“不知道发出去没有” |
 
@@ -370,14 +427,15 @@ target = "work/main"
 | 1 | `src/contracts.ts` | `AgentKind = "claude" \| "pi" \| "codex"` 与 `Platform = "qq" \| "telegram" \| "feishu" \| "fake"` 为闭集联合 | 拆分为 `BuiltinAgentKind` / `AgentKind = BuiltinAgentKind \| (string & {})` 与 `BuiltinPlatform` / `Platform = BuiltinPlatform \| (string & {})`；既不丢内置三家的编译期静态检查，又允许任意已注册插件 ID |
 | 2 | `src/agents.ts` | 静态导出 `AGENTS`、`AGENT_KINDS`、`TYPING`、`headlessEnv()`、`terminalUnset()` | 增加 `builtin`、`tui`、`importable`、`steer`、`supportedCommands` 属性；保留内置定义不变，提供运行时插件注册函数 `registerAgentPlugin()` 与动态查询函数 `agentDef(kind)`；非内置插件默认 `claudeKeys: false`、`tui: false`、`importable: false`，确保 `headlessEnv` 自动剥离全部 Anthropic/Claude/Herdr 凭据 |
 | 3 | `src/platforms.ts` | 静态导出 `PLATFORMS`、`MADE`（依赖 `Exclude<Platform, "fake">`） | 保留 `BUILTIN_PLATFORMS` 与 `MADE` 仅包含 `qq`、`telegram`、`feishu`（供 `rh bot` 向导使用）；提供 `registerPlatformPlugin()` 与 `platformDef(p)`，动态提供 `label` 与 `capabilities()` |
-| 4 | `src/config.ts` | `loadConfig` 在加载阶段硬校验 `programs` 键名与 `[bots.<name>].platform`，拒绝未知平台 | 新增 `[plugins.<id>]` 表结构与 `durations.pluginHandshake`、`durations.pluginRpc` 解析；先校验保留键与结构，再对照内置表与已解析插件清单校验 `[programs]` 和 `[bots.<name>].platform` |
-| 5 | `src/plugin-loader.ts`（新增） | 无清单加载与隔离机制 | 启动时按 `config.plugins` 读取并校验 `plugin.json`，输出成功注册项与隔离失败表（含禁用、校验错误与版本不兼容状态），绝不抛出未捕获异常中断主进程 |
-| 6 | `src/plugin-agent.ts`（新增）与 `src/runner.ts` | `runner.ts` 中 `DRIVERS` 只映射内置三家，`deliver()`、`attach()`、`resumable()` 依赖静态表 | 新增实现 `AgentDriver` 的 `PluginAgentDriver`，把 `rh-agent/1` 翻译为标准 `AgentEvent` 并在输出事件时写入托管对话记录；`runner.ts` 对插件种类实例化该驱动，对禁用或加载失败的插件返回明确错误退出事件 |
-| 7 | `src/plugin-im.ts`（新增）与 `src/daemon.ts` | `daemon.ts` 中 `ADAPTERS` 只映射四家，直接调用 `ADAPTERS[bot.platform]` | 新增实现 `ImAdapter` 的 `PluginImAdapter`，管理单个 IM 插件子进程、JSON-RPC 调用、超时和退避熔断；`daemon.ts` 启动时跳过禁用或故障的插件 Bot 并标为 `faulted` |
-| 8 | `src/transcript.ts` | `FORMATS` 仅含内置三家，`listConversations` 只扫内置目录 | 内置三家保持原样；新增通用格式读写 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`，供插件对话的读取、看板预览和 `/resume` 列表使用；目录导入扫描跳过插件种类 |
+| 4 | `src/config.ts` | `loadConfig` 在加载阶段硬校验 `programs` 键名与 `[bots.<name>].platform`，拒绝未知平台 | 新增 `[plugins.<id>]`（支持相对 `config.toml` 目录解析）与 `durations.pluginHandshake`、`durations.pluginInterrupt`、`durations.pluginRpc` 解析；先校验保留键与结构，再对照内置表与已解析插件清单校验 `[programs]` 和 `[bots.<name>].platform` |
+| 5 | `src/plugin-loader.ts`（新增） | 无清单加载与隔离机制 | 启动时按 `config.plugins` 读取并校验 `plugin.json`（含 `herdr` 保留名、禁止指向 `claude`、`${PLUGIN_DIR}` 展开），输出成功注册项与隔离失败表，绝不抛出未捕获异常中断主进程 |
+| 6 | `src/plugin-agent.ts`（新增）与 `src/runner.ts` | `runner.ts` 中 `DRIVERS` 只映射内置三家，`start()` 会检查 `cfg.programs[agent]` 存在性，`deliver()`/`attach()` 依赖静态表 | 新增实现 `AgentDriver` 的 `PluginAgentDriver`：启动前只查插件入口、`init.program` 传覆盖下游路径、支持迟到 `session` 落库、`interrupt` 超时升级、`ask_resolved` 闭合与 `pending_asks` 重建、`steer: false` 排队、在 `taken` 事务前读原文并按 `holder.runId` + `lineEndOffset` 幂等写托管对话记录 |
+| 7 | `src/plugin-im.ts`（新增）与 `src/daemon.ts` | `daemon.ts` 中 `ADAPTERS` 只映射四家，直接调用 `ADAPTERS[bot.platform]` | 新增实现 `ImAdapter` 的 `PluginImAdapter`，管理单个 IM 插件子进程、JSON-RPC 调用、超时和退避熔断、验证 `inbound.chat === inbound.sender` 归一契约；`daemon.ts` 启动时跳过禁用或故障的插件 Bot 并标为 `faulted` |
+| 8 | `src/transcript.ts` | `FORMATS` 仅含内置三家，`listConversations` 只扫内置目录 | 内置三家保持原样；新增通用格式幂等读写 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`（按 `"k"` 去重并忽略末尾截断半行），供插件对话读取、看板预览和 `/resume` 列表使用 |
 | 9 | `src/tui.ts` 与 `src/windows-tui-launch.ts` | `TERMINAL`、`RULES`、`packages` 为 `Record<AgentKind, ...>` | 改为 `Partial<Record<BuiltinAgentKind, ...>>`；在切换到终端入口先检查 `agentDef(kind).tui`，为 `false` 时友好拒绝（“该 agent 插件不支持终端模式”） |
-| 10 | `src/router.ts`、`src/commands.ts`、`src/im-commands.ts`、`src/feishu.ts` | `CARRY` 为 `Record<AgentKind, ...>`、`slashMenu` 与 `/rh_agent` 依赖静态 `AGENT_KINDS`、`router.ts` 假设 `ONBOARD` 涵盖所有非 fake 平台 | `CARRY` 窄化为 `BuiltinAgentKind`；通用命令检查插件 `supportedCommands` 并在不支持时友好拒绝；`steer: false` 时排队等待回合结束；`/rh_agent` 与 `rh new --agent` 改读动态注册列表 |
-| 11 | `src/board.ts`、`web/src/*` 与 `src/doctor.ts` | `board.ts` 用静态 `THROUGH` 正则匹配来源行、用 `AGENT_KINDS` 查记录；前端 `common.tsx`/`faces.tsx`/`tools.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`write.tsx` 持有 `Record<AgentKind, ...>` 或静态下拉列表 | `board.ts` 的 `THROUGH` 动态包含插件平台 `label`，并在 `/api/board` 与 `/api/slot` 返回 `meta.agents`、`meta.platforms` 与 `plugins` 健康状态；前端取消写死联合，对非内置 agent 渲染通用芯片/首字母徽章和通用工具图标，隐藏插件的 TUI 切换和导入入口；`rh doctor` 输出每个已配置插件的加载与连接状态 |
+| 10 | `src/router.ts`、`src/commands.ts`、`src/im-commands.ts`、`src/feishu.ts` | `CARRY` 为 `Record<AgentKind, ...>`、`slashMenu` 与 `/rh_agent` 依赖静态 `AGENT_KINDS`、`router.ts` 隐含假设所有非 fake 平台在 `ONBOARD` 中 | `CARRY` 窄化为 `BuiltinAgentKind`；通用命令检查插件 `supportedCommands` 并在不支持时友好拒绝；`steer: false` 时排队等待回合结束；`/rh_agent` 与 `rh new --agent` 改读动态注册列表 |
+| 11 | `src/board.ts`、`web/src/*` 与 `src/doctor.ts` | `board.ts` 用静态 `THROUGH` 正则匹配来源行、用 `AGENT_KINDS` 查记录；前端多处持有 `Record<AgentKind, ...>` 或静态列表；`doctor.ts` 只检查内置 `claude` 进程参数 | `board.ts` 的 `THROUGH` 动态包含插件平台 `label`，在 `/api/board`、`/api/slot`、`/api/rhodium` 返回动态列表与插件状态；前端 `common.tsx`/`faces.tsx`/`tools.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`write.tsx` 改用通用徽章与隐藏 TUI/导入入口；`doctor.ts` 复用 `src/pi-pane-credentials.ts` 的 `doctorBare` 与 `anthropicSet` 巡检运行中插件进程子树是否拉起 `claude` 或带 `--bare`/Anthropic 凭据 |
+| 12 | `src/detached.ts` 与 `holder/src/main.rs` | `detached = win32 \|\| darwin`；`holder/src/main.rs` 的 `probe` 命令仅对 Windows 和 macOS 编译 | 复用现有 `src/detached.ts`（增加仅测试生效开关 `process.env.RHODIUM_TEST_DETACHED === "1"`），并在 `holder/src/main.rs` 对 Linux 开放 `probe` 与 `live.lock`；生产环境 Linux 仍默认走 systemd |
 
 ---
 
@@ -387,9 +445,9 @@ Rhodium 1.5.0 已在仓库中具备 Windows 原生托管进程（`holder/src/win
 
 | 平台要点 | Linux | Windows | macOS |
 |---|---|---|---|
-| 启动命令解析 | 读 `commandByPlatform.linux` 或 `command`，相对路径基于清单目录 `path.resolve` | 读 `commandByPlatform.win32` 或 `command`；显式传递 `windowsHide: true` 防止弹黑框；支持 `.exe`、`.cmd`（经内置命令解析）与 `bun run` 入口 | 读 `commandByPlatform.darwin` 或 `command` |
-| 进程托管与管道 | `rh-hold` 通过 systemd 用户服务托管，stdin/stdout 管道直连插件 | `rh-hold.exe` 独立拉起并用 Job Object 管理插件及其子进程树；通过命名管道向控制面汇报 | `rh-hold` 独立拉起，通过 `live.lock` 与 `probe` 核验存活 |
-| 环境变量过滤 | 精确键名匹配剔除 `ANTHROPIC_*`、`CLAUDE*` 等变量 | 键名**大小写不敏感**匹配剔除（Windows 环境块大小写不敏感）；保留 `SystemRoot`、`COMSPEC`、`APPDATA`、`LOCALAPPDATA`、`PATHEXT` 等系统必需变量 | 同 Linux |
+| 启动命令与带空格路径 | 读 `commandByPlatform.linux` 或 `command`，`${PLUGIN_DIR}` 展开后经参数数组传递 | 读 `commandByPlatform.win32` 或 `command`，`${PLUGIN_DIR}` 展开后经参数数组传递（不经过 shell 拼接），槽位与插件目录带空格且互不相同时照常定位；显式传 `windowsHide: true` 防黑框 | 读 `commandByPlatform.darwin` 或 `command`，`${PLUGIN_DIR}` 展开后经参数数组传递 |
+| 进程托管与管道 | 生产走 `rh-hold` + systemd 用户服务；无 systemd 的 CI 环境复用 `src/detached.ts`（`RHODIUM_TEST_DETACHED=1`） | `rh-hold.exe` 独立拉起并用 Job Object 管理插件及其子进程树；通过命名管道向控制面汇报 | `rh-hold` 独立拉起，通过 `live.lock` 与 `probe` 核验存活 |
+| 环境变量过滤 | 精确键名匹配剔除 `ANTHROPIC_*`、`CLAUDE*` 等变量 | 键名**大小写不敏感**匹配剔除（覆盖 `Anthropic_Api_Key`、`claude_code_oauth_token` 等混合大小写键）；保留 `SystemRoot`、`COMSPEC`、`APPDATA`、`LOCALAPPDATA`、`PATHEXT` 等系统必需变量 | 同 Linux |
 | 编码与行尾 | 固定 UTF-8、`\n` | 协议解析按 `trimEnd()` 兼容 `\r\n`；核心给子进程注入 `PYTHONUTF8=1`（防止 Windows 默认 GBK 损坏中文 JSON） | 同 Linux |
 | 退出时子树清理 | 依靠 `KillMode=mixed` 与 cgroup 自动收掉孙进程 | 依靠 Job Object 的 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 收掉孙进程 | 无 cgroup，协议要求插件在收到 `close` 或 stdin EOF 时主动终止自己拉起的下游子进程；契约测试显式核查无残留进程 |
 | 本地开发与假平台演示 | `FakeIm` 默认走 Unix socket，同时支持回环 TCP | `FakeIm` 改支持 `127.0.0.1:<port>` 本地 TCP（避开 Windows 命名管道需手工配 SDDL 的问题），同时修正 `src/dev.ts` 在 Windows 单文件打包下的 `Bun.main` 判断与退出提示 | 支持 Unix socket 与回环 TCP |
@@ -398,90 +456,93 @@ Rhodium 1.5.0 已在仓库中具备 Windows 原生托管进程（`holder/src/win
 
 ## 7. 测试与 CI
 
-### 7.1 契约测试与分层验证
+### 7.1 契约测试、合规可验收项与分层验证
 
 按课程大作业要求，测试覆盖**正常输入处理**、**边界/失败处理**、**扩展接入**三类行为，且全部使用假服务或录制样例，不消耗真实模型额度或 API Key：
 
-- **核心单元测试（纯进程内或子进程，无 systemd/Herdr 依赖）**：
-  - `plugin-loader.test.ts`：清单校验、保留名拦截、版本不兼容拒绝、`enabled = false` 禁用、损坏 JSON 隔离。
-  - `plugin-agent.test.ts`：通用驱动生命周期、`steer: false` 排队、非支持命令拒绝、托管对话记录落盘、`rhodium` 重启后 `out.log` 重放与 `pending_asks` 对账、`fatal(retryable=false)` 停止续跑。
-  - `plugin-im.test.ts`：能力表校验、主人验证隔离、`fetch_attachment` 懒下载、`kept` 键前缀隔离、RPC 超时记 `unknown`、连续崩溃触发熔断。
-  - `plugin-env.test.ts`：在父进程注入诱饵环境变量 `ANTHROPIC_API_KEY`、`CLAUDE_CODE_OAUTH_TOKEN`，验证插件子进程完全读不到。
-- **独立黑盒契约测试工具 `scripts/plugin-conformance.ts`**：
-  - 用法：`bun scripts/plugin-conformance.ts --manifest <path/to/plugin.json> [--config <json>] [--timeout 10000]`。
-  - **Agent 插件 7 项契约检查**：
-    1. 清单字段与协议声明静态核对；
-    2. 环境变量中无敏感凭据泄漏；
-    3. 握手成功并在超时内回传 `ready`；
-    4. 正常一轮问答：`send` -> `taken` -> `turn_start` -> `item`/`text_delta` -> `turn_end`；
-    5. 提问或审批交互（若支持）或不支持命令的规范响应；
-    6. 打断 `interrupt` 能力响应与优雅关闭 `close`（及子进程无残留）；
-    7. 故意喂入畸形/超限输入或模拟失败时的错误回报规范。
-  - **IM 插件 7 项契约检查**：
-    1. 清单与能力表核对；
-    2. `init` 握手并在超时内发 `connected`；
-    3. `send` 正常文本与超长/Markdown 边界处理；
-    4. `edit` / `drop_buttons` / `set_menu` 按能力声明一致表现；
-    5. `kept_get` / `kept_set` 读写闭环；
-    6. 模拟发送失败时返回规范 `{ status: "failed" }` 而非进程崩溃；
-    7. `shutdown` 优雅退出且无残留进程。
+- **三条合规硬规矩的可验收测试（必测项）**：
+  1. 内置 Claude 驱动继续使用用户自己的原程序与登录路径，启动实参不含 `--bare`；
+  2. 陌生人（不在 `owners` 内的发送者）从任意 IM 适配器（含插件 IM）发来的入站消息绝不触发 agent；
+  3. `pi` 与所有外部插件不得使用 Claude 订阅凭据，保留并验证 **Windows 混合大小写环境变量键**（如 `Anthropic_Api_Key`、`CLAUDE_code_oauth_token`）的过滤回归测试。
+- **核心单元测试与集成验收（无 systemd/Herdr 依赖）**：
+  - `test/plugin-loader.test.ts`：清单校验、保留名拦截（含 `herdr`）、拦截指向 `claude` 的 `program`/`command`、版本不兼容拒绝、`enabled = false` 禁用、损坏 JSON 隔离，以及**直接用同一套校验函数验证本文档中的示例清单与握手样例**。
+  - `test/plugin-agent.test.ts`：
+    - 通用驱动生命周期、`steer: false` 排队、非支持命令拒绝、`fatal(retryable=false)` 停止续跑；
+    - **重启重放不重复写托管对话记录**（含故意在“写 JSONL 后、提交数据库 `outOffset` 前”中断并重启的边界恢复用例，验证历史条目不重不漏）；
+    - **`taken` 后不丢用户原输入**（验证在清空 `agentInput.body` 与 `images` 的事务提交前已写入或重启可完整补写）；
+    - **区分尚待回答与已回答 `ask` 的重启对账**（已送达 `delivered` 且有 `ask_resolved` 或数据库已记录的旧提问不再弹出；已 `answered` 未送达的重发）；
+    - **`interrupt` 超时强制回收与续投**，以及 **`ask_timeout` 下发标准 `timeoutAnswer`**；
+    - **迟到 `session` ID**（仅在首轮 `turn_end` 才上报）落库并在重启后以 `session: { resume }` 续接；
+    - **跨目录带空格路径与无下游 CLI 离线回放**（槽位目录与插件目录互不相同且均包含空格，未安装下游 CLI 时离线样例正常跑通）。
+  - `test/plugin-im.test.ts`：
+    - 能力表校验、主人验证隔离（陌生人拒触发）、`fetch_attachment` 懒下载、`kept` 键前缀隔离、RPC 超时记 `unknown`、连续崩溃触发熔断；
+    - **私聊地址不同 ID 完整往返**：构造平台通道 ID（`dm-channel-99`）与用户 ID（`user-1`）不同的测试场景，完整验证“发配对码完成配对 -> 自动设为主窗口 -> 重启 `rhodium` 与 IM 插件 -> 主动推送消息精确发回 `dm-channel-99`”。
+  - `test/plugin-env.test.ts`：在父进程注入诱饵环境变量（含 Windows 混合大小写变体），验证插件子进程完全读不到，且 `doctorBare` / `anthropicSet` 可巡检运行中的插件子树。
+- **独立黑盒契约测试工具 `scripts/plugin-conformance.ts`（分两步交付）**：
+  - **PR 1 提前交付最小可执行检查**：随公开契约包一起交付清单校验 + 环境变量防泄漏 + 握手 + 正常单回合/单消息往返 + 优雅退出检查，让三位组员在各自插件开工第一天就能运行自测；
+  - **PR 6 扩展为完整 7+7 黑盒契约矩阵**（用法：`bun scripts/plugin-conformance.ts --manifest <path/to/plugin.json> [--config <json>] [--timeout 10000]`）：
+    - **Agent 插件 7 项检查**：1) 清单字段与静态合规检查（非保留名、启动命令与 `program` 不得指向 `claude`）；2) 环境变量中无敏感凭据泄漏；3) 握手成功并在超时内回传 `ready`；4) 正常一轮问答；5) 提问与 `ask_resolved` 闭环或不支持命令规范响应；6) 打断 `interrupt` 与优雅关闭 `close`（及子进程无残留）；7) 畸形/超限输入与模拟失败错误回报规范。
+    - **IM 插件 7 项检查**：1) 清单与能力表校验；2) `init` 握手并在超时内发 `connected`；3) `send` 正常文本与超长/Markdown 边界处理；4) `edit` / `drop_buttons` / `set_menu` 按能力声明一致表现；5) `kept_get` / `kept_set` 读写闭环（含私聊通道映射验证）；6) 模拟发送失败时返回规范 `{ status: "failed" }` 而非进程崩溃；7) `shutdown` 优雅退出且无残留进程。
 - **核心内置最小示例插件（随仓库提交，供 CI 与演示复现）**：
-  - `examples/plugins/echo-agent/`：约 80 行零依赖脚本，实现 `rh-agent/1`，包含正常回显、工具调用模拟、一次提问交互与错误模拟触发词（如收到 `/fail` 时返回 `error`）。
-  - `examples/plugins/local-im/`：约 100 行零依赖脚本，实现 `rh-im/1`，经本地回环 HTTP/WebSocket 或标准读写管道与脚本交互，可演示收发、编辑和模拟平台失败。
+  - `examples/plugins/echo-agent/`：零依赖脚本，实现 `rh-agent/1`，包含正常回显、工具调用模拟、提问与 `ask_resolved`、错误触发词（`/fail`）与延迟 `session` 模式。
+  - `examples/plugins/local-im/`：零依赖脚本，实现 `rh-im/1`，模拟独立的用户 ID 与私聊通道 ID 映射，经本地回环接口演示收发、编辑和模拟平台失败。
 
 ### 7.2 故意引入小错误并恢复的演示用例
 
-为方便课程验收现场展示“测试确实能捉出缺陷”，在文档和演示脚本中固定一个可快速复现的小错误用例：
+为方便课程验收现场展示“测试确实能捉出缺陷”，固定一个可快速复现的小错误用例：
 - **引入错误**：在核心 `src/agents.ts` 的环境变量过滤中临时注释掉 `CLAUDE_KEYS` 匹配条件（或将 `src/plugin-loader.ts` 中 `minRhodium` 版本检查的比较号反写）。
-- **运行验证**：执行 `bun test test/plugin-env.test.ts`（或 `plugin-loader.test.ts`），立即观察到断言失败并给出明确失败信息。
+- **运行验证**：执行 `bun --config=bunfig.ci.toml test test/plugin-env.test.ts`（或本机带 systemd 时 `bun test test/plugin-env.test.ts`），立即观察到断言失败。
 - **恢复与通过**：撤销该行改动后重跑同一命令，全部断言恢复通过。
 
 ### 7.3 GitHub Actions CI 方案
 
-#### 为什么无法直接全套跑现有的 135 个测试
+#### 为什么需要独立 CI 配置并复用 `src/detached.ts`
 
-对仓库 `test/` 目录下全部 135 个测试文件的扫描结果显示：
-- **22 个纯单元测试**不依赖外部系统服务，可直接运行；
-- **113 个集成/功能测试**中，绝大多数通过 `test/instance.ts` 拉起真实 `systemd-run --user` / `systemctl --user`、调用 `herdr` 终端或启动 Playwright 浏览器。GitHub 托管的 Ubuntu Runner 往往缺少完整的用户级 dbus/systemd 会话环境，因此无法直接原封不动执行那批重集成测试，直接全跑 `bun test` 会大面积因环境缺失而挂起或报错。
-- 另外，现有的 `.github/workflows/release.yml` 仅支持手动触发，且写死了 `if: github.repository == 'RhodiumTeam/Rhodium'`，只做打包不跑测试，不能满足课程“push 与 PR 自动构建并测试”的要求。
+1. **现有 135 个测试文件的依赖分布**：22 个纯单元测试无外部服务依赖，其余 113 个集成/功能测试通过 `test/instance.ts` 拉起 `systemd-run --user` / `systemctl --user`、调用 `herdr` 或启动 Playwright。
+2. **`bunfig.toml` 预载 `test/cap.ts` 的限制**：仓库根 `bunfig.toml` 固定设置 `preload = ["./test/cap.ts"]`。在没有用户 D-Bus / systemd 会话的 Linux GitHub Runner 上，哪怕单跑 `bun test ./test/render.test.ts`，在跑第一条断言前就会因 `busctl --user` 失败报 `test/cap.ts: no memory cap for this test run`。
+3. **解决方式（不新造另一套宿主路径）**：
+   - 保留根 `bunfig.toml` 与 `test/cap.ts` 原样不动，守住开发者本机跑全套测试时的 8G cgroup 内存护栏；
+   - 新增仅用于无 systemd CI 环境的 **`bunfig.ci.toml`**（`preload = []`）和封装脚本 **`scripts/ci-test.sh`**，由脚本使用 Linux 原生 `timeout` 与 `ulimit -v 8388608`（8GB 地址空间上限，配合独立 Runner VM 资源边界）限制单个测试命令的超时与内存，并显式通过 `bun --config=bunfig.ci.toml test`（注意 `--config=` 必须放在 `test` 子命令前，才能覆盖根 `bunfig.toml` 的预载）执行下列确切测试文件；
+   - Linux 端的无头集成烟测直接复用 `src/detached.ts`（新增仅在测试生效的 `RHODIUM_TEST_DETACHED=1` 开关，并在 `holder/src/main.rs` 对 Linux 开放 `probe` 与 `live.lock`），**不新写一套“测试专用 detached 模式”**；生产环境 Linux 仍默认走 systemd；
+   - 现有的 `.github/workflows/release.yml` 写死了 `if: github.repository == 'RhodiumTeam/Rhodium'`，只做手动打包不跑测试，需去掉仓库名限制以便课程仓库复用。
 
-#### CI 工作流改造方案
+#### CI 工作流具体执行内容（`.github/workflows/ci.yml`）
 
-1. **新增 `.github/workflows/ci.yml`**（在 `push` 和 `pull_request` 到 `main` 时自动触发）：
-   - **`linux-check`（`ubuntu-24.04`）**：
-     1. 安装 Rust 工具链与 `bun install --frozen-lockfile`；
-     2. 跑基础静态检查：`cargo fmt --check --manifest-path holder/Cargo.toml` 与 `bun run typecheck`；
-     3. 跑完整构建：`scripts/build.sh dist`，验证生成可运行的 `dist/rhodium` 与 `dist/rh-hold`；
-     4. 跑无需 systemd 的纯单元测试集 + 新增的全部插件单元测试（`test/plugin-*.test.ts`）+ 用 `scripts/plugin-conformance.ts` 对两个示例插件和组员各插件跑黑盒契约测试；
-     5. 跑端到端无头集成烟测（仅限测试环境变量启用 detached holder 模式，绕开 GitHub Runner 缺少 `systemd --user` 的限制，验证“真实 `rhodium` + `rh-hold` + `FakeIm` + 插件”完整链路；生产环境 Linux 仍保持默认 systemd 不变）。
-   - **`windows-check`（`windows-2022`）**：
-     1. 整合原 `.github/workflows/windows-native.yml` 的工作流步骤，避免重复维护两份 Windows 流水线；
-     2. 跑 `bun run typecheck`、`./scripts/windows-build.ps1`、`windows-task.ps1 -WhatIf`；
-     3. 跑 Windows 原生 holder 烟测与协议回归，外加 Windows 下的插件单元测试及示例插件契约测试（直接验证 Windows `.cmd`/UTF-8/隐藏窗口行为）。
-   - **`macos-check`（`macos-14`）**：
-     - 设为仅 `workflow_dispatch` 手动按需触发（私有仓库 macOS Runner 消耗 10 倍额度，由手动发版前或改到 Darwin 代码时触发；在 §11 列为待拍板项）。
-2. **调整 `.github/workflows/release.yml`**：
-   - 去掉 `if: github.repository == 'RhodiumTeam/Rhodium'` 仓库名硬编码，使 `Rhodium-OSS` 仓库在打正式提交或发布前可复用同一工作流构建成品与 `SHA256SUMS`。
+在 `push` 和 `pull_request` 到 `main` 时自动触发以下两个常驻任务：
+
+1. **`linux-check`（`ubuntu-24.04`）**：
+   - `cargo fmt --check --manifest-path holder/Cargo.toml`
+   - `bun run typecheck`
+   - `scripts/build.sh dist`（验证生成可运行的 `dist/rhodium` 与 `dist/rh-hold`）
+   - `scripts/ci-test.sh`（在 `ulimit -v 8388608` 与 `timeout` 保护下，用 `bun --config=bunfig.ci.toml test` 跑全量 22 个现有无系统依赖单测：`claude-fixtures`、`codex-fixtures`、`exchanges`、`fake-im`、`fixture-hygiene`、`hold`、`im-buttons`、`input-history`、`local`、`panels`、`pi-driver`、`pi-fixtures`、`qq-scan`、`render`、`session-processes`、`temp-dirs`、`terminal-select`、`ticks`、`topology-model`、`transcript`、`tui-anthropic-env`、`unread`，外加新增 `plugin-loader`、`plugin-agent`、`plugin-im`、`plugin-env`，以及 `RHODIUM_TEST_DETACHED=1` 下的 `plugin-e2e.test.ts`）
+   - `bun scripts/plugin-conformance.ts --manifest examples/plugins/echo-agent/plugin.json` 与 `examples/plugins/local-im/plugin.json`（三个组员插件合并后同步加入）
+2. **`windows-check`（`windows-2022`）**：
+   - 整合原 `.github/workflows/windows-native.yml` 的核心步骤，并**显式移除原有的 `run_attempt != '1'` / `[preview package]` / `herdr_tui_probe` 门控限制**，确保每次对 `main` 的 `push` 和 `pull_request` 真正执行：
+     - `bun run typecheck`
+     - `./scripts/windows-build.ps1` 与 `./scripts/windows-task.ps1 -InstallDir dist -TaskName rhodium-test-native -WhatIf`
+     - 原生 holder 与跨平台烟测（`hold`、`windows-paths`、`session-processes`、`tui-process`、`windows-tui-launch`、`windows-native`、`native-holders`、`pi-pane-credentials`）
+     - Windows 下的 `plugin-loader`、`plugin-agent`、`plugin-im`、`plugin-env` 与示例插件契约测试（实测带空格路径、混合大小写环境键过滤、`.cmd` / 隐藏窗口启动与 UTF-8 解析）
+3. **`macos-check`（`macos-14`）**：
+   - 作为可选项（见 §11），默认配置 `workflow_dispatch` 按需触发。
 
 ---
 
 ## 8. 零 Key 演示路径
 
-面向助教机器（支持 Windows、Linux、macOS），全程不需要任何大模型 API Key，也不需要真实 QQ/Telegram/飞书/Discord 账号，可稳定重复演示“接入前 -> 零改核心接入插件 -> 失败/禁用行为 -> 测试捉虫”完整闭环：
+面向助教机器（支持 Windows、Linux、macOS），全程不依赖任何大模型 API Key，也不依赖真实 IM 账号。因为 `rh dev --fake` 只模拟 IM、仍按 `[programs]` 拉起 agent，演示配置必须把基线内置 `[programs].claude` 指向仓库自带的无凭据演示假 agent（`demo/baseline-agent`，复用 `test/fake-agent/` 机制），绝对不调用真实 `claude` 二进制或任何用户登录。
 
-1. **准备环境与核对基础能力**：
-   - 使用构建产物 `dist/rhodium`（或源码 `bun src/main.ts`），配合一份本地演示配置 `demo/config.toml`：启用内置 `fake` IM（TCP 本地回环）与内置假 agent，启动控制面，打开本机网页看板（`http://127.0.0.1:7800`）或运行 `rh dev --fake --config demo/config.toml`。
-2. **接入前基线测试**：
-   - 通过 `fake` IM 或网页看板向内置默认槽位发送一组固定样例输入（如“介绍这个工作区”），记录基础处理结果与耗时。
-3. **零修改核心源码接入独立插件**：
-   - 核验核心代码或二进制未变更（检查 `git diff src/` 为空，或对比核心二进制 SHA-256 不变）。
-   - 将独立构建好的 `dsh` 插件（离线回放模式，读取随仓附带的录制 ACP 样例）和额外 IM 插件（本地模拟模式）在 `demo/config.toml` 中通过 `[plugins.*]` 与 `[bots.*]` 启用并重启 `rhodium`。
-   - 运行 `rh doctor` 与打开看板确认新 agent 种类和新平台已出现在列表；使用同一组样例输入通过新插件完成问答、工具调用和提问卡片交互，对比接入前后多出的实质协议能力与结构化输出。
-4. **验证禁用与失败行为（对照 §4.4 文档）**：
-   - 将其中一个插件设为 `enabled = false` 重启，验证内置槽位和另一插件正常工作，指向禁用插件时给出明确中文提示；
-   - 准备一份坏清单测试配置与一个触发模拟退出的输入，启动观察核心不崩溃、`rh doctor` 与日志精确报出错误原因。
-5. **现场测试捉虫演示**：
-   - 按 §7.2 引入小错误，运行单条测试命令确认失败，恢复后再跑确认通过。
+### 两阶段验收与对比矩阵
+
+- **阶段 A（PR 6 核心验收）**：核心使用 `demo/baseline-agent` + 内置 `fake` IM；接入的核心示例插件为 `examples/plugins/echo-agent` 与 `examples/plugins/local-im`。
+- **阶段 B（全组插件合入后的最终全新目录零 Key 集成验收）**：将最终制品解压到全新临时目录，接入组员交付的 `dsh`（离线 ACP 回放）、`agy`（离线回放）和额外 IM（本地模拟模式）完成全流程验证。
+
+| 演示步骤 | 固定输入与操作 | 核对结果 |
+|---|---|---|
+| 1. 基线启动（无插件） | 使用 `demo/config.toml`（仅启用 `fake` IM + `demo/baseline-agent` + 本机看板 `127.0.0.1:7800` `auth = "none"`）启动核心 | 看板打开正常；运行 `rh doctor` 仅列出内置能力 |
+| 2. 接入前输入基线 | 向内置槽位发送固定样例输入：“列出当前目录并确认是否修改” | 基线假 agent 返回固定纯文本响应（无结构化工具协议输出，无额外平台通道） |
+| 3. 零改核心接入插件 | 核对 `git diff src/` 为空且核心二进制 SHA-256 不变；在 `demo/config.toml` 启用独立构建好的插件并重启 `rhodium`，发送同一组固定样例输入 | `rh doctor` 与看板列出新 agent 与新 IM；新 agent 产生真实的工具调用折叠与提问交互；新 IM 插件完成私聊配对、自动设主窗口与跨重启主动回推 |
+| 4. 禁用与失败对照（§4.4） | 1) 将插件设 `enabled = false` 重启并向该槽位发消息；2) 用坏清单启动；3) 在运行中发 `/fail` 触发插件异常退出 | 核心进程始终存活且内置通道正常；禁用提示、坏清单 `rh doctor` 报错与崩溃续跑通知均与 §4.4 完全一致 |
+| 5. 现场捉虫演示（§7.2） | 引入小错误 -> 跑测试命令 -> 恢复 -> 重跑 | 先红后绿，可现场复现 |
 
 ---
 
@@ -494,41 +555,43 @@ Rhodium 1.5.0 已在仓库中具备 Windows 原生托管进程（`holder/src/win
 - **对接途径**：底层托管 `dsh acp`（MIT 许可，TypeScript 编写的 DeepSeek 官方 harness 的 ACP stdio 模式）。
 - **对核心的要求**：
   1. **支持非插话排队**：`dsh` 走标准 ACP v1，回合进行中不支持中途插话，核心必须依据插件回报的 `steer: false` 把回合中收到的新消息排队到 `turn_end` 后再写入；`!` 消息先发 `interrupt`（对应插件发 `session/cancel`）。
-  2. **提问与重启对账**：插件将 ACP 的 `session/request_permission` 与 `elicitation` 映射为 `rh-agent/1` 的 `ask` 消息，核心负责把用户回答通过 `answer` 送回，并在 `rhodium` 重启时经 `pending_asks` 对账防止丢提问。
-  3. **程序路径与配置透传**：核心通过 `config.toml` `[programs.dsh]`（默认 `"dsh"`）及 `init.config` 把可执行文件位置和录制样例路径（演示/测试用 `mockFixture`）传给插件。
-  4. **环境变量清理**：核心在拉起 `dsh` 插件时剥离 Anthropic/Claude 凭据变量，同时保留用户配置给 DeepSeek 的非 Anthropic 变量（如 `DEEPSEEK_API_KEY` 等，在无 Key 测试中则完全不配置）。
+  2. **提问与重启对账**：插件将 ACP 的 `session/request_permission` 与 `elicitation` 映射为 `rh-agent/1` 的 `ask` 消息，收到 `answer` 后回报 `ask_resolved`；核心在 `rhodium` 重启时经 `pending_asks` 与数据库对账防止丢提问或重复弹窗。
+  3. **程序路径与配置透传**：核心通过 `init.program` 传入 `[programs.dsh]` 覆盖值（默认 `"dsh"`），通过 `init.config.fixture` 传入离线回放样例路径；**未安装 `dsh` 二进制时，离线回放模式必须可以直接运行**。
+  4. **环境变量清理**：核心在拉起 `dsh` 插件时剥离 Anthropic/Claude 凭据变量，同时保留用户配置给 DeepSeek 的非 Anthropic 变量（无 Key 测试中则完全不配置）。
   5. **通用命令子集与降级**：支持通过 `ready.capabilities.commands` 声明实际实现的子集（如 `model`、`status`、`context`），未声明的（如 `ultracode`、`compact`）由核心自动拒绝，不在插件内重复写拒绝文案。
-  6. **托管对话记录**：插件无需反向解析 DeepSeek 内部存储，由核心通过 `item`/`turn_end` 自动写入 `<stateDir>/transcripts/dsh/`。
-- **插件侧风险与测试约定**：`dsh` 处于预览期，接口可能变化，组员需锁定版本；CI 和助教演示必须通过录制好的 ACP JSON-RPC 样例文件跑通，不依赖真实 DeepSeek API Key。
+  6. **托管对话记录**：插件无需反向解析 DeepSeek 内部存储，由核心通过 `item`/`turn_end` 按幂等键自动写入 `<stateDir>/transcripts/dsh/`。
+- **插件侧风险与测试约定**：`dsh` 处于预览期，接口可能变化，组员需锁定版本；CI 和助教演示必须通过录制好的 ACP JSON-RPC 样例文件（`fixture`）跑通，不依赖真实 DeepSeek API Key。
 
 ### 9.2 Antigravity 插件（`agy`）
 
-- **实测依据与决策阶梯**：本机已实测 `agy 1.5.13` 带有 `-p --input-format stream-json --output-format stream-json`、`--conversation <ID>`、`agy acp` 与 `--dangerously-skip-permissions`；但社区有反馈非 TTY 管道下 `stream-json` 可能吞输出或卡死（如 `antigravity-cli` 上游反馈过相关情况）。因此组员开工第一件事是用半天验证本机管道输出稳定性：
+- **实测依据与决策阶梯**：本机已实测 `agy 1.5.13` 带有 `-p --input-format stream-json --output-format stream-json`、`--conversation <ID>`、`agy acp` 与 `--dangerously-skip-permissions`；但社区有反馈非 TTY 管道下 `stream-json` 可能吞输出或卡死（`antigravity-cli` 上游有过相关报告）。因此组员开工第一件事是用半天验证本机管道输出稳定性：
   - **路径 1（首选）**：如果非 TTY 管道下 `stream-json` 稳定输出，优先走 `stream-json`。这样与 `dsh` 的 ACP 形成两种截然不同的协议翻译（JSON-RPC vs stream-json），避免同质化。
   - **路径 2（备选）**：如果管道 `stream-json` 卡死或丢失流式输出，切换为包装 `agy acp`（由 `agy` 插件自己独立实现 ACP 客户端翻译，不与 `dsh` 共用代码）。
   - **路径 3（兜底）**：若 `agy` 在无头或无凭据录制下受阻，改接 Gemini CLI（`gemini --acp`）或 OpenCode（`opencode acp`），同样通过 `rh-agent/1` 独立接入。
 - **对核心的要求（以上三条路径对核心接口完全透明，核心零改动）**：
   1. **系统提示路径**：插件可通过 `init.systemPromptFile` 获取 Rhodium 的规则说明路径并在首次或每轮注入。
-  2. **延后会话 ID 上报**：新建会话时 `agy` 可能在启动后或首轮完成后才返回 `<ID>`，核心支持 `ready.session` 为 `null`，并在首轮 `turn_start.session` 补录到数据库，供下一轮用 `--conversation <ID>` 续接。
+  2. **迟到会话 ID 上报**：新建会话时 `agy` 可能在启动后、首轮开始甚至首轮结束后才给出 `<ID>`，核心支持 `ready.session` 为 `null`，并在收到 `turn_start.session`、独立 `session` 事件或 `turn_end.session` 时立刻落库，供下一轮和重启后以 `--conversation <ID>` 续接。
   3. **审批切换策略**：`agy` 主要通过启动参数控制权限跳过（如 `--dangerously-skip-permissions`），核心尊重其 `liveApproval: false`，改审批开关后等待槽位空闲自动重启生效。
-  4. **托管对话记录（关键要求）**：`agy` 自身的 SQLite 会话库是未公开 protobuf，核心不得要求插件读取它；看板历史和 `rh read` 完全由核心记的 `<stateDir>/transcripts/agy/` 提供（虽然本机另有明文 `transcript.jsonl`，交由核心统一记录最稳妥且格式一致）。
-  5. **环境变量隔离与不碰现有面板**：核心拉起插件时剥离 `HERDR_*` 与 Anthropic 凭据变量，插件在测试和运行时严格禁止读写用户正在使用的 Herdr 会话或系统守护进程。
+  4. **托管对话记录（统一格式原因）**：`agy` 在本机除了保存未公开 protobuf 的会话 SQLite 库（禁止读写）外，也会在 `~/.gemini/antigravity-cli/brain/<ID>/.system_generated/logs/transcript.jsonl` 边跑边写明文 JSONL；但各家插件的记录路径与字段格式各不相同，核心仍然统一按幂等键写入 `<stateDir>/transcripts/agy/`，避免核心为每家插件单独写解析器，保证看板对话页与 `rh read` 对所有插件一致工作。
+  5. **环境变量隔离与不碰现有面板**：核心拉起插件时剥离 `HERDR_*` 与 Anthropic 凭据变量，插件在测试和运行时严格禁止读写用户正在使用的 Herdr 会话或系统守护进程，也不得拉起或包装 `claude`。
   6. **支持单回合式或常驻式封装**：如果 `agy` 最终走的是单回合命令行模式，插件包装进程自己保持常驻并讲 `rh-agent/1`，在每次收到 `send` 时按保存的 `session` 续接外部命令，核心无需感知下游是否每次重建子进程。
 
 ### 9.3 额外 IM 插件
 
-- **平台推荐**：推荐 **Discord**（或备选 **Matrix** / **Slack Socket Mode**）。Discord 的 Bot 申请免国内企业主体审核、开发者门户几分钟可创建 Bot 并使用官方 Gateway 长连接（无需公网 HTTPS Webhook 回调域名）、支持消息编辑、`inline` 按钮与单聊/频道测试，最适合课程周期并满足跨平台无公网部署要求。
+- **平台推荐**：推荐 **Discord**（或备选 **Matrix** / **Slack Socket Mode**）。Discord 的 Bot 申请免国内企业主体审核、开发者门户几分钟可创建 Bot 并使用官方 Gateway 长连接（无需公网 HTTPS Webhook 回调域名）、支持消息编辑、`inline` 按钮与单聊测试，最适合课程周期并满足跨平台无公网部署要求。
 - **对核心的要求**：
   1. **标准 `rh-im/1` 能力接入**：核心仅依赖插件声明的能力表，自动完成过程消息推送（`progress: "edit"`）、超长分片（Discord 2000 字上限）、Markdown 转义和按钮交互。
-  2. **凭据字段无写死约束**：核心不限制 `[bots.<name>]` 的凭证键名，将用户填写的任意字符串键经 `init.params.config` 透传给插件，同时在日志和错误消息中统一打码不回显。
-  3. **断点/游标存储**：核心向插件提供按 `botId` 命名空间隔离的 `kept_get`/`kept_set` RPC，方便插件保存 Gateway session/resume 游标或同步状态，不需插件自建数据库。
+  2. **私聊地址归一与持久化映射**：当平台用户 ID 与私聊频道/房间 ID 不同（如 Discord 的 `user.id` vs DM `channel.id`）时，核心要求插件按 §3.3 归一契约令入站 `chat === sender`，并通过 `kept_get`/`kept_set` 持久化映射，使首次配对设主窗口和重启后主动回推无需修改核心路由表即可工作。
+  3. **凭据字段无写死约束**：核心不限制 `[bots.<name>]` 的凭证键名，将用户填写的任意字符串键经 `init.params.config` 透传给插件，同时在日志和错误消息中统一打码不回显。
   4. **不强求全量平台能力**：即便额外 IM 不支持底栏按钮行（`menu.row` 留空）、不支持斜杠菜单同步（`menu.maxItems: 0`）或不支持内联按钮（`buttons: false`），核心渲染器必须依据能力表自动降级为纯文本数字编号选项，保证核心路径 100% 可用。
 
 ---
 
-## 10. 实现拆解（PR 规划与并行分工）
+## 10. 实现拆解与课程交付分工
 
-方案拍板后，建议将核心插件化与配套工具拆分为 6 个独立 PR，供多成员协作与并行开发：
+### 10.1 PR 规划与依赖关系
+
+方案拍板后，将核心插件化与配套工具拆分为 6 个独立 PR。PR 1 不碰核心 `src/` 业务代码，先冻结公开契约与最小可执行契约检查器，合入后三位组员即可据此同步开工各自插件，核心内部改造（PR 2 -> PR 3/4/5 -> PR 6）并行推进：
 
 ```mermaid
 flowchart LR
@@ -536,12 +599,12 @@ flowchart LR
   classDef par fill:#e6f2ea,stroke:#2f7a4d,color:#1d1d1b
   classDef ext fill:#e8eef7,stroke:#3b5b8a,color:#1d1d1b
 
-  P1["PR 1<br/>公开契约包与动态注册表"]:::core
-  P2["PR 2<br/>插件清单加载器与配置放开"]:::core
-  P3["PR 3<br/>PluginAgentDriver 与示例 agent"]:::par
-  P4["PR 4<br/>PluginImAdapter 与示例 IM"]:::par
+  P1["PR 1<br/>公开契约包与最小契约检查"]:::core
+  P2["PR 2<br/>核心查找表放开与清单加载器"]:::core
+  P3["PR 3<br/>PluginAgentDriver 与托管记录"]:::par
+  P4["PR 4<br/>PluginImAdapter 与地址往返"]:::par
   P5["PR 5<br/>看板动态元数据与 FakeIm 跨平台"]:::par
-  P6["PR 6<br/>契约测试工具、CI 与零 Key 演示"]:::core
+  P6["PR 6<br/>完整契约矩阵、CI 与零 Key 演示"]:::core
 
   M1["组员插件：dsh"]:::ext
   M2["组员插件：agy"]:::ext
@@ -555,35 +618,45 @@ flowchart LR
   P4 --> P6
   P5 --> P6
 
-  P1 -. "公开契约锁定后即可并行开工" .-> M1
-  P1 -. "公开契约锁定后即可并行开工" .-> M2
-  P1 -. "公开契约锁定后即可并行开工" .-> M3
+  P1 -. "公开契约与最小检查就位，并行开工" .-> M1
+  P1 -. "公开契约与最小检查就位，并行开工" .-> M2
+  P1 -. "公开契约与最小检查就位，并行开工" .-> M3
 ```
 
 | PR 编号 | 范围与改动文件 | 前置依赖 | 预估规模 | 可并行性 | 验收标准 |
 |---|---|---|---|---|---|
-| **PR 1** | **公开契约包与动态注册表**：新增 `packages/plugin-sdk/`；放开 `src/contracts.ts` 联合类型；升级 `src/agents.ts`、`src/platforms.ts`、`src/tui.ts`、`src/router.ts`、`src/commands.ts`、`src/windows-tui-launch.ts` 的查找表为开放注册加安全默认值 | 无 | 中（约 1.5 人日） | 首步串行 | 内置全部原有单测与类型检查通过；公开类型包无任何指向 `src/` 的导入；合并后三位组员即可据此协议开始插件开发 |
-| **PR 2** | **插件清单加载器与配置放开**：新增 `src/plugin-loader.ts`；扩展 `src/config.ts` 解析 `[plugins.<id>]`、`pluginHandshake`/`pluginRpc` 超时与放开 `[bots]`/`[programs]` 校验；增强 `src/doctor.ts` 显示插件状态 | PR 1 | 中（约 1.5 人日） | 合并后解锁 PR 3/4/5 | 覆盖合法清单、损坏 JSON、保留名冲突、版本过低、`enabled = false` 的全部单元测试通过 |
-| **PR 3** | **通用 Agent 插件驱动与托管记录**：新增 `src/plugin-agent.ts` 与 `examples/plugins/echo-agent/`；更新 `src/runner.ts`、`src/transcript.ts` 接入 `PluginAgentDriver` 与托管对话记录读写，支持 `pending_asks` 重建与 `steer: false` 排队 | PR 2 | 大（约 2 人日） | 与 PR 4、PR 5 并行 | `echo-agent` 跑通对话、工具、提问、重启回放、崩溃续跑与环境变量隔离单元测试 |
-| **PR 4** | **通用 IM 插件适配器与进程看守**：新增 `src/plugin-im.ts` 与 `examples/plugins/local-im/`；更新 `src/daemon.ts` 接入 `PluginImAdapter`、能力表校验、懒下载附件、`kept` 键隔离、超时 `unknown` 与退避熔断 | PR 2 | 大（约 2 人日） | 与 PR 3、PR 5 并行 | `local-im` 跑通收发、编辑、按钮、主人拦截、超时与连续崩溃熔断单元测试 |
-| **PR 5** | **看板动态元数据与跨平台本地模拟**：更新 `src/board.ts`（动态 `THROUGH` 正则与插件元数据接口）、`web/src/*`（`common.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`tools.tsx`/`write.tsx`/`faces.tsx` 通用渲染与隐藏插件 TUI/导入入口）、`src/fake-im.ts` 与 `src/dev.ts`（增加回环 TCP 与 Windows 打包路径修补） | PR 2 | 中（约 1.5 人日） | 与 PR 3、PR 4 并行 | 看板在未知 agent/platform 下正常展示徽章和对话记录；Windows/Linux 下 `rh dev --fake` 跑通 |
-| **PR 6** | **契约测试器、CI 与零 Key 演示**：新增 `scripts/plugin-conformance.ts` 与故意报错演示指南；新增 `.github/workflows/ci.yml` 并调整 `release.yml`；补全 `demo/` 零 Key 演示配置与脚本 | PR 3, 4, 5 | 中（约 1.5 人日） | 汇聚收尾 | GitHub Actions 在 `push` 与 PR 上跑通 Linux 与 Windows 真实构建与测试并留有成功记录；助教机器零 Key 演示走通 |
+| **PR 1** | **公开契约包与最小可执行检查**：新增 `packages/plugin-sdk/`（`manifest.ts`、`agent.ts`、`im.ts`，零 `src/` 依赖）、最小可执行 `scripts/plugin-conformance.ts`（清单校验 + 握手 + 正常单回合/单消息往返 + 优雅退出）与示例插件骨架（`examples/plugins/echo-agent`、`local-im`） | 无 | 小（约 0.5–1 人日） | 首步串行 | `packages/plugin-sdk/` 零外部与核心内部导入；最小契约检查脚本对示例插件骨架直接跑通，三位组员可立即开工并跑通自检 |
+| **PR 2** | **核心查找表放开、清单加载与合规检查**：放开 `src/contracts.ts`、`src/agents.ts`、`src/platforms.ts`、`src/tui.ts`、`src/router.ts`、`src/commands.ts`、`src/im-commands.ts`、`src/feishu.ts`、`src/windows-tui-launch.ts`；新增 `src/plugin-loader.ts`；扩展 `src/config.ts`（相对路径解析、超时期限与保留名含 `herdr`、禁拉起 `claude`）；增强 `src/doctor.ts` 对插件进程子树的 `--bare`/Anthropic 巡检 | PR 1 | 中（约 1.5–2 人日） | 合并后解锁 PR 3/4/5 | 覆盖合法清单、损坏 JSON、保留名（含 `herdr`）、禁 `claude` 启动命令、版本过低、`enabled = false` 与文档同款样例校验的单元测试通过 |
+| **PR 3** | **通用 Agent 插件驱动与幂等托管记录**：新增 `src/plugin-agent.ts` 与完整 `examples/plugins/echo-agent/`；更新 `src/runner.ts`、`src/transcript.ts` 接入 `PluginAgentDriver`，实现 `holder.runId` + `lineEndOffset` 幂等落盘、`taken` 事务前读原文、`ask_resolved` 闭合、`pending_asks` 对账、迟到 `session` 落库、`interrupt` 超时升级、`ask_timeout` 默认回答、`init.program` 与带空格路径 | PR 2 | 中大（约 2 人日） | 与 PR 4、PR 5 并行 | 跑通 §7.1 `plugin-agent.test.ts` 全部边界与恢复断言，以及无下游 CLI 离线回放和带空格多目录测试 |
+| **PR 4** | **通用 IM 插件适配器与私聊往返**：新增 `src/plugin-im.ts` 与完整 `examples/plugins/local-im/`；更新 `src/daemon.ts` 接入 `PluginImAdapter`、能力表校验、懒下载附件、`kept` 键隔离、超时 `unknown`、退避熔断与私聊地址归一 | PR 2 | 中大（约 2 人日） | 与 PR 3、PR 5 并行 | 跑通 §7.1 `plugin-im.test.ts`，验证 `user-1` vs `dm-channel-99`“配对 -> 主窗口 -> 重启 -> 主动发回原私聊”与陌生人零触发 |
+| **PR 5** | **看板动态元数据与跨平台本地模拟**：更新 `src/board.ts`（动态 `THROUGH` 正则与插件元数据接口）、`web/src/*`（`common.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`tools.tsx`/`write.tsx`/`faces.tsx` 通用渲染与隐藏插件 TUI/导入入口）、`src/fake-im.ts` 与 `src/dev.ts`（增加回环 TCP 与 Windows 打包路径修补） | PR 2 | 中（约 1.5 人日） | 与 PR 3、PR 4 并行 | 看板在未知 agent/platform 下正常展示徽章和托管对话记录；Windows/Linux 下 `rh dev --fake` 跑通 |
+| **PR 6** | **完整契约矩阵、跨平台 CI 与零 Key 演示**：扩展 `scripts/plugin-conformance.ts` 至完整 7+7 矩阵与文档示例校验；复用 `src/detached.ts`（`RHODIUM_TEST_DETACHED=1`）并开放 `holder/src/main.rs` Linux `probe`/`live.lock`；新增 `bunfig.ci.toml`、`scripts/ci-test.sh`、`.github/workflows/ci.yml`（移除 Windows 分支与预览门槛）并调整 `release.yml`；补全 `demo/` 无账号基线假 agent 与演示脚本 | PR 3, 4, 5 | 中（约 1.5 人日） | 汇聚收尾 | GitHub Actions 在 `main` 的 `push` 与 PR 上跑通 Linux 与 Windows 真实构建与测试并留有成功记录；阶段 A 零 Key 演示走通 |
+
+### 10.2 课程交付分工与验收节点
+
+为确保满足大作业任务书对个人代码/测试贡献、真实交叉 Review、设计文档与最终制品交付的硬性要求，成员分工与关键验收节点如下：
+
+| 角色 | 实质代码与测试贡献 | 交叉 Review 职责（须留具体行为/边界意见与复核结果） | 对应验收里程碑 |
+|---|---|---|---|
+| **核心与集成负责人** | 核心插件化 PR 1–6、公开契约包 `packages/plugin-sdk/`、契约测试器、`ci.yml` 与零 Key 基线演示包 | 审查三个插件 PR 的协议合规性、错误恢复与跨平台路径 | PR 1 锁定契约；PR 6 完成核心 CI 成功记录；全组插件合入后牵头全新目录零 Key 集成验收 |
+| **DeepSeek 插件负责人** | `plugins/dsh/`（`dsh acp` 协议翻译、独立构建声明、录制 ACP 样例与 `dsh` 插件单元测试/契约测试） | 审查核心驱动 PR 或其他成员插件的边界与失败处理 | 完成 `dsh` PR 合并；通过 `scripts/plugin-conformance.ts` 与阶段 B 集成演示 |
+| **Antigravity 插件负责人** | 先行完成 `agy` 非 TTY 管道稳定性实测；`plugins/agy/`（`stream-json` 或备选 ACP 独立封装、录制样例与单元测试/契约测试） | 审查核心 PR 或 `dsh` / 额外 IM PR 的测试覆盖与失败反馈 | 先交付管道实测结论，再完成 `agy` PR 合并并通过契约测试 |
+| **额外 IM 插件负责人** | `plugins/discord/`（或拍板后的额外 IM 插件：`rh-im/1` 实现、私聊通道映射、本地模拟测试桩与单元测试/契约测试） | 审查核心 IM 适配器 PR 或其他插件的错误处理与文档一致性 | 完成额外 IM PR 合并，跑通“配对 -> 主窗口 -> 重启 -> 主动回推”验证 |
+
+**最终交付前统一验收节点（由全体核对，成品随最终提交一起产出）**：
+1. **全新目录零 Key 集成验收**：全组插件 PR 合入后，在全新空目录构建或解压运行包，验证不改动任何核心源码的前提下接入三个插件完成完整对比演示。
+2. **文档与交付物定稿**：
+   - 更新 `README.md` 与 `README_zh.md`：明确交代上游起点（`RhodiumTeam/Rhodium` 1.5.0，MIT 许可）与本次插件化增量、列出本次明确不实现范围、填写“成员贡献与 AI 核验”表、保留必要第三方许可说明；
+   - 定稿 `docs/DESIGN.docx`（约 8 页及以上，含总体架构图、关键流程时序图与独立扩展接入示例，与最终代码严格一致）；
+   - 为最终干净提交打附注版本 Tag，并在仓库外 `release/RELEASE.md` 中记录最终完整 Commit SHA、Tag 目标、制品 `SHA-256`、真实 GitHub Actions 成功运行编号/链接与实跑结果，把完整工程（含 `.git/` 与 `docs/DESIGN.docx`）及 `release/` 打包成提交 ZIP 并在新目录解压自检。
 
 ---
 
 ## 11. 待拍板的问题
 
-以下 7 项设计或选型决策需要你最终拍板，然后才会写入后续执行计划：
+说明：两类插件均走独立进程、agent 插件跑在现有 `rh-hold` 内、插件配置 `path` 支持相对路径、核心统一写幂等托管对话记录、Linux CI 测试复用 `src/detached.ts` 等架构与实现细节已按审查意见直接定入本规格正文。以下 4 项选型决策需最终拍板：
 
-1. **插件形态选择**
-   - **选项 A（推荐）**：Agent 插件（`rh-agent/1`）与 IM 插件（`rh-im/1`）**全部采用独立进程**，通过 stdio 按行 JSON 通信，Agent 插件直接跑在现有的 `rh-hold` 内。
-     - 理由：彻底隔离崩溃与阻塞、阻断同进程内存读其他 Bot 凭据、语言无关、Windows/macOS/Linux 打包加载一致。
-   - **选项 B**：混合形态（Agent 走独立进程，IM 走同进程动态 `import()` JS）。
-     - 代价：IM 插件仍可拖垮整台主进程并触及内存凭据，且跨平台打包单文件后外部 JS 带依赖加载问题多。
-   - **选项 C**：全部走同进程动态 `import()` JS。
-     - 代价：丧失进程/内存/故障隔离，且将插件死锁在 Bun/JS 运行时。
-
-2. **额外 IM 插件选哪个平台**
+1. **额外 IM 插件选哪个平台**
    - **选项 A（推荐）**：**Discord**。
      - 理由：开发者后台几分钟可申请测试 Bot，免企业资质审核，官方 Gateway 支持 WebSocket 长连接无需公网回调域名，具备编辑、按钮和富文本等差异化能力，且团队和助教易复现。
    - **选项 B**：**Matrix**。
@@ -593,31 +666,18 @@ flowchart LR
    - **选项 D**：钉钉 / 企业微信。
      - 代价：企业认证与审批周期长，且不方便助教本地验证。
 
-3. **Antigravity（`agy`）对接协议与排雷策略**
+2. **Antigravity（`agy`）对接协议与排雷策略**
    - **选项 A（推荐）**：组员开工先花半天实测 `agy` 在非 TTY 管道下 `--input-format stream-json --output-format stream-json` 是否稳定；**稳定则首选 `stream-json`**（与 `dsh` 的 ACP 形成真双协议对比），**卡死则切换包装 `agy acp`**（由 `agy` 插件自己独立翻译，不与 `dsh` 共用代码），**均不通则改接 Gemini CLI / OpenCode**。
    - **选项 B**：跳过测试，直接全部改用 `agy acp`。
      - 代价：若 `stream-json` 本机已修好则错失差异更大的第二协议形态。
    - **选项 C**：直接放弃 `agy`，从一开始就换成 Gemini CLI（`gemini --acp`）或 OpenCode（`opencode acp`）。
 
-4. **组员插件代码的仓库组织方式**
+3. **组员插件代码的仓库组织方式**
    - **选项 A（推荐）**：放在 `Rhodium-OSS` 同仓库的 `plugins/<name>/` 目录下，各自有独立的 `package.json`（或依赖声明）、独立构建命令和 `plugin.json`，不导入核心 `src/`；通过独立的 PR 提交与互相 Review。
      - 理由：完全契合课程单一提交 ZIP 打包、GitHub Actions CI 统一校验、PR 交叉 Review 与零核心源码修改核验的要求。
    - **选项 B**：三个插件各建独立的外部 Git 仓库，最终提交时以子目录复制或 submodule 拼进课程提交 ZIP。
      - 代价：增加 submodule / 跨仓同步与统一 CI 跑契约测试的复杂度。
 
-5. **`config.toml` 中插件 `path` 是否支持相对路径**
-   - **选项 A（推荐）**：支持绝对路径，也支持**相对于 `config.toml` 所在目录**的相对路径（由配置加载器在读取后 `resolve` 成规范绝对路径再送权限与命令校验）。
-     - 理由：课程演示包和 CI 配置可以直接把 `config.toml` 与 `plugins/` 一起解压在任意新目录直接跑通，助教不用手动改绝对路径；生产环境仍推荐使用绝对路径。
-   - **选项 B**：延续核心其他路径（`stateDir`、`socketDir`）的规矩，强制要求必须是绝对路径。
-     - 代价：演示包必须在运行前用脚本动态生成或改写 `config.toml`。
-
-6. **GitHub Actions CI 矩阵与 Linux 无-systemd 集成测试模式**
-   - **选项 A（推荐）**：`push` 与 PR 时自动跑 **`ubuntu-24.04`（核心检查 + 构建 + 纯单测 + 插件单测 + 示例契约测试 + 仅测试用无-systemd detached 模式端到端插件烟测）** 与 **`windows-2022`（构建 + 原生 holder 烟测 + 插件单测 + 契约测试）**；`macos-14` 设为 `workflow_dispatch` 手动触发（节省私有仓库 10 倍分钟数）。
-   - **选项 B**：Linux 上只跑纯单元测试和黑盒契约测试，端到端 `rhodium` 集成测试只在 Windows Runner 上跑。
-   - **选项 C**：每次 push 同时自动跑齐 Linux、Windows、macOS 三平台全量流水线。
-
-7. **插件 agent 对话记录策略**
-   - **选项 A（推荐）**：由核心将 `rh-agent/1` 回传的输入、助手回复、工具调用统一记入 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`（**托管对话记录**）。
-     - 理由：像 `agy` 这类底层是未公开 protobuf 数据库的 agent，若不托管记录，网页对话页和 `rh read` 将完全空白；统一托管后，所有插件 agent 自动拥有完整历史、折叠工具行与 `/resume` 列表。
-   - **选项 B**：核心不为插件记托管对话记录，插件自己不提供就不展示历史。
-     - 代价：看板对话页打开插件槽位时没有历史与工具明细，只适合纯一次性对话。
+4. **macOS CI 触发策略**
+   - **选项 A（推荐）**：`push` 与 PR 自动跑 **`linux-check`（`ubuntu-24.04`）** 与 **`windows-check`（`windows-2022`）**，`macos-check`（`macos-14`）设为 `workflow_dispatch` 手动触发（节省私有仓库 10 倍 Runner 分钟数）。
+   - **选项 B**：每次 `push` 与 PR 同时自动跑齐 Linux、Windows、macOS 三平台流水线。
