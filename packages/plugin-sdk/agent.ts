@@ -230,6 +230,7 @@ export async function runAgentPlugin(
   let finished = false;
   let finalExitCode: number | null = null;
   let closePromise: Promise<void> | null = null;
+  const answers = new Map<string, "pending" | "delivered" | "cancelled">();
   const pendingPostInit: CoreToAgentMessage[] = [];
 
   const emit = (msg: AgentToCoreMessage): void => {
@@ -264,6 +265,7 @@ export async function runAgentPlugin(
       emit({ type: "ask", ...ask });
     },
     askCancel(requestId) {
+      answers.set(requestId, "cancelled");
       emit({ type: "ask_cancel", requestId });
     },
     usage(usage) {
@@ -377,14 +379,18 @@ export async function runAgentPlugin(
         return;
       }
       case "answer": {
-        // ponytail: assumes answer is delivered at most once per requestId; duplicate delivery
-        // deduplication, cancelled requestId retention, and local interrupt timeout recovery can be
-        // added per spec §3.4 if crash-window retries need tolerance inside a single process run.
+        const state = answers.get(msg.requestId);
+        if (state) {
+          if (state === "delivered") emit({ type: "ask_resolved", requestId: msg.requestId });
+          return;
+        }
+        answers.set(msg.requestId, "pending");
+        // ponytail: interrupt after a failed answer waits for the plugin; add a local deadline if plugins hang during that cleanup.
         void (async () => {
           if (!plugin.answer) {
             const detail = "Plugin does not implement answer()";
             logStderr(detail, stderr);
-            emit({ type: "ask_cancel", requestId: msg.requestId });
+            ctx.askCancel(msg.requestId);
             emit({ type: "error", detail, recoverable: false });
             try {
               await plugin.interrupt(ctx);
@@ -396,10 +402,12 @@ export async function runAgentPlugin(
           }
           try {
             await plugin.answer(msg.requestId, msg.answer, ctx);
+            if (answers.get(msg.requestId) !== "pending") return;
+            answers.set(msg.requestId, "delivered");
             emit({ type: "ask_resolved", requestId: msg.requestId });
           } catch (err) {
             logStderr(`plugin.answer(${msg.requestId}) failed: ${formatError(err)}`, stderr);
-            emit({ type: "ask_cancel", requestId: msg.requestId });
+            ctx.askCancel(msg.requestId);
             emit({ type: "error", detail: errorMessage(err), recoverable: false });
             if (err instanceof PluginFatalError) {
               await terminate(1, true);

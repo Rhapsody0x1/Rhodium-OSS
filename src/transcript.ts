@@ -6,6 +6,7 @@ import { open, readdir, stat, type FileHandle } from "node:fs/promises";
 import { insideDirectory, localCandidate, localDrivePath, sameDirectory, userHome } from "./paths";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { managedFile } from "./plugin-transcript";
 import { isBuiltinAgent } from "./agents";
 import { plain, quoteOf, type AgentKind, type BuiltinAgentKind, type Used } from "./contracts";
 import { pictureType, saveMedia, withoutMedia, type Media } from "./media";
@@ -921,6 +922,14 @@ export async function transcriptFile(dir: string, agent: AgentKind, id: string):
   return files.find((file) => f.idOf(file) === id) ?? null;
 }
 
+/** The transcript owned by this conversation; a plugin session id is never a filename. */
+export async function conversationFile(stateDir: string, dir: string, c: { id: string; agent: AgentKind; sessionId: string | null } | null | undefined): Promise<string | null> {
+  if (!c) return null;
+  if (isBuiltinAgent(c.agent)) return c.sessionId ? transcriptFile(dir, c.agent, c.sessionId) : null;
+  const file = managedFile(stateDir, c.agent, c.id);
+  return fs.existsSync(file) ? file : null;
+}
+
 /** The transcripts of the conversations whose id starts with prefix (hex digits and "-" only), in
  *  whatever directory each was started: every agent's, each with its agent and full id. */
 export async function findConversations(prefix: string): Promise<{ agent: AgentKind; id: string; file: string }[]> {
@@ -977,7 +986,10 @@ export type Message = { role: "user" | "assistant"; text: string };
  * results, and what Claude records beside them, are left out. None if there is no transcript yet.
  */
 export async function recentMessages(dir: string, agent: AgentKind, session: string, count: number, max: number): Promise<Message[]> {
-  const file = await transcriptFile(dir, agent, session);
+  return recentInFile(await transcriptFile(dir, agent, session), count, max);
+}
+
+export async function recentInFile(file: string | null, count: number, max: number): Promise<Message[]> {
   const out: Message[] = [];
   try {
     for (let at = Infinity; file && out.length < count; ) {

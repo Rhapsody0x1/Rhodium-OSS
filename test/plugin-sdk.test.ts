@@ -426,6 +426,33 @@ describe("stdio.ts", () => {
 });
 
 describe("agent.ts (runAgentPlugin)", () => {
+  test("echo delivers a repeated permission answer only once", async () => {
+    const { EchoAgentPlugin } = await import("../examples/plugins/echo-agent");
+    const echo = new EchoAgentPlugin();
+    const stdin = new PassThrough();
+    const stdout = createLineCapture();
+    const stderr = createLineCapture();
+    const run = runAgentPlugin(echo, { stdin, stdout: stdout.sink, stderr: stderr.sink, exit() {}, registerSignals: false });
+    const seen = (type: string) => stdout.lines().some((line) => (line as { type: string }).type === type);
+    const write = (msg: object) => stdin.write(JSON.stringify(msg) + "\n");
+    try {
+      write({ type: "init", proto: 1, conv: "c", session: { new: "s" }, cwd: ".", program: "echo", systemPromptFile: "prompt", config: {}, approval: false });
+      await waitFor(() => seen("ready"));
+      write({ type: "send", id: "i", text: "[ask]", human: true, mode: "turn" });
+      await waitFor(() => seen("ask"));
+      expect(seen("ask_resolved")).toBe(false);
+      const answer = { type: "answer", requestId: "ask-i", answer: { kind: "permission", allow: true } };
+      write(answer);
+      write(answer);
+      await waitFor(() => seen("turn_end") && seen("ask_resolved"));
+      expect(echo.deliveredAnswers).toBe(1);
+      expect(stderr.raw()).toBe("");
+    } finally {
+      stdin.end();
+      await run;
+    }
+  });
+
   test("init -> ready, non-blocking answer/interrupt/close while send awaits ask, command_result, and single bounded close", async () => {
     const stdin = new PassThrough();
     const stdout = createLineCapture();
