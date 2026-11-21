@@ -1590,13 +1590,20 @@ process.stdin.resume();
     writeFileSync(script, `
       import { runAgentPlugin } from ${sdk}; import { EchoAgentPlugin } from ${echo};
       class Premature extends EchoAgentPlugin {
+        async init(params, ctx) {
+          if (process.env.PRE_READY) ctx.textDelta("starting");
+          return super.init(params, ctx);
+        }
         async answer(id, value) {
-          console.log(JSON.stringify({type:"ask_resolved",requestId:id}));
+          if (!process.env.PRE_READY) console.log(JSON.stringify({type:"ask_resolved",requestId:id}));
           await super.answer(id, value);
         }
       }
       runAgentPlugin(new Premature());
     `);
+    const preReady = await runConformance(file, { PRE_READY: "1" }, "1500");
+    expect(preReady.code).not.toBe(0);
+    expect(preReady.stderr).toContain("ready handshake");
     const early = await runConformance(file, undefined, "1500");
     expect(early.code).not.toBe(0);
     expect(early.stderr).toContain("before ask_resolved");
@@ -1678,8 +1685,9 @@ process.stdin.resume();
         async edit(_,id,msg) {
           insist(id === open && (!stream || msg.text.startsWith(last)),"wrong edit target or replacement of append-only content");
           last=msg.text;
-          if(msg.final) { open=undefined; ops.add("closed"); } else ops.add("edit");
-          return {status:"sent",messageId:id};
+          if(msg.final) { open=undefined; ops.add("closed"); return {status:"sent"}; }
+          ops.add("edit"); open = id + "-updated";
+          return {status:"sent",messageId:open};
         },
         async dropButtons(_,id) { insist(id==="keyboard","wrong keyboard"); ops.add("drop"); return stream ? {status:"failed",error:"posted buttons remain"} : {status:"sent",messageId:id}; },
         async setMenu(items,chat) { insist(items[0].command==="/status" && chat==="conf-user-1","wrong menu"); ops.add("menu"); },

@@ -51,7 +51,7 @@ function checkReady(frame: Frame) {
 
 async function ready(p: Peer) {
   p.write(agentInit(p.options));
-  checkReady(await p.wait(0, f => f.type === "ready" || f.type === "fatal", "agent ready"));
+  checkReady(await p.wait(0, () => true, "agent ready"));
 }
 
 function send(p: Peer, id: string, text: string): number {
@@ -98,7 +98,7 @@ async function failureProbe(o: Options, fixture: Fixture, probe: "malformed" | "
   try {
     if (probe === "handshake") {
       p.write({ ...agentInit(o), proto: 999 });
-      const error = await p.wait(0, f => f.type === "ready" || f.type === "fatal", "unsupported protocol version");
+      const error = await p.wait(0, () => true, "unsupported protocol version");
       check(error.type === "fatal" && nonempty(error.message), "Unsupported init version must return fatal");
       return;
     }
@@ -275,11 +275,12 @@ async function testIm(o: Options, fixture: Fixture) {
     if (c.stream || (c.progress === "edit" && c.draftTtl)) {
       const inbound = p.frames.find(f => f.method === "inbound" && object(f.params) && f.params.chat === chat)?.params;
       const replyTo = fixture.replyTo ?? (object(inbound) ? inbound.messageId : undefined);
-      const id = await imSend(rpc, chat, { text: "a", ...(nonempty(replyTo) && { replyTo }), ...(c.stream ? { stream: true } : { draft: true }) });
+      let id = await imSend(rpc, chat, { text: "a", ...(nonempty(replyTo) && { replyTo }), ...(c.stream ? { stream: true } : { draft: true }) });
       check(nonempty(id), "Missing stream or draft id");
       for (const [text, final] of [["ab", false], ["abc", true]] as const) {
         const r = await rpc("edit", { chat, messageId: id, message: { text: text.slice(0, size), ...(final && { final: true }) } });
         check(sent(r), final ? "Finalizing progress failed" : "Editing progress failed");
+        if (typeof r.messageId === "string") id = r.messageId;
       }
     } else if (c.progress === "edit") {
       check(nonempty(messageId), "Editable offline send needs a message id");
