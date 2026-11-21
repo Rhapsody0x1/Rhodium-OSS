@@ -303,6 +303,14 @@ export function createRunner(o: {
    */
   async function attach(conv: Conversation, seen: number, open: (me: Live, on: HolderEvents) => Promise<HolderLink | null>, from = seen) {
     const conversation = conv.id;
+    if (!isBuiltinAgent(conv.agent)) {
+      const why = `当前版本尚不支持启动 agent 插件 ${conv.agent}（将在 PR 3 接入驱动）。`;
+      log("plugin agent driver not wired yet", { conversation, agent: conv.agent });
+      const exit = { type: "exit" as const, code: null, signal: null, from: "holder" as const, why, conv: conversation, proc: 0 };
+      report(exit);
+      o.writing?.(conversation, exit);
+      return;
+    }
     const me = liveFor(conv);
     const proc = ++me.proc;
     me.seen = seen;
@@ -702,6 +710,11 @@ export function createRunner(o: {
    *  exit file records. Inputs still writing become unknown. */
   async function ended(conv: Conversation, holder: Holder | undefined, exit: ExitFile | null): Promise<void> {
     const conversation = conv.id;
+    if (!isBuiltinAgent(conv.agent)) {
+      const e = exit ?? { from: "holder" as const, code: null, signal: null };
+      exited(conversation, 0, e.code, e.signal, e.from);
+      return;
+    }
     const me = liveFor(conv);
     if (holder) {
       me.seen = holder.outOffset;

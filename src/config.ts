@@ -4,10 +4,10 @@ import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync }
 import { isIP } from "node:net";
 import { checkWindowsPermissions, createPrivateWindows, windows, windowsRoot } from "./windows";
 import { isAbsolute, dirname, join, resolve } from "node:path";
-import { isForbiddenClaudeToken } from "@rhodium-oss/plugin-sdk";
 import { version } from "../package.json";
 import { AGENTS } from "./agents";
 import type { AgentKind, BuiltinAgentKind, Platform } from "./contracts";
+import { isClaudeExecutable } from "./pi-pane-credentials";
 import type { Bot } from "./store";
 import { PLATFORMS } from "./platforms";
 
@@ -174,6 +174,7 @@ export type PluginConfigEntry = {
   path: string;
   enabled: boolean;
   config: Record<string, string>;
+  configError?: string;
 };
 
 export type Config = {
@@ -257,30 +258,51 @@ function parsePlugins(raw: unknown, configPath: string): Record<string, PluginCo
   const baseDir = dirname(resolve(configPath));
   const out: [string, PluginConfigEntry][] = [];
   for (const [id, entry] of Object.entries(raw)) {
-    if (!isTable(entry)) throw new Error(`config: plugins.${id} must be a table`);
+    if (!isTable(entry)) {
+      out.push([id, { path: "", enabled: true, config: {}, configError: `config: plugins.${id} must be a table` }]);
+      continue;
+    }
+    const errors: string[] = [];
     for (const k of Object.keys(entry)) {
       if (k !== "path" && k !== "enabled" && k !== "config") {
-        throw new Error(`config: unknown key plugins.${id}.${k}`);
+        errors.push(`config: unknown key plugins.${id}.${k}`);
       }
     }
-    const { path: rawPath, enabled = true, config: rawConfig = {} } = entry;
+    const rawEnabled = entry.enabled;
+    let enabled = true;
+    if (rawEnabled !== undefined) {
+      if (typeof rawEnabled !== "boolean") errors.push(`config: plugins.${id}.enabled must be a boolean`);
+      else enabled = rawEnabled;
+    }
+    const rawPath = entry.path;
+    let resolvedPath = "";
     if (typeof rawPath !== "string" || !rawPath.trim()) {
-      throw new Error(`config: plugins.${id}.path must be a non-empty string`);
+      if (enabled) errors.push(`config: plugins.${id}.path must be a non-empty string`);
+    } else {
+      resolvedPath = resolve(baseDir, rawPath);
     }
-    if (typeof enabled !== "boolean") {
-      throw new Error(`config: plugins.${id}.enabled must be a boolean`);
-    }
-    if (!isTable(rawConfig)) {
-      throw new Error(`config: plugins.${id}.config must be a table`);
-    }
+    const rawConfig = entry.config ?? {};
     const cfgEntries: [string, string][] = [];
-    for (const [ck, cv] of Object.entries(rawConfig)) {
-      if (typeof cv !== "string") {
-        throw new Error(`config: plugins.${id}.config.${ck} must be a string`);
+    if (!isTable(rawConfig)) {
+      errors.push(`config: plugins.${id}.config must be a table`);
+    } else {
+      for (const [ck, cv] of Object.entries(rawConfig)) {
+        if (typeof cv !== "string") {
+          errors.push(`config: plugins.${id}.config.${ck} must be a string`);
+        } else {
+          cfgEntries.push([ck, cv]);
+        }
       }
-      cfgEntries.push([ck, cv]);
     }
-    out.push([id, { path: resolve(baseDir, rawPath), enabled, config: Object.fromEntries(cfgEntries) }]);
+    out.push([
+      id,
+      {
+        path: resolvedPath,
+        enabled,
+        config: Object.fromEntries(cfgEntries),
+        ...(errors.length ? { configError: errors.join("; ") } : {}),
+      },
+    ]);
   }
   return Object.fromEntries(out);
 }
@@ -353,13 +375,27 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
   if (p !== undefined && !isTable(p)) throw new Error("config: programs. must be a table");
   const progs: typeof programs & Record<string, string> = { ...programs };
   for (const [k, v] of Object.entries(p ?? {})) {
-    if (!Object.hasOwn(programs, k) && !Object.hasOwn(plugins, k)) {
+    const isBuiltinProg = Object.hasOwn(programs, k);
+    const hasPlugin = Object.hasOwn(plugins, k);
+    if (!isBuiltinProg && !hasPlugin) {
       throw new Error(`config: unknown key programs.${k}`);
     }
-    if (typeof v !== "string") throw new Error(`config: programs.${k} must be a string`);
-    if (!isAbsolute(v) && (!v || v.includes("/"))) throw new Error(`config: programs.${k} must be an absolute path or a bare name`);
-    if (k !== "claude" && isForbiddenClaudeToken(v)) {
-      throw new Error(`config: programs.${k} may not run claude`);
+    const failProg = (msg: string) => {
+      if (isBuiltinProg) throw new Error(msg);
+      const entry = plugins[k]!;
+      entry.configError = entry.configError ? `${entry.configError}; ${msg}` : msg;
+    };
+    if (typeof v !== "string") {
+      failProg(`config: programs.${k} must be a string`);
+      continue;
+    }
+    if (!isAbsolute(v) && (!v || v.includes("/"))) {
+      failProg(`config: programs.${k} must be an absolute path or a bare name`);
+      continue;
+    }
+    if (k !== "claude" && isClaudeExecutable(v)) {
+      failProg(`config: programs.${k} may not run claude`);
+      continue;
     }
     progs[k] = v;
   }

@@ -4,7 +4,6 @@
 // answer leaves this file, and each buffer is wiped once looked at.
 import { dlopen, toArrayBuffer } from "bun:ffi";
 import { readdirSync, readFileSync } from "node:fs";
-import { isForbiddenClaudeToken } from "@rhodium-oss/plugin-sdk";
 import { READ_BY_PI } from "./agents";
 import { refuseBare } from "./claude";
 
@@ -204,8 +203,204 @@ export function doctorBare(pid: number): boolean | null {
   return inspect(pid, bareIn);
 }
 
+const CLAUDE_BIN_RE = /^claude(?:\.(?:exe|cmd|bat))?$/i;
+const CLAUDE_SCRIPT_RE = /^claude\.(?:[cm]?js)$/i;
+const CLAUDE_PKG_RE = /(?:^|[\\/])@anthropic-ai[\\/]claude-code(?:$|[\\/@])/i;
+const ENV_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const SHELL_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "cmd", "powershell", "pwsh"]);
+const RUNNER_NAMES = new Set(["node", "bun", "deno", "npx", "bunx"]);
+const RUNNER_VALUE_FLAGS = new Set([
+  "-r",
+  "--require",
+  "--import",
+  "--loader",
+  "--experimental-loader",
+  "--conditions",
+  "-C",
+  "--config",
+  "-c",
+  "--cwd",
+  "--env-file",
+  "--preload",
+  "--package",
+  "-p",
+]);
+const ENV_VALUE_FLAGS = new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-a", "--argv0"]);
+const SHELL_PREFIX_WORDS = new Set(["exec", "command", "builtin", "nohup", "time", "nice"]);
+
+function stripOuterQuotes(s: string): string {
+  const t = s.trim();
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1).trim();
+  }
+  return t;
+}
+
+function basenameOfPath(pathOrName: string): string {
+  const cleaned = stripOuterQuotes(pathOrName).replace(/[\\/]+$/, "");
+  const slash = Math.max(cleaned.lastIndexOf("/"), cleaned.lastIndexOf("\\"));
+  return slash >= 0 ? cleaned.slice(slash + 1) : cleaned;
+}
+
+function normalizedExeName(pathOrName: string): string {
+  return basenameOfPath(pathOrName).toLowerCase().replace(/\.(?:exe|cmd|bat)$/i, "");
+}
+
+/** Whether a single executable path or program name resolves to the claude binary (never splitting on spaces in parent directories). */
+export function isClaudeExecutable(pathOrName: string): boolean {
+  const base = basenameOfPath(pathOrName);
+  return CLAUDE_BIN_RE.test(base);
+}
+
+function isClaudeTarget(target: string): boolean {
+  const unquoted = stripOuterQuotes(target);
+  if (!unquoted) return false;
+  if (isClaudeExecutable(unquoted)) return true;
+  if (CLAUDE_PKG_RE.test(unquoted)) return true;
+  return CLAUDE_SCRIPT_RE.test(basenameOfPath(unquoted));
+}
+
+function tokenizeShellSegment(segment: string): string[] {
+  const tokens: string[] = [];
+  let cur = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (ch === "\\" && quote === '"' && i + 1 < segment.length) cur += segment[++i]!;
+      else cur += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === "\\" && i + 1 < segment.length) {
+      cur += segment[++i]!;
+    } else if (/\s/.test(ch)) {
+      if (cur) {
+        tokens.push(cur);
+        cur = "";
+      }
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur) tokens.push(cur);
+  return tokens;
+}
+
+function shellCommandLaunchesClaude(cmdStr: string): boolean {
+  for (const seg of cmdStr.split(/(?:;|&&|\|\||[|&\n`()]|\$\()/)) {
+    const tokens = tokenizeShellSegment(seg);
+    let idx = 0;
+    while (idx < tokens.length) {
+      const tok = tokens[idx]!;
+      if (ENV_ASSIGN_RE.test(tok) || SHELL_PREFIX_WORDS.has(tok.toLowerCase())) {
+        idx++;
+        continue;
+      }
+      break;
+    }
+    if (idx < tokens.length && launchesClaude(tokens.slice(idx))) return true;
+  }
+  return false;
+}
+
+/** Whether a process's argv launches Claude directly or via env, node/bun/deno/npx/bunx, or a shell command. */
+export function launchesClaude(argv: string[]): boolean {
+  if (!argv.length) return false;
+  const head = argv[0] ?? "";
+  if (isClaudeExecutable(head)) return true;
+  const exe = normalizedExeName(head);
+
+  if (exe === "env") {
+    let i = 1;
+    while (i < argv.length) {
+      const a = argv[i]!;
+      if (a === "--") {
+        i++;
+        break;
+      }
+      if ((a === "-S" || a === "--split-string") && i + 1 < argv.length) {
+        if (shellCommandLaunchesClaude(argv[i + 1]!)) return true;
+        i += 2;
+        continue;
+      }
+      if (a.startsWith("--split-string=")) {
+        if (shellCommandLaunchesClaude(a.slice("--split-string=".length))) return true;
+        i++;
+        continue;
+      }
+      if (ENV_VALUE_FLAGS.has(a)) {
+        i += 2;
+        continue;
+      }
+      if (a.startsWith("-")) {
+        i++;
+        continue;
+      }
+      if (ENV_ASSIGN_RE.test(a)) {
+        i++;
+        continue;
+      }
+      break;
+    }
+    return i < argv.length ? launchesClaude(argv.slice(i)) : false;
+  }
+
+  if (RUNNER_NAMES.has(exe)) {
+    let i = 1;
+    if ((exe === "bun" || exe === "deno") && (argv[i] === "run" || argv[i] === "x")) i++;
+    while (i < argv.length) {
+      const a = argv[i]!;
+      if (a === "--") {
+        i++;
+        break;
+      }
+      if (a === "-e" || a === "--eval" || a === "-p" || a === "--print") {
+        return false;
+      }
+      if (RUNNER_VALUE_FLAGS.has(a)) {
+        if (i + 1 < argv.length && isClaudeTarget(argv[i + 1]!)) return true;
+        i += 2;
+        continue;
+      }
+      if (a.startsWith("--require=") || a.startsWith("--import=") || a.startsWith("--package=")) {
+        const val = a.slice(a.indexOf("=") + 1);
+        if (isClaudeTarget(val)) return true;
+        i++;
+        continue;
+      }
+      if (a.startsWith("-")) {
+        i++;
+        continue;
+      }
+      return isClaudeTarget(a);
+    }
+    return i < argv.length ? isClaudeTarget(argv[i]!) : false;
+  }
+
+  if (SHELL_NAMES.has(exe)) {
+    for (let i = 1; i < argv.length; i++) {
+      const a = argv[i]!;
+      const lower = a.toLowerCase();
+      if (
+        lower === "-c" ||
+        lower === "/c" ||
+        lower === "/k" ||
+        lower === "-command" ||
+        /^-[a-z]*c$/.test(lower)
+      ) {
+        return i + 1 < argv.length ? shellCommandLaunchesClaude(argv[i + 1]!) : false;
+      }
+      if (!a.startsWith("-")) return isClaudeTarget(a);
+    }
+    return false;
+  }
+
+  return false;
+}
+
 /** Checks a single process's argv/env for bare mode, Anthropic/Claude credentials (case-insensitive by
- *  default), and forbidden claude executable tokens. */
+ *  default), and forbidden claude executable launches. */
 export function checkProcessCompliance(
   argv: string[],
   env: string[],
@@ -214,7 +409,7 @@ export function checkProcessCompliance(
   return {
     bare: bareIn(argv, env, ignoreCase),
     anthropic: anthropicSet(env, ignoreCase) || hasClaudeEnv(env, ignoreCase),
-    claudeExec: argv.some((arg) => isForbiddenClaudeToken(arg)),
+    claudeExec: launchesClaude(argv),
   };
 }
 

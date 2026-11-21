@@ -405,6 +405,9 @@ export function pluginFindings(
       findings.push({ level: "错误", text: `插件 ${rec.id} 加载失败：${rec.error}` });
     }
   }
+  for (const err of registry?.configErrors ?? []) {
+    findings.push({ level: "错误", text: err.error });
+  }
   for (const { id, pid } of runningPlugins) {
     for (const hit of auditPluginProcessTree(pid)) {
       const why = [

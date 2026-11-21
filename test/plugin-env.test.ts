@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { headlessEnv, registerAgentPlugin, resetAgentPlugins, terminalUnset } from "../src/agents";
 import { pluginFindings } from "../src/doctor";
-import { auditPluginProcessTree, checkProcessCompliance, descendantPids } from "../src/pi-pane-credentials";
+import { auditPluginProcessTree, checkProcessCompliance, descendantPids, isClaudeExecutable, launchesClaude } from "../src/pi-pane-credentials";
 import { resetPluginRegistry } from "../src/plugin-loader";
 
 const dirs: string[] = [];
@@ -93,8 +93,25 @@ describe("mixed-case credential and session env isolation", () => {
 });
 
 describe("plugin process subtree compliance audit and doctor findings", () => {
-  test("checkProcessCompliance flags --bare, CLAUDE_CODE_SIMPLE, mixed-case Anthropic/Claude keys, and claude tokens", () => {
+  test("checkProcessCompliance flags --bare, CLAUDE_CODE_SIMPLE, mixed-case Anthropic/Claude keys, and path-aware claude launches without false positives", () => {
+    expect(isClaudeExecutable("/opt/Claude Tools/pi")).toBe(false);
+    expect(isClaudeExecutable("/opt/Claude Tools/claude")).toBe(true);
+    expect(isClaudeExecutable("claude.exe")).toBe(true);
+    expect(isClaudeExecutable("claude.cmd")).toBe(true);
+
     expect(checkProcessCompliance(["bun", "run", "/tmp/dsh/index.js"], ["PATH=/usr/bin", "HOME=/tmp/h"])).toEqual({
+      bare: false,
+      anthropic: false,
+      claudeExec: false,
+    });
+
+    // Negative controls: "claude" as a grep argument or parent directory name must not trigger claudeExec
+    expect(checkProcessCompliance(["rg", "-n", "claude", "README.md"], ["PATH=/usr/bin"])).toEqual({
+      bare: false,
+      anthropic: false,
+      claudeExec: false,
+    });
+    expect(checkProcessCompliance(["/opt/Claude Tools/pi", "--version"], ["PATH=/usr/bin"])).toEqual({
       bare: false,
       anthropic: false,
       claudeExec: false,
@@ -124,25 +141,37 @@ describe("plugin process subtree compliance audit and doctor findings", () => {
       claudeExec: false,
     });
 
-    expect(checkProcessCompliance(["/usr/local/bin/claude.exe", "-p", "hi"], ["PATH=/usr/bin"])).toEqual({
-      bare: false,
-      anthropic: false,
-      claudeExec: true,
-    });
+    // Positive controls for direct and wrapper-launched claude
+    for (const argv of [
+      ["claude"],
+      ["/usr/local/bin/claude.exe", "-p", "hi"],
+      ["/usr/bin/env", "FOO=1", "claude"],
+      ["node", "/opt/node_modules/@anthropic-ai/claude-code/cli.js"],
+      ["sh", "-c", "exec claude -p hi"],
+    ]) {
+      expect(launchesClaude(argv)).toBe(true);
+      expect(checkProcessCompliance(argv, ["PATH=/usr/bin"])).toEqual({
+        bare: false,
+        anthropic: false,
+        claudeExec: true,
+      });
+    }
   });
 
   test("descendantPids, auditPluginProcessTree, and pluginFindings catch rogue descendant process", async () => {
     const tmpHome = mkdtempSync(join(tmpdir(), "rhodium-proc-"));
     dirs.push(tmpHome);
-    const sleeper = join(tmpHome, "sleeper.js");
+    const pkgDir = join(tmpHome, "node_modules", "@anthropic-ai", "claude-code");
+    mkdirSync(pkgDir, { recursive: true });
+    const sleeper = join(pkgDir, "cli.js");
     writeFileSync(sleeper, "setInterval(() => {}, 1000);\n");
-    // Spawn parent plugin-like bun process which itself spawns a child holding --bare, mixed-case env, and forbidden "claude" arg (never running real claude).
+    // Spawn parent plugin-like bun process which itself spawns a child holding --bare, mixed-case env, and @anthropic-ai/claude-code target (never running real claude).
     const parent = Bun.spawn(
       [
         process.execPath,
         "-e",
         [
-          `const child = Bun.spawn([process.execPath, "run", ${JSON.stringify(sleeper)}, "claude", "--bare"], {`,
+          `const child = Bun.spawn([process.execPath, "run", ${JSON.stringify(sleeper)}, "--bare"], {`,
           `  env: { ...process.env, Anthropic_Api_Key: "bad-key" },`,
           `  stdout: "ignore", stderr: "ignore"`,
           `});`,
@@ -216,6 +245,7 @@ describe("plugin process subtree compliance audit and doctor findings", () => {
           loaded: [],
           failed: [{ id: "badp", error: "bad manifest" }],
           disabled: ["offp"],
+          configErrors: [],
         },
         [{ id: "dsh", pid: parent.pid }],
       );

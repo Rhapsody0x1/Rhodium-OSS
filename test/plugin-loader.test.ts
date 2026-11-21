@@ -24,9 +24,11 @@ import {
   registerPlatformPlugin,
 } from "../src/platforms";
 import { applyPluginRegistry, loadPlugins, resetPluginRegistry } from "../src/plugin-loader";
+import { pluginFindings } from "../src/doctor";
 import { AT_BOARD, route, type Ctx, type Decision, type State } from "../src/router";
 import type { AgentInput, Slot } from "../src/store";
 import { hasTranscript, listConversations, transcriptFile } from "../src/transcript";
+import { newInstance, until } from "./instance";
 
 const dirs: string[] = [];
 
@@ -150,9 +152,46 @@ describe("config.ts plugin support", () => {
     expect(isRegisteredPlatform("weixin")).toBe(false);
   });
 
-  test("rejects malformed [plugins], forbidden claude program overrides, and unconfigured plugin platforms", () => {
+  test("allows paths with Claude in a parent directory for non-claude programs, rejects built-in claude spoofing and unconfigured platforms, and isolates per-plugin config errors", () => {
     const root = tempDir();
-    const cases: { name: string; toml: string; match: RegExp }[] = [
+    const okPiPath = join(root, "claude-dir-pi.toml");
+    writeFileSync(
+      okPiPath,
+      `stateDir = "${join(root, "state-pi")}"\n[programs]\npi = "/opt/Claude Tools/pi"\n`,
+      { mode: 0o600 },
+    );
+    expect(loadConfig(okPiPath).programs.pi).toBe("/opt/Claude Tools/pi");
+
+    const fatalCases: { name: string; toml: string; match: RegExp }[] = [
+      {
+        name: "non-table plugins",
+        toml: `plugins = "nope"\n`,
+        match: /plugins must be a table/,
+      },
+      {
+        name: "forbidden claude path in [programs.pi]",
+        toml: `[programs]\npi = "/usr/local/bin/claude"\n`,
+        match: /claude/i,
+      },
+      {
+        name: "forbidden claude in dir with spaces in [programs.pi]",
+        toml: `[programs]\npi = "/opt/Claude Tools/claude"\n`,
+        match: /claude/i,
+      },
+      {
+        name: "unconfigured plugin platform on bot",
+        toml: `[bots.b]\nplatform = "weixin"\ntoken = "t"\n`,
+        match: /bots\.b\.platform/,
+      },
+    ];
+
+    for (const c of fatalCases) {
+      const p = join(root, `${c.name.replace(/\s+/g, "-")}.toml`);
+      writeFileSync(p, c.toml, { mode: 0o600 });
+      expect(() => loadConfig(p)).toThrow(c.match);
+    }
+
+    const isolatedCases: { name: string; toml: string; match: RegExp }[] = [
       {
         name: "missing path",
         toml: `[plugins.dsh]\nenabled = true\n`,
@@ -178,22 +217,41 @@ describe("config.ts plugin support", () => {
         toml: `[plugins.dsh]\npath = "./dsh"\n[programs]\ndsh = "claude.exe"\n`,
         match: /claude/i,
       },
-      {
-        name: "forbidden claude path in [programs.pi]",
-        toml: `[programs]\npi = "/usr/local/bin/claude"\n`,
-        match: /claude/i,
-      },
-      {
-        name: "unconfigured plugin platform on bot",
-        toml: `[bots.b]\nplatform = "weixin"\ntoken = "t"\n`,
-        match: /bots\.b\.platform/,
-      },
     ];
 
-    for (const c of cases) {
-      const p = join(root, `${c.name.replace(/\s+/g, "-")}.toml`);
-      writeFileSync(p, c.toml, { mode: 0o600 });
-      expect(() => loadConfig(p)).toThrow(c.match);
+    const localImPath = resolve(import.meta.dir, "../examples/plugins/local-im");
+    for (const c of isolatedCases) {
+      const p = join(root, `iso-${c.name.replace(/\s+/g, "-")}.toml`);
+      writeFileSync(
+        p,
+        [
+          `stateDir = "${join(root, "state")}"`,
+          `[bots.t]`,
+          `platform = "telegram"`,
+          `token = "123:abc"`,
+          `[plugins.local-im]`,
+          `path = "${localImPath}"`,
+          c.toml,
+        ].join("\n"),
+        { mode: 0o600 },
+      );
+      const cfg = loadConfig(p);
+      expect(cfg.bots.t?.platform).toBe("telegram");
+      expect(cfg.plugins.dsh?.configError).toMatch(c.match);
+
+      const reg = loadPlugins(cfg.plugins, {
+        coreVersion: "1.5.0",
+        agentPath: process.env.PATH ?? "",
+        bots: cfg.bots,
+        programs: cfg.programs,
+      });
+      expect(reg.loaded.map((x) => x.id)).toEqual(["local-im"]);
+      expect(reg.plugins.dsh?.status).toBe("failed");
+      if (reg.plugins.dsh?.status === "failed") {
+        expect(reg.plugins.dsh.error).toMatch(c.match);
+      }
+      const doc = pluginFindings(reg);
+      expect(doc.findings.some((f) => f.level === "错误" && c.match.test(f.text))).toBe(true);
     }
   });
 });
@@ -733,4 +791,68 @@ describe("commands, router, and transcript guards for plugin agents", () => {
     expect(await transcriptFile("/tmp", "dsh", "s1")).toBeNull();
     expect(await listConversations("dsh")).toEqual([]);
   });
+
+  test("records configErrors when [bots.<name>].platform references an agent plugin or [programs].<id> references an IM plugin while keeping valid plugins loaded", () => {
+    const root = tempDir();
+    const cfgPath = join(root, "config.toml");
+    const echoDir = resolve(import.meta.dir, "../examples/plugins/echo-agent");
+    const localImDir = resolve(import.meta.dir, "../examples/plugins/local-im");
+    writeFileSync(
+      cfgPath,
+      [
+        `stateDir = "${join(root, "state")}"`,
+        `[plugins.echo-agent]`,
+        `path = "${echoDir}"`,
+        `[plugins.local-im]`,
+        `path = "${localImDir}"`,
+        `[programs]`,
+        `local-im = "foo"`,
+        `[bots.x]`,
+        `platform = "echo-agent"`,
+        `[bots.ok]`,
+        `platform = "local-im"`,
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    const cfg = loadConfig(cfgPath);
+    const reg = loadPlugins(cfg.plugins, {
+      coreVersion: "1.5.0",
+      agentPath: process.env.PATH ?? "",
+      bots: cfg.bots,
+      programs: cfg.programs,
+      register: true,
+    });
+    expect(reg.loaded.map((p) => p.id).sort()).toEqual(["echo-agent", "local-im"]);
+    expect(reg.configErrors.map((e) => e.key)).toEqual(["bots.x.platform", "programs.local-im"]);
+    const doc = pluginFindings(reg);
+    expect(doc.findings).toContainEqual({
+      level: "错误",
+      text: "bots.x.platform 引用了 agent 插件 echo-agent，不能作为 IM 平台",
+    });
+    expect(doc.findings).toContainEqual({
+      level: "错误",
+      text: "programs.local-im 引用了 im 插件 local-im，不能作为 agent 程序",
+    });
+  });
+
+  test("starting a plugin agent slot before PR 3 driver does not crash the daemon and leaves built-in slots functional", async () => {
+    const echoDir = resolve(import.meta.dir, "../examples/plugins/echo-agent");
+    const rhodium = newInstance({
+      toml: `\n[plugins.echo-agent]\npath = "${echoDir}"\n`,
+    });
+    try {
+      await rhodium.start();
+      await rhodium.slots("main");
+      await rhodium.ok("new", "w/plug", "--agent", "echo-agent");
+      await rhodium.ok("send", "w/plug", "test");
+      await until(async () => (await rhodium.state("w/plug")) === "崩溃", 10_000);
+      const ls = await rhodium.ok("ls");
+      expect(ls).toContain("w/plug");
+      expect(ls).toContain("w/main");
+      await rhodium.ok("send", "w/main", "hello builtin");
+      await until(async () => rhodium.claude.runs().length === 1, 10_000);
+    } finally {
+      await rhodium.cleanup();
+    }
+  }, 20_000);
 });

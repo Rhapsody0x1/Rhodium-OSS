@@ -36,6 +36,7 @@ export type PluginRegistry = {
   loaded: LoadedPlugin[];
   failed: { id: string; error: string }[];
   disabled: string[];
+  configErrors: { key: string; pluginId: string; error: string }[];
 };
 
 const PLAIN_FALLBACK_CAPABILITIES: Capabilities = {
@@ -180,6 +181,7 @@ export function loadPlugins(
     coreVersion?: string;
     agentPath?: string;
     bots?: Record<string, BotConfig>;
+    programs?: Record<string, string>;
     platform?: string;
     register?: boolean;
   } = {},
@@ -201,6 +203,12 @@ export function loadPlugins(
       records.push([id, { id, status: "disabled", dir: entry.path }]);
       continue;
     }
+    if (entry.configError) {
+      const dir = entry.path ? resolve(entry.path) : "";
+      failed.push({ id, error: entry.configError });
+      records.push([id, { id, status: "failed", dir, error: entry.configError }]);
+      continue;
+    }
     try {
       const res = loadOne(id, entry, resolvedOpts);
       if (res.ok) {
@@ -208,20 +216,46 @@ export function loadPlugins(
         records.push([id, { id, status: "loaded", dir: res.plugin.dir, manifest: res.plugin.manifest, command: res.plugin.command }]);
       } else {
         failed.push({ id, error: res.error });
-        records.push([id, { id, status: "failed", dir: resolve(entry.path), error: res.error }]);
+        records.push([id, { id, status: "failed", dir: entry.path ? resolve(entry.path) : "", error: res.error }]);
       }
     } catch (err) {
       const error = (err as Error).message || String(err);
       failed.push({ id, error });
-      records.push([id, { id, status: "failed", dir: resolve(entry.path), error }]);
+      records.push([id, { id, status: "failed", dir: entry.path ? resolve(entry.path) : "", error }]);
+    }
+  }
+
+  const pluginsMap = Object.fromEntries(records);
+  const configErrors: { key: string; pluginId: string; error: string }[] = [];
+  for (const [botName, bot] of Object.entries(resolvedOpts.bots)) {
+    if (isBuiltinPlatform(bot.platform)) continue;
+    const rec = pluginsMap[bot.platform];
+    if (rec?.status === "loaded" && rec.manifest.kind !== "im") {
+      configErrors.push({
+        key: `bots.${botName}.platform`,
+        pluginId: bot.platform,
+        error: `bots.${botName}.platform 引用了 ${rec.manifest.kind} 插件 ${bot.platform}，不能作为 IM 平台`,
+      });
+    }
+  }
+  for (const progKey of Object.keys(opts.programs ?? {})) {
+    if (isBuiltinAgent(progKey) || progKey === "herdr") continue;
+    const rec = pluginsMap[progKey];
+    if (rec?.status === "loaded" && rec.manifest.kind !== "agent") {
+      configErrors.push({
+        key: `programs.${progKey}`,
+        pluginId: progKey,
+        error: `programs.${progKey} 引用了 ${rec.manifest.kind} 插件 ${progKey}，不能作为 agent 程序`,
+      });
     }
   }
 
   const registry: PluginRegistry = {
-    plugins: Object.fromEntries(records),
+    plugins: pluginsMap,
     loaded,
     failed,
     disabled,
+    configErrors,
   };
   if (opts.register) applyPluginRegistry(registry);
   return registry;

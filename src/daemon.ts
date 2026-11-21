@@ -536,10 +536,12 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     coreVersion: version,
     agentPath: config.agentPath,
     bots: config.bots,
+    programs: config.programs,
     register: true,
   });
   for (const id of plugins.disabled) log("plugin disabled", { plugin: id });
   for (const f of plugins.failed) log("plugin load failed", { plugin: f.id, error: f.error });
+  for (const err of plugins.configErrors) log("plugin config kind mismatch", { key: err.key, plugin: err.pluginId, error: err.error });
   // Run by hand, by rh dev or in a Herdr pane, the configured unit's journal is some other process's, if anything.
   if (detached || unitOf(process.pid) !== config.unit) config.unit = "";
   const directories = [...new Set([config.stateDir, config.socketDir, config.lockDir])];
@@ -749,19 +751,19 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
             (err) => answer(e.id, { ok: false, error: `读不了对话记录：${err}` }),
           );
         case "start":
-          return void runner.start(e.slot);
+          return void runner.start(e.slot).catch((err) => log("cannot start the slot", { slot: e.slot, error: String(err) }));
         case "deliver":
-          return void runner.deliver(e.conversation);
+          return void runner.deliver(e.conversation).catch((err) => log("cannot deliver to the agent", { conversation: e.conversation, error: String(err) }));
         case "stop":
           return void runner.stop(e.conversation, e.brake);
         case "interrupt":
-          return void runner.interrupt(e.conversation);
+          return void runner.interrupt(e.conversation).catch((err) => log("cannot interrupt the agent", { conversation: e.conversation, error: String(err) }));
         case "command":
-          return void runner.command(e);
+          return void runner.command(e).catch((err) => log("cannot run common command", { conversation: e.conversation, command: e.command, error: String(err) }));
         case "answer":
-          return void runner.answer(e.conversation, e.ask);
+          return void runner.answer(e.conversation, e.ask).catch((err) => log("cannot answer the agent", { conversation: e.conversation, ask: e.ask, error: String(err) }));
         case "approval":
-          return void runner.approval(e.conversation, e.on);
+          return void runner.approval(e.conversation, e.on).catch((err) => log("cannot switch approval mode", { conversation: e.conversation, error: String(err) }));
         case "send":
           return queueSend(e.outbound);
         case "edit":
@@ -994,7 +996,16 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
       return id;
     });
     if (!isBuiltinPlatform(bot.platform)) {
-      log("plugin IM adapter not active before IM plugin runtime; marking bot faulted", { bot: name, platform: bot.platform });
+      const rec = plugins.plugins[bot.platform];
+      if (rec?.status === "loaded" && rec.manifest.kind !== "im") {
+        log("bot platform references a non-IM plugin; marking bot faulted", { bot: name, platform: bot.platform, kind: rec.manifest.kind });
+      } else if (rec?.status === "failed") {
+        log("bot platform plugin failed to load; marking bot faulted", { bot: name, platform: bot.platform, error: rec.error });
+      } else if (rec?.status === "disabled") {
+        log("bot platform plugin is disabled; marking bot faulted", { bot: name, platform: bot.platform });
+      } else {
+        log("plugin IM adapter not active before IM plugin runtime; marking bot faulted", { bot: name, platform: bot.platform });
+      }
       store.tx((tx) => void tx.update("bot", { id }, { connState: "faulted" }));
       return id;
     }
