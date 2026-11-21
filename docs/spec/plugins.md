@@ -625,7 +625,7 @@ target = "work/main"
      - `./scripts/windows-build.ps1` 与 `./scripts/windows-task.ps1 -InstallDir dist -TaskName rhodium-test-native -WhatIf`
      - 原生 holder 与跨平台烟测（`hold`、`windows-paths`、`session-processes`、`tui-process`、`windows-tui-launch`、`windows-native`、`native-holders`、`pi-pane-credentials`）
      - Windows 下的 `plugin-sdk`、`plugin-loader`、`plugin-agent`、`plugin-im`、`plugin-env` 与示例插件契约测试（实测带空格路径、混合大小写环境键过滤、`.cmd` / 隐藏窗口启动与 UTF-8 解析）
-3. **`macos-check`（`macos-14`）**：
+3. **`macos-check`（`macos-15`）**：
    - 已定为 `workflow_dispatch` 手动触发（见 §11 决策 4），不随普通 `push` 与 PR 自动运行。
 
 ---
@@ -802,4 +802,4 @@ flowchart LR
    - **决策结果**：放在 `Rhodium-OSS` 同仓库的 `plugins/<name>/` 目录下（`plugins/dsh/`、`plugins/agy/`、`plugins/weixin/`），各自持有独立的 `package.json`（或依赖声明）、独立构建命令与 `plugin.json`，不导入核心 `src/`；通过各自独立的 PR 提交与交叉 Review 合入。
 
 4. **macOS CI 触发策略 —— 已定（按原推荐方案 A）**
-   - **决策结果**：`push` 与 PR 自动触发 **`linux-check`（`ubuntu-24.04`）** 与 **`windows-check`（`windows-2022`）**；**`macos-check`（`macos-14`）** 设为 `workflow_dispatch` 手动触发，避免平时每次提交消耗大量 macOS Runner 分钟数。
+   - **决策结果**：`push` 与 PR 自动触发 **`linux-check`（`ubuntu-24.04`）** 与 **`windows-check`（`windows-2022`）**；**`macos-check`（`macos-15`）** 设为 `workflow_dispatch` 手动触发，避免平时每次提交消耗大量 macOS Runner 分钟数。
