@@ -2,15 +2,15 @@ import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { join, resolve } from "node:path";
 import { readFileSync, writeFileSync } from "node:fs";
-import { newInstance, until } from "./instance";
+import { newInstance, recorded, until, type InstanceOptions } from "./instance";
 
 type Update = { sender: string; channel: string; messageId: string; text: string; at: number; attachments?: { id: string; kind: "file"; name: string }[] };
 
-function platform() {
+function platform(beforeReply?: (method: string, text: string) => Promise<Response | void>) {
   const batches: Update[][] = [];
   const cursors: string[] = [];
   const downloads: string[] = [];
-  const received: { channel: string; message: { text: string } }[] = [];
+  const received: { method: string; channel: string; message: { text: string } }[] = [];
   const http = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     async fetch(req) {
@@ -26,13 +26,16 @@ function platform() {
         return Response.json({ messages: batches[i] ?? [], nextCursor: batches[i] ? String(i + 1) : cursor });
       }
       if (url.pathname === "/send" || url.pathname === "/edit") {
-        received.push(await req.json());
+        const m = await req.json();
+        received.push({ ...m, method: url.pathname });
+        const override = await beforeReply?.(url.pathname, m.message.text);
+        if (override) return override;
         return Response.json({ status: "sent", messageId: "msg-" + received.length });
       }
       return Response.json({ ok: true });
     },
   });
-  const start = (owner?: string) => newInstance({ toml: [
+  const start = (owner?: string, claude?: InstanceOptions["claude"]) => newInstance({ claude, toml: [
     "[plugins.local-im]", "path = " + JSON.stringify(resolve(import.meta.dir, "../examples/plugins/local-im")),
     "[bots.local]", 'platform = "local-im"', 'target = "w/a"', "endpoint = " + JSON.stringify(http.url.origin),
     ...(owner ? ["owner = " + JSON.stringify(owner)] : []),
@@ -164,5 +167,48 @@ test("two bots sharing a plugin get separate config, kept keys and a filtered en
   } finally {
     db?.close();
     await r.cleanup();
+  }
+}, 15_000);
+
+test("rh send reports an unconfirmed plugin send when its own receipt deadline passes first", async () => {
+  const release = Promise.withResolvers<void>();
+  const p = platform(async (_method, text) => { if (text === "slow reply") await release.promise; });
+  const r = p.start();
+  try {
+    await r.start();
+    const code = (await r.ok("pair", "local")).match(/配对码：(\S+)/)![1]!;
+    p.batches.push([dm("pair", code)]);
+    await until(() => p.cursors.includes("1"));
+    const receipt = await r.ok("send", "me", "slow reply");
+    expect(receipt).toContain("不知道发出去没有");
+    expect(p.received.filter(m => m.message.text === "slow reply")).toHaveLength(1);
+    release.resolve();
+    await recorded(r, "SELECT id FROM outbound WHERE text = 'slow reply' AND status = 'sent'");
+  } finally {
+    release.resolve();
+    await r.cleanup();
+    p.http.stop(true);
+  }
+}, 30_000);
+
+test("an unconfirmed plugin edit is traced durably without resending the original post", async () => {
+  const p = platform(async method => {
+    if (method === "/edit") return Response.json({ status: "unknown", error: "lost edit receipt" });
+  });
+  const r = p.start("user-1", { script: "progress" });
+  let db: Database | undefined;
+  try {
+    const daemon = await r.start();
+    await r.slots("a");
+    p.batches.push([dm("go", "look around")]);
+    await until(() => daemon.logs.some(l => l.msg === "edit outcome unknown"));
+    db = new Database(join(r.dir, "state/rh.db"), { readonly: true });
+    const edits = db.query("SELECT o.status, e.trace, json_extract(e.data,'$.error') AS error FROM event e JOIN outbound o ON o.id=json_extract(e.data,'$.outbound') WHERE e.type='outbound_unknown' AND json_extract(e.data,'$.operation')='edit'").all();
+    expect(edits).toContainEqual({ status: "sent", trace: expect.any(String), error: "lost edit receipt" });
+    expect(p.received.filter(m => m.method === "/send")).toHaveLength(1);
+  } finally {
+    db?.close();
+    await r.cleanup();
+    p.http.stop(true);
   }
 }, 15_000);

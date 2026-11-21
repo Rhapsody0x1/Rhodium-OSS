@@ -741,8 +741,11 @@ function im(state: State, m: InboundMessage, ctx: Ctx): Decision {
   if (!yours) return record(null, "忽略：不是本人");
   // Telegram's 开始 sends /start, say once the chat is cleared and the row maybe gone with it: the row
   // is pushed again (architecture §8.4). /start goes on to the agent as ever.
-  if (!m.button && /^\/start(@\S*)?(\s|$)/.test(m.text.trim()) && ctx.capabilities(bot.id)?.menu.row === "reply_keyboard")
-    d.writes.push({ op: "update", table: "bot", where: { id: bot.id }, patch: { rowHash: JSON.stringify({ ...JSON.parse(bot.rowHash ?? "{}"), [m.chat]: null }) } }); // a row per chat (architecture §8.4)
+  const menu = ctx.capabilities(bot.id)?.menu;
+  if (!m.button && /^\/start(@\S*)?(\s|$)/.test(m.text.trim()) && menu?.row === "reply_keyboard") {
+    const rowHash = menu.scope === "per_chat" ? JSON.stringify({ ...chatMenuHashes(bot.rowHash), [m.chat]: null }) : null;
+    d.writes.push({ op: "update", table: "bot", where: { id: bot.id }, patch: { rowHash } });
+  }
   // Your avatar and name under the bot are kept by your private chat with it: there at last, they
   // come now, not with the next day's refresh.
   if (fresh && m.chat === m.sender) d.effects.push({ kind: "avatars", bot: bot.id });
@@ -1763,11 +1766,16 @@ export function menus(state: Bindings, ctx: Pick<Ctx, "config" | "capabilities">
     const row = caps.menu.row ? { row: caps.menu.row === "custom_menu" ? QQ_ROW : TELEGRAM_ROW } : {};
     const want = (chat: Chat | undefined) => {
       const slot = target(state, bot, chat, ctx);
-      return { ...row, menu: slashMenu(state.conversations.find((c) => c.id === slot?.conversation)?.agent) };
+      return { ...row, menu: slashMenu(state.conversations.find((c) => c.id === slot?.conversation)?.agent).slice(0, caps.menu.maxItems) };
     };
     if (caps.menu.scope === "per_chat") return own.map((o) => ({ bot: bot.id, chat: o, ...want(chats.find((c) => c.platformChatId === o)) }));
     return [{ bot: bot.id, ...want(own.length === 1 ? chats[0] : undefined) }];
   });
+}
+
+/** Per-chat hashes are JSON objects. A previous global menu left a single base-36 hash. */
+export function chatMenuHashes(saved: string | null): Record<string, string | null> {
+  return saved?.startsWith("{") ? JSON.parse(saved) : {};
 }
 
 /** The chat row of mainChat in the config, added if new; undefined if there is none. */

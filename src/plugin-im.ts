@@ -10,6 +10,7 @@ import type { LoadedPlugin } from "./plugin-loader";
 
 type Options = {
   id: string; name: string; plugin: LoadedPlugin; config: Record<string, string>; env: Record<string, string>;
+  onReady?: () => void;
   kept: Kept; handshakeMs: number; rpcMs: number; stopGrace: number; botFailures: number;
 };
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -105,6 +106,7 @@ export class PluginImAdapter implements ImAdapter {
     this.capabilities = o.plugin.manifest.capabilities;
   }
 
+  get negotiated(): Capabilities | undefined { return this.peer?.ready && !this.stop.signal.aborted ? this.capabilities : undefined; }
   get pid(): number | null { return this.peer?.process.pid ?? null; }
 
   private reason(err: unknown): string {
@@ -183,6 +185,7 @@ export class PluginImAdapter implements ImAdapter {
         p.ready = true;
         p.handshake.resolve(true);
         this.ready.resolve(p);
+        this.o.onReady?.();
       } catch (err) {
         p.handshake.resolve(false);
         if (!this.stop.signal.aborted) {

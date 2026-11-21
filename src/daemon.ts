@@ -26,9 +26,9 @@ import { PluginImAdapter } from "./plugin-im";
 import { loadPlugins, type PluginRegistry } from "./plugin-loader";
 import { makeQQ, msgSeq } from "./qq";
 import { clip } from "./render";
-import { BOARD, chatName, IN_TUI, menus, route, type Ctx, type Decision, type Effect, type Payload, type RhReply, type State, type Write } from "./router";
+import { BOARD, chatMenuHashes, chatName, IN_TUI, menus, route, type Ctx, type Decision, type Effect, type Payload, type RhReply, type State, type Write } from "./router";
 import { agentBaseEnv, createRunner } from "./runner";
-import { B32, MODEL_INFO, namesOf, openStore, setMeta, ulid, untaken, type AgentInput, type EventSource, type Outbound, type Store, type Tx } from "./store";
+import { B32, MODEL_INFO, namesOf, openStore, setMeta, ulid, untaken, type AgentInput, type Chat, type EventSource, type Outbound, type Store, type Tx } from "./store";
 import { makeTelegram } from "./telegram";
 import { conversationFile, recentInFile } from "./transcript";
 import { ancestors, createTui } from "./tui";
@@ -595,7 +595,12 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     const was = rows().map((r) => r?.chat);
     const each = sent.map((id) => new Promise<void>((r) => trying.set(id, [...(trying.get(id) ?? []), r])));
     await Promise.race([Promise.all(each), Bun.sleep(SEND_WAIT)]);
-    const now = rows();
+    // A plugin RPC can still be in flight when the caller's shorter receipt deadline expires.
+    const now = rows().map((row) => {
+      if (!row || (row.status !== "pending" && row.status !== "sending")) return row;
+      const chat = store.tx((tx) => tx.get("chat", row.chat));
+      return chat && adapters.get(chat.bot) instanceof PluginImAdapter ? { ...row, status: "unknown" as const } : row;
+    });
     const name = (chat: string) => store.tx((tx) => chatName({ bots: tx.find("bot", {}) }, { config }, tx.get("chat", chat)!));
     // One that did not go, or may not have, says so first, moved to another bot or not; not all of
     // them, how many of each, lest the agent tell you none went, or send again what may have.
@@ -637,9 +642,11 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
         bots: tx.find("bot", {}),
         chats: tx.find("chat", {}),
       }));
-      for (const want of menus(state, { config, capabilities })) {
+      const caps = new Map([...adapters].map(([id, a]) => [id, a instanceof PluginImAdapter ? a.negotiated : a.capabilities]));
+      for (const want of menus(state, { config, capabilities: id => caps.get(id) })) {
         const bot = state.bots.find((b) => b.id === want.bot)!;
         const adapter = adapters.get(want.bot)!;
+        const current = () => !(adapter instanceof PluginImAdapter) || adapter.negotiated === caps.get(want.bot);
         // Telegram's row is a message: behind what the send queue holds by now, 已配对 say, at the chat's pace.
         const chat = state.chats.find((c) => c.bot === want.bot && c.platformChatId === want.chat);
         const setRow = async () => {
@@ -647,28 +654,31 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
             await sending;
             await pace(chat?.id ?? `${want.bot} ${want.chat}`, adapter);
           }
-          await adapter.setRow(want.row!, want.chat);
+          if (current()) await adapter.setRow(want.row!, want.chat);
         };
         // The row first: it changes the least.
         const pushes = [
           ...(want.row ? [["rowHash", want.row, setRow] as const] : []),
-          ["menuHash", want.menu, () => adapter.setMenu(want.menu, want.chat)] as const,
+          ...(caps.get(want.bot)!.menu.maxItems > 0 ? [["menuHash", want.menu, () => adapter.setMenu(want.menu, want.chat)] as const] : []),
         ];
         // Where there is one of each per chat, the bot keeps them by the chat (store.ts Bot).
-        const kept = (column: "rowHash" | "menuHash") => (want.chat === undefined ? bot[column] : (JSON.parse(bot[column] ?? "{}")[want.chat] ?? null));
+        const kept = (column: "rowHash" | "menuHash") => (want.chat === undefined ? bot[column] : (chatMenuHashes(bot[column])[want.chat] ?? null));
         for (const [column, body, push] of pushes) {
+          if (!current()) break; // A reconnect scheduled a sync with its new capabilities.
           const hash = Bun.hash(JSON.stringify([want.chat, body])).toString(36);
           const key = `${want.bot} ${want.chat} ${column}`;
           const f = failed.get(key);
           if (kept(column) === hash || (f?.hash === hash && Date.now() - f.at < config.durations.menuRetry)) continue;
           try {
             await push();
+            if (!current()) break;
             store.tx((tx) => {
               const now = tx.get("bot", want.bot)![column];
-              tx.update("bot", { id: want.bot }, { [column]: want.chat === undefined ? hash : JSON.stringify({ ...JSON.parse(now ?? "{}"), [want.chat]: hash }) });
+              tx.update("bot", { id: want.bot }, { [column]: want.chat === undefined ? hash : JSON.stringify({ ...chatMenuHashes(now), [want.chat]: hash }) });
             });
             failed.delete(key);
           } catch (err) {
+            if (!current()) break;
             failed.set(key, { hash, at: Date.now() });
             log("menu push failed", { bot: want.bot, what: column, error: String(err) });
           }
@@ -816,6 +826,16 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     lastTouched.set(id, now);
   };
 
+  async function editPost(adapter: ImAdapter, chat: Chat, messageId: string, message: OutboundMessage): Promise<SendResult> {
+    const r = await adapter.edit(chat.platformChatId, messageId, message);
+    if (adapter instanceof PluginImAdapter && r.status === "unknown") store.tx((tx) => {
+      const row = tx.find("outbound", { chat: chat.id, platformMsgId: messageId })[0];
+      tx.append({ source: "im", type: "outbound_unknown", ...(row?.trace && { trace: row.trace }),
+        data: { operation: "edit", chat: chat.id, ...(row && { outbound: row.id }), error: r.error } });
+    });
+    return r;
+  }
+
   // The message an edit platform keeps editing through a turn (architecture §8.2), by outbound id:
   // one request in flight at a time, at the platform's pace; newer text replaces what has not gone out.
   type EditJob = { text: string; markdown?: string; final: boolean; done?: Promise<void>; hold?: Promise<void> };
@@ -866,7 +886,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
           if (every) await Bun.sleep((lastTouched.get(id) ?? row.createdAt) + every - Date.now());
           await pace(chat.id, adapter);
           const { text, markdown, final } = job;
-          const r = await adapter.edit(chat.platformChatId, msgId, { text, ...(markdown !== undefined && { markdown }), ...(final && { final: true as const }) });
+          const r = await editPost(adapter, chat, msgId, { text, ...(markdown !== undefined && { markdown }), ...(final && { final: true as const }) });
           if (r.status !== "failed") touched(id, adapter);
           // Turned down. One that may have taken is left at that: rather than show the text twice.
           // One over the flood limit too: a new message now would be turned down as well. Not a
@@ -879,7 +899,10 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
             return log("edit failed", { outbound: id, error: r.error, flood: true });
           }
           if (r.status === "failed") return failed({ status: r.status, error: r.error });
-          if (r.status === "unknown") log("edit outcome unknown", { outbound: id, error: r.error });
+          if (r.status === "unknown") {
+            log("edit outcome unknown", { outbound: id, error: r.error });
+            if (adapter instanceof PluginImAdapter && job.text === text) break;
+          }
           // What it shows now, for a later quote of it (architecture §8.3); a draft's final edit made
           // it a message of its own id (#784), which a quote names it by.
           else {
@@ -919,8 +942,9 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
         if (!adapter) continue;
         await pace(chat.id, adapter);
         const shown = text !== undefined && adapter.capabilities.progress === "edit";
-        let r = shown ? await adapter.edit(chat.platformChatId, o.platformMsgId!, { text, buttons: [] }) : undefined;
+        let r = shown ? await editPost(adapter, chat, o.platformMsgId!, { text, buttons: [] }) : undefined;
         // One that won't take the words (too long, say) still loses its buttons.
+        if (adapter instanceof PluginImAdapter && r?.status === "unknown") continue;
         if (r?.status !== "sent") r = await adapter.dropButtons(chat.platformChatId, o.platformMsgId!);
         if (r.status !== "sent") log("buttons not taken off", { outbound: o.id, status: r.status, error: r.error });
       }
@@ -939,7 +963,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
         const message = "message" in e.at ? e.at.message : store.tx((tx) => tx.get("outbound", (e.at as { outbound: string }).outbound)?.platformMsgId);
         const shown = { text: e.text, buttons: e.buttons, ...(e.markdown !== undefined && { markdown: e.markdown }) };
         await pace(chat.id, adapter);
-        const r = message ? await adapter.edit(chat.platformChatId, message, shown) : { status: "failed" as const, error: "no sent message to edit" };
+        const r = message ? await editPost(adapter, chat, message, shown) : { status: "failed" as const, error: "no sent message to edit" };
         if (r.status !== "failed" || r.flood) return;
         log("panel not redrawn, sending it anew", { chat: chat.id, error: r.error });
         await pace(chat.id, adapter);
@@ -1009,7 +1033,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
         const { platform, target, owner, ...fields } = { ...config.plugins[bot.platform]?.config, ...bot };
         adapters.set(id, new PluginImAdapter({
           id, name, plugin: rec, config: fields, env: headlessEnv(platform, agentBaseEnv(config)),
-          kept: kept(store), handshakeMs: config.durations.pluginHandshake, rpcMs: config.durations.pluginRpc,
+          onReady: syncMenus, kept: kept(store), handshakeMs: config.durations.pluginHandshake, rpcMs: config.durations.pluginRpc,
           stopGrace: config.durations.stopGrace, botFailures: config.limits.botFailures,
         }));
         return id;
