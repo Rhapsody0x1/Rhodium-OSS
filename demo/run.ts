@@ -55,8 +55,8 @@ async function demo() {
   const log = join(state, "dev.log");
   const runtime = join(root, "run");
   const env: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] =>
-    e[1] !== undefined && /^(PATH|PATHEXT|SystemRoot|COMSPEC|WINDIR|TEMP|TMP|LANG|LC_ALL)$/i.test(e[0])));
-  Object.assign(env, { HOME: root, USERPROFILE: root, LOCALAPPDATA: root, XDG_RUNTIME_DIR: runtime,
+    e[1] !== undefined && /^(PATH|PATHEXT|SystemRoot|SystemDrive|ComSpec|WINDIR|ProgramFiles(?:\(x86\))?|ProgramW6432|ProgramData|PSModulePath|PROCESSOR_ARCHITECTURE|USERDOMAIN|USERNAME|COMPUTERNAME|TEMP|TMP|LANG|LC_ALL)$/i.test(e[0])));
+  Object.assign(env, { HOME: root, USERPROFILE: root, APPDATA: root, LOCALAPPDATA: root, XDG_RUNTIME_DIR: runtime,
     NODE_ENV: "test", RHODIUM_TEST_DETACHED: "1", RHODIUM_SOCKET: join(runtime, "rh.sock") });
   const batches: { sender: string; channel: string; messageId: string; text: string; at: number }[] = [];
   const posts: { channel: string; message: { text: string } }[] = [];
@@ -110,18 +110,23 @@ async function demo() {
     };
     void pipe(dev.stdout, chunk => { printed += chunk; });
     void pipe(dev.stderr, chunk => { errors += chunk; });
+    let lastProbe = "no HTTP response";
     try {
       await until(async () => {
         if (dev!.exitCode !== null) throw new Error("rh dev exited: " + dev!.exitCode);
         // A busy port belongs to us only if its daemon is a child of this launcher.
         try {
           const response = await fetch(board + "/api/rhodium", { redirect: "error", signal: AbortSignal.timeout(1200) });
-          return response.ok && descendantPids(dev!.pid).includes((await response.json()).pid);
-        } catch { return false; }
+          if (!response.ok) { lastProbe = "HTTP " + response.status; return false; }
+          const pid = (await response.json()).pid;
+          const tree = descendantPids(dev!.pid);
+          lastProbe = `reported pid ${pid}; launcher tree ${tree.join(",")}`;
+          return tree.includes(pid);
+        } catch (err) { lastProbe = String(err); return false; }
       }, "isolated board");
     } catch (err) {
       const tail = existsSync(log) ? readFileSync(log, "utf8").slice(-1500) : "no dev.log";
-      throw new Error(`${(err as Error).message}: ${errors} ${tail}`);
+      throw new Error(`${(err as Error).message}; ${lastProbe}\n${printed}\n${errors}\n${tail}`);
     }
     connected = true;
   }
