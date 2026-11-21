@@ -112,7 +112,7 @@ sequenceDiagram
   Note over C,H: 异常分支 1：rhodium 重启
   C->>H: hello(offset) 重连
   H-->>C: 重放错过的 out.log 行
-  C->>C: 按 ask_resolved/cancel 区分已答/待答 ask，跳过已写幂等键的记录
+  C->>C: 按 ask_resolved/cancel 区分已答/待答 ask，确认文件同步后跳过已写幂等键的记录
 
   Note over H,A: 异常分支 2：Agent 插件回合中崩溃
   A--xH: 进程非零退出
@@ -128,7 +128,7 @@ sequenceDiagram
 
 | 能力领域 | 核心统一承担（插件无需自写） | 插件自己实现 | 不支持或降级说明 |
 |---|---|---|---|
-| 进程与重启托管 | `rh-hold` 保活、`out.log` 落盘与重启重放、`taken`/`written` 投递状态跟踪、`pending_asks` 重建与对账 | 按行消费 stdin、按行写 stdout；对同一 `requestId` 的重复 `answer` 须幂等去重（至多向下游交付一次），交付后发出 `ask_resolved` | 不要求插件实现日志重放或连接恢复服务端 |
+| 进程与重启托管 | `rh-hold` 保活、`out.log` 落盘与重启重放、`taken`/`written` 投递状态跟踪、`pending_asks` 重建与对账 | 按行消费 stdin、按行写 stdout；对同一 `requestId` 的重复 `answer` 须幂等去重（至多向下游交付一次），首次交付成功后发出 `ask_resolved`（交付进行中不得提前发出） | 不要求插件实现日志重放或连接恢复服务端 |
 | 槽位生命周期 | 空闲回收（`idleReap`）、崩溃自动续跑、连续崩溃熔断、并发上限（`maxRunning`）、定时任务、`interrupt` 超时回收 | 在 `close` 时正常清理下游进程并退出 | — |
 | 对话记录与展示 | 按幂等键写入[托管对话记录](../../GLOSSARY.md)，驱动网页对话页、`rh read`、槽位时间线 `/resume` | 通过 `turn_start` / `item` / `tool_start` / `turn_end` 报出标准事件 | 不支持 `rh import` 扫盘导入；不接管已有外部进程 |
 | 合规与安全 | 保留内置名称（含 `herdr`）、清洗环境变量（含 Windows 混合大小写过滤）、集中执行配对、主人校验（`owners.includes(m.sender)`）与投递决定、`rh doctor` 巡检插件进程子树 | IM 插件承担平台账号身份认证并原样上报发送者 ID（私聊归一为用户 ID）；Agent 插件读取 `init.systemPromptFile`，遵守三条红线（不得拉起 `claude` 或包装 Claude Code、不得用 Claude 订阅、仅本人触发） | 插件属于用户显式信任代码；不允许任何非内置 `claude` 驱动获取 Claude 订阅凭据 |
@@ -164,7 +164,7 @@ Agent 插件由 `rh-hold` 直接作为子进程拉起。进程内通过 stdin（
 | `tool_start` | 发起工具调用（结果尚未返回，可能随后触发 `ask`） | `id: string`、`name: string`、`input: unknown` |
 | `item` | 一条完整助手消息或一次工具调用完成 | `item: { kind: "message"; text: string } \| { kind: "tool"; id?: string; name: string; input: unknown; result?: { text: string; error?: boolean } }` |
 | `ask` | 向用户提问或请求工具审批 | `requestId: string`、`kind: "question" \| "plan" \| "permission"`、`tool: string`、`input: unknown`、`toolUse?: string` |
-| `ask_resolved` | 确认插件已消费 `requestId` 对应的 `answer` 并交付给下游（闭合该提问，防止重放重弹；若重收已处理 `requestId` 的重复 `answer`，可再次发出以确认闭合） | `requestId: string` |
+| `ask_resolved` | 确认插件已将 `requestId` 对应的 `answer` 成功交付给下游（闭合该提问，防止重放重弹；仅在首次交付成功后发出，此后重收同一 `requestId` 的重复 `answer` 可再次发出以确认闭合；首次交付仍在进行中时不得提前发出） | `requestId: string` |
 | `ask_cancel` | 下游撤回一个尚未回答的提问 | `requestId: string` |
 | `turn_end` | 回合结束并空闲，触发最终回复推送与后续排队消息投递；也可附带迟到 `session` | `reply?: string`、`background?: boolean`、`session?: string` |
 | `usage` | 上报上下文窗口或单轮 token 用量 | `inputTokens?: number`、`outputTokens?: number`、`contextTokens?: number`、`maxContextTokens?: number` |
@@ -206,9 +206,11 @@ Agent 插件由 `rh-hold` 直接作为子进程拉起。进程内通过 stdin（
   - `rhodium` 重启重连 `rh-hold` 并重放完 `out.log` 后，`replayed()` 只把仍留在未闭合集合中的提问作为 `pending_asks` 发给路由：
     - 若崩溃前用户已答且核心已交付（数据库状态为 `delivered`），`out.log` 里已有 `ask_resolved`，根本不会出现在 `pending_asks`；即便进程恰好在写出 `ask_resolved` 前崩掉，路由在处理 `pending_asks` 时也会比对数据库 `state.listed`（包含已 `delivered` 记录），绝不重复弹出旧提问；
     - 若崩溃前用户已答但尚未完成 `delivered` 落库（数据库状态为 `answered`，`out.log` 无 `ask_resolved`），它仍在 `pending_asks` 中，路由会立即触发重新下发 `answer`。
-  - **重复 `answer` 语义与插件幂等去重**：`src/runner.ts` 的 `answer()` 先等待驱动把 `answer` 写入插件，再在后续数据库事务中将提问状态改为 `delivered`。若第一次 `answer` 已写入仍存活的插件进程，而核心在更新数据库前退出且插件尚未写出 `ask_resolved`，重连时核心会看到数据库仍为 `answered` 且 `out.log` 中该提问未闭合，从而再次下发同一个 `answer`。`state.listed` 只能防止向用户重复弹题，不能阻止插件把同一批准/回答重复交给下游。因此 `rh-agent/1` 公开契约规定：`answer` 跨核心重启为**至少一次（at-least-once）投递**；插件在**同一次进程运行内必须按 `requestId` 去重**，对同一 `requestId` **至多向下游交付一次**。当插件重收已处理（或正在处理）的 `requestId` 的重复 `answer` 时，必须忽略重复的下游执行，并可再次发出 `{"type":"ask_resolved","requestId":"<id>"}` 以便核心闭合提问并将状态更新为 `delivered`。
+  - **重复 `answer` 语义与插件幂等去重**：`src/runner.ts` 的 `answer()` 先等待驱动把 `answer` 写入插件，再在后续数据库事务中将提问状态改为 `delivered`。若第一次 `answer` 已写入仍存活的插件进程，而核心在更新数据库前退出且插件尚未写出 `ask_resolved`，重连时核心会看到数据库仍为 `answered` 且 `out.log` 中该提问未闭合，从而再次下发同一个 `answer`。`state.listed` 只能防止向用户重复弹题，不能阻止插件把同一批准/回答重复交给下游。因此 `rh-agent/1` 公开契约规定：`answer` 跨核心重启为**至少一次（at-least-once）投递**；插件在**同一次进程运行内必须按 `requestId` 去重**，对同一 `requestId` **至多向下游交付一次**，并严格区分两态：
+    - **首次交付仍在进行中**：若收到同一 `requestId` 的重复 `answer`，插件必须合并等待，不再向下游重复执行，也**暂不发出 `ask_resolved`**，待首次下游交付真正成功后才发出确认；
+    - **首次交付已成功后**：若再次收到同一 `requestId` 的重复 `answer`，插件必须忽略重复的下游执行，并可再次发出 `{"type":"ask_resolved","requestId":"<id>"}` 以便核心闭合提问并将状态更新为 `delivered`。
 - **通用命令子集与自动拒绝**：只有列入 `ready.capabilities.commands`（且与清单静态声明一致）的通用命令才会转发 `command` 到插件。`new` 与 `resume` 始终由核心自己处理；`stop` 固定映射为 `interrupt`；未声明支持的命令（例如 `/ultracode`、`/compact`）由核心直接向用户返回“该 agent 不支持此命令”，不惊动插件进程。
-- **核心托管对话记录（唯一写入者、残尾修复、落盘顺序与幂等去重）**：
+- **核心托管对话记录（唯一写入者、残尾修复与首次同步、检查点顺序及幂等去重）**：
   - **为什么统一托管**：各家插件 agent 的本地记录格式各异（有的写自有格式 JSONL，有的不落盘或结构随版本变化），由核心统一记录在 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`，让网页对话页、`rh read` 和槽位时间线 `/resume` 无需为每家插件单独写解析器，展示格式也完全一致。
   - **唯一写入者**：仅由 `rhodium` 核心（`src/runner.ts` 调用 `src/transcript.ts`）写入；`rh-hold` 保持只转发和落盘字节，不解析协议。
   - **稳定幂等键（消除“写文件后、提交数据库 `outOffset` 前崩溃”的重复）**：
@@ -216,21 +218,22 @@ Agent 插件由 `rh-hold` 直接作为子进程拉起。进程内通过 stdin（
     - 写入托管记录 JSONL 的每条条目携带唯一幂等键 `"k"`：
       - 用户/内部输入条目：`k = "in:" + inputId`；
       - 插件输出事件条目（`tool_start`、`item`、`turn_end`）：`k = "out:" + runId + ":" + lineEndOffset`（`lineEndOffset = pos + nl + 1`，即该行在本次 `out.log` 中的精确结束字节偏移）。
-  - **重开追加前修复残缺末行**：
-    - 唯一写入者（`src/transcript.ts`）在一次 `rhodium` 进程运行中首次打开某对话的托管记录文件准备追加前，必须从头扫描已有内容，加载已落盘的 `"k"` 集合，并记录最后一个完整且可解析为合法 JSON 的 `\n` 结尾记录的结束字节偏移；
-    - 若文件末尾存在未以 `\n` 结尾的半行或损坏无法解析的残尾，写入者必须**先将文件截断（`truncate` / `ftruncate`）回最后一个完整记录的 `\n` 之后并 `fsync`**，再开始追加重放或新记录。这样新写入的完整 JSONL 行绝不会粘在半行残尾之后形成损坏记录。
-  - **写盘持久化与提交数据库检查点的先后顺序（覆盖崩溃与断电）**：
-    - 写入托管记录必须严格遵循“**先写完整 `\n` 结尾 JSONL 行并 `flush`/`fsync` 落盘，再在 `src/runner.ts` 的 `loop.batch()` 事务中提交更新后的 SQLite `outOffset`**”的顺序：
-      1. 若在 JSONL 完整行 `fsync` 完成前中断或断电，SQLite `outOffset` 尚未提交，磁盘上至多留有半行残尾；重启后该输出行仍满足 `replay === false`，写入者先截断残尾再按原 `"k"` 重放完整行并 `fsync` 落盘，随后提交 `outOffset`；
-      2. 若在 JSONL 完整行 `fsync` 完成后、SQLite `outOffset` 提交前中断或断电，磁盘上已有带 `"k"` 的完整记录；重启重放时写入者加载 `"k"` 集合后跳过重复追加并推进 `outOffset`；
-      3. 若 SQLite `outOffset` 已提交，该记录此前已完成 `fsync` 落盘；重启时 `replay === true` 直接跳过写盘，读侧准确读到一次。
+  - **重开追加前修复残缺末行与首次扫描统一同步**：
+    - 唯一写入者（`src/transcript.ts`）在一次 `rhodium` 进程运行中首次打开某对话的托管记录文件准备追加或推进检查点前，必须从头扫描已有内容，加载已落盘的 `"k"` 集合，并记录最后一个完整且可解析为合法 JSON 的 `\n` 结尾记录的结束字节偏移；
+    - 若文件末尾存在未以 `\n` 结尾的半行或损坏无法解析的残尾，写入者必须先将文件截断（`truncate` / `ftruncate`）回最后一个完整记录的 `\n` 之后；**无论本次打开是否触发截断，首次恢复扫描完成后都必须对文件执行一次 `fsync` 同步**，确保盘上已有的全部完整可读行真实落盘，然后再进入重放或追加，既防止半行与后续记录粘连损坏，也消除“完整可读行尚未同步到盘”的窗口。
+  - **写盘同步与提交数据库检查点的先后顺序（含断电前提边界）**：
+    - 写入托管记录与推进检查点必须严格遵循“**命中已有 `"k"` 可跳过重复追加，但必须先确认文件已完成 `fsync` 同步，才能在 `src/runner.ts` 的 `loop.batch()` 事务中推进 SQLite `outOffset` 检查点**”的规则（首次恢复扫描后统一 `fsync` 一次覆盖既有完整行；每条新追加的完整 `\n` 行同样必须先 `fsync` 落盘后再提交检查点）：
+      1. 若在 JSONL 完整行写入或 `fsync` 完成前中断（包括“仅写出半行”与“完整行与 `\n` 已写入页缓存但尚未 `fsync` 就退出”两种情况），SQLite `outOffset` 尚未提交；重启后该输出行仍满足 `replay === false`，写入者首次重开扫描先截断残尾（若有）并统一 `fsync` 一次：半行被截断的记录重新追加完整行并 `fsync`，已成完整行命中 `"k"` 的记录跳过重复追加，均在确认文件已 `fsync` 同步后再推进 `outOffset`；
+      2. 若在 JSONL 完整行 `fsync` 完成后、SQLite `outOffset` 提交前中断，重启重放时写入者加载 `"k"` 并经首次统一 `fsync` 确认同步后跳过重复追加，再推进 `outOffset`；
+      3. 若 SQLite `outOffset` 已提交，该记录此前已确认 `fsync` 落盘；重启时 `replay === true` 直接跳过写盘，读侧准确读到一次。
+    - **断电恢复的前提边界**：上述断电不丢托管记录的承诺以 `out.log` 中的原始输出在重启后仍可重放为前提——基线 `holder/src/main.rs` 的 `pump_out()` 对 `out.log` 执行 `write_all` 写盘而未逐行 `fsync`，本方案不改变 `rh-hold` 的逐行写盘机制；对已落入 `out.log` 可重放的记录以及已 `fsync` 并提交检查点的托管记录，重启恢复均保证不丢不重。
   - **三道去重防线**：
     1. `replay === true`（`pos + nl < l.seen`）的已处理行只恢复驱动内存状态，不触发托管记录写盘；
-    2. 写入层（`src/transcript.ts`）首次打开文件时先截断末行残尾再加载已落盘 `"k"` 集合，遇到相同 `"k"` 直接跳过，每条新写入必带 `"k"` 且先 `fsync` 后再提交数据库检查点；
+    2. 写入层（`src/transcript.ts`）首次打开文件扫描并截断末行残尾（若有）后统一 `fsync` 一次；命中已有 `"k"` 时可跳过重复追加，但必须先确认文件已同步，才允许推进 SQLite `outOffset` 检查点；每条新写入必带 `"k"` 且先 `fsync` 后再提交检查点；
     3. 读取层（`/api/messages` 与 `rh read`）按 `"k"` 去重；即使写入者尚未重开修复，读侧也会忽略文件末尾因异常退出或断电截断的不完整末行。
   - **用户输入获取时序（消除 `taken` 清空正文的竞态）**：
-    - 在 `src/runner.ts` 处理 `taken` 事件、**调用 `loop.batch()` 提交数据库事务（`router.ts` 会在此事务把 `agentInput` 的 `body` 和 `images` 置为 `null`）之前**，先从 `store` 读取该 `inputId` 尚未清空的 `body`、`images` 与发送时间，以 `k = "in:" + inputId` 幂等追加写入托管对话记录并 `fsync`；
-    - 如果上次进程恰好在“写出 `taken` 后、提交数据库事务前”崩溃，`agentInput.body` 与 `images` 仍完整保存在数据库里，重启重放 `out.log`（此时 `replay === false`）依然能取回完整原文写入（若上次留有半行会先截断修复）；若数据库事务已提交，则 `outOffset` 已前进（`replay === true`）且 `"in:" + inputId` 已落盘，不会重复也不会丢失。
+    - 在 `src/runner.ts` 处理 `taken` 事件、**调用 `loop.batch()` 提交数据库事务（`router.ts` 会在此事务把 `agentInput` 的 `body` 和 `images` 置为 `null`）之前**，先从 `store` 读取该 `inputId` 尚未清空的 `body`、`images` 与发送时间，以 `k = "in:" + inputId` 幂等追加写入托管对话记录并 `fsync`（或命中已有 `"k"` 并确认首次扫描 `fsync` 完成后推进检查点）；
+    - 如果上次进程恰好在“写出 `taken` 后、提交数据库事务前”崩溃，`agentInput.body` 与 `images` 仍完整保存在数据库里，重启重放 `out.log`（此时 `replay === false`）依然能取回完整原文写入（若上次留有半行会先截断修复，若完整行已写但未同步则经重开扫描统一 `fsync` 后跳过重复追加再推进检查点）；若数据库事务已提交，则 `outOffset` 已前进（`replay === true`）且 `"in:" + inputId` 已落盘，不会重复也不会丢失。
 
 ---
 
@@ -440,7 +443,7 @@ target = "work/main"
 | 5 | `src/plugin-loader.ts`（新增） | 无清单加载与隔离机制 | 启动时按 `config.plugins` 读取并校验 `plugin.json`（含 `herdr` 保留名、禁止指向 `claude`、`${PLUGIN_DIR}` 展开），输出成功注册项与隔离失败表，绝不抛出未捕获异常中断主进程 |
 | 6 | `src/plugin-agent.ts`（新增）与 `src/runner.ts` | `runner.ts` 中 `DRIVERS` 只映射内置三家，`start()` 会检查 `cfg.programs[agent]` 存在性，`deliver()`/`attach()` 依赖静态表 | 新增实现 `AgentDriver` 的 `PluginAgentDriver`：启动前只查插件入口、`init.program` 传覆盖下游路径、支持迟到 `session` 落库、`interrupt` 超时升级、`answer` 至少一次语义、`ask_resolved` 闭合与 `pending_asks` 重建、`steer: false` 排队、在 `taken` 事务前读原文并按 `holder.runId` + `lineEndOffset` 写托管对话记录 `fsync` 落盘后再提交 `loop.batch()` 的 `outOffset` 事务 |
 | 7 | `src/plugin-im.ts`（新增）与 `src/daemon.ts` | `daemon.ts` 中 `ADAPTERS` 只映射四家，直接调用 `ADAPTERS[bot.platform]` | 新增实现 `ImAdapter` 的 `PluginImAdapter`，管理单个 IM 插件子进程、JSON-RPC 调用、超时和退避熔断、验证 `inbound.chat === inbound.sender` 归一契约；`daemon.ts` 启动时跳过禁用或故障的插件 Bot 并标为 `faulted` |
-| 8 | `src/transcript.ts` | `FORMATS` 仅含内置三家，`listConversations` 只扫内置目录 | 内置三家保持原样；新增通用格式幂等读写 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`：首次打开追加前先将末尾残缺或损坏半行截断至最后完整 `\n` JSON 记录边界并 `fsync`，再按 `"k"` 去重追加并 `fsync` 落盘；读取端按 `"k"` 去重并容忍末尾不完整半行，供插件对话读取、看板预览和 `/resume` 列表使用 |
+| 8 | `src/transcript.ts` | `FORMATS` 仅含内置三家，`listConversations` 只扫内置目录 | 内置三家保持原样；新增通用格式幂等读写 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`：首次打开扫描加载 `"k"` 并截断末尾残缺或损坏半行（若有）后统一 `fsync` 一次；命中已有 `"k"` 可跳过重复追加但须确认文件已同步后方可推进 `outOffset`；新追加同样先 `fsync` 后提交检查点；读取端按 `"k"` 去重并容忍末尾不完整半行，供插件对话读取、看板预览和 `/resume` 列表使用 |
 | 9 | `src/tui.ts` 与 `src/windows-tui-launch.ts` | `TERMINAL`、`RULES`、`packages` 为 `Record<AgentKind, ...>` | 改为 `Partial<Record<BuiltinAgentKind, ...>>`；在切换到终端入口先检查 `agentDef(kind).tui`，为 `false` 时友好拒绝（“该 agent 插件不支持终端模式”） |
 | 10 | `src/router.ts`、`src/commands.ts`、`src/im-commands.ts`、`src/feishu.ts` | `CARRY` 为 `Record<AgentKind, ...>`、`slashMenu` 与 `/rh_agent` 依赖静态 `AGENT_KINDS`、`router.ts` 隐含假设所有非 fake 平台在 `ONBOARD` 中 | `CARRY` 窄化为 `BuiltinAgentKind`；通用命令检查插件 `supportedCommands` 并在不支持时友好拒绝；`steer: false` 时排队等待回合结束；`/rh_agent` 与 `rh new --agent` 改读动态注册列表 |
 | 11 | `src/board.ts`、`web/src/*` 与 `src/doctor.ts` | `board.ts` 用静态 `THROUGH` 正则匹配来源行、用 `AGENT_KINDS` 查记录；前端多处持有 `Record<AgentKind, ...>` 或静态列表；`doctor.ts` 只检查内置 `claude` 进程参数 | `board.ts` 的 `THROUGH` 动态包含插件平台 `label`，在 `/api/board`、`/api/slot`、`/api/rhodium` 返回动态列表与插件状态；前端 `common.tsx`/`faces.tsx`/`tools.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`write.tsx` 改用通用徽章与隐藏 TUI/导入入口；`doctor.ts` 复用 `src/pi-pane-credentials.ts` 的 `doctorBare` 与 `anthropicSet` 巡检运行中插件进程子树是否拉起 `claude` 或带 `--bare`/Anthropic 凭据 |
@@ -450,7 +453,7 @@ target = "work/main"
 
 ## 6. 跨平台支持（Linux、Windows、macOS）
 
-当前课程仓库基线（基于 Rhodium 1.5.0，由 `windows-native@cc72fea` 导出）已在仓库中具备 Windows 原生托管进程（`holder/src/windows.rs` 命名管道、Job Object、NTFS ACL 检查、`scripts/windows-build.ps1`）与 macOS 原生托管进程（`live.lock` 探针、`scripts/macos-package.sh`）。插件体系直接复用并补齐三平台一致性：
+课程基线由 `windows-native@cc72fea` 导出，快照内 `package.json` 的版本为 `1.5.0`，许可证为 MIT；Windows 原生托管进程（`holder/src/windows.rs` 命名管道、Job Object、NTFS ACL 检查、`scripts/windows-build.ps1`）与 macOS 原生托管进程（`live.lock` 探针、`scripts/macos-package.sh`）随该快照继承。插件体系直接复用并补齐三平台一致性：
 
 | 平台要点 | Linux | Windows | macOS |
 |---|---|---|---|
@@ -477,9 +480,9 @@ target = "work/main"
   - `test/plugin-loader.test.ts`：清单校验、保留名拦截（含 `herdr`）、拦截指向 `claude` 的 `program`/`command`、版本不兼容拒绝、`enabled = false` 禁用、损坏 JSON 隔离，以及**直接用同一套校验函数验证本文档中的示例清单与握手样例**。
   - `test/plugin-agent.test.ts`：
     - 通用驱动生命周期、`steer: false` 排队、非支持命令拒绝、`fatal(retryable=false)` 停止续跑；
-    - **重启重放不重复写托管对话记录与残缺末行修复**：1) 覆盖“写完整 JSONL 并 `fsync` 后、提交数据库 `outOffset` 前”中断并重启的边界恢复用例，验证历史条目不重不漏；2) **残缺末行恢复用例**：预先在 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl` 写入 1 条完整 JSONL 记录及第 2 条记录的无 `\n` 截断半行，再触发重启重放恢复第 2 条记录，断言写入者先截断残尾再重放，且**网页读取路径（`/api/messages`）与 `rh read` 两条路径均能读到这两条记录、各仅一次**；
-    - **`taken` 后不丢用户原输入**（验证在清空 `agentInput.body` 与 `images` 的事务提交前已写入并 `fsync`，或重启可完整补写）；
-    - **区分尚待回答与已回答 `ask` 的重启对账与重复 `answer` 去重**：1) 已送达 `delivered` 且有 `ask_resolved` 或数据库已记录的旧提问不再弹出，已 `answered` 未落为 `delivered` 的重发；2) **崩溃窗口重复 `answer` 用例**：模拟 `answer` 已写入仍存活的插件进程、核心在把数据库改为 `delivered` 前且在收到 `ask_resolved` 前退出、重连 `rh-hold` 后核心重发同一 `requestId` 的 `answer`，断言**下游实际交付计数等于 1**、最终数据库提问状态落为 `delivered`，且不向用户重复弹题；
+    - **重启重放不重复写托管对话记录、残缺末行修复与同步先后顺序**：1) 覆盖“写完整 JSONL 并 `fsync` 后、提交数据库 `outOffset` 前”中断并重启的边界恢复用例，验证历史条目不重不漏；2) **残缺末行恢复用例**：预先在 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl` 写入 1 条完整 JSONL 记录及第 2 条记录的无 `\n` 截断半行，再触发重启重放恢复第 2 条记录，断言写入者先截断残尾再重放，且**网页读取路径（`/api/messages`）与 `rh read` 两条路径均能读到这两条记录、各仅一次**；3) **“完整行已写、尚未同步”窗口调用顺序用例**：预置一条完整可读的 JSONL 记录（模拟写完完整行与 `\n` 后、`fsync` 与提交 `outOffset` 前进程退出），重放同一 `"k"` 时用调用顺序断言验证：写入者跳过重复追加，但**对托管记录文件的 `fsync` 必须严格先于 SQLite `outOffset` 检查点提交完成**；
+    - **`taken` 后不丢用户原输入**（验证在清空 `agentInput.body` 与 `images` 的事务提交前已写入并 `fsync`，或重启时经首次 `fsync` 同步或完整补写）；
+    - **区分尚待回答与已回答 `ask` 的重启对账与重复 `answer` 去重**：1) 已送达 `delivered` 且有 `ask_resolved` 或数据库已记录的旧提问不再弹出，已 `answered` 未落为 `delivered` 的重发；2) **崩溃窗口重复 `answer` 用例**：模拟首次下游交付仍在进行中时核心退出（未标 `delivered` 且未发 `ask_resolved`），重连 `rh-hold` 后核心重发同一 `requestId` 的 `answer`，插件合并等待至首次交付成功；断言**在首次下游交付成功前 `ask_resolved` 确认数为 0**、**下游实际交付计数等于 1**、交付成功后发出确认、最终数据库提问状态落为 `delivered` 且不向用户重复弹题；
     - **`interrupt` 超时强制回收与续投**，以及 **`ask_timeout` 下发标准 `timeoutAnswer`**；
     - **迟到 `session` ID**（仅在首轮 `turn_end` 才上报）落库并在重启后以 `session: { resume }` 续接；
     - **跨目录带空格路径与无下游 CLI 离线回放**（槽位目录与插件目录互不相同且均包含空格，未安装下游 CLI 时离线样例正常跑通）。
@@ -490,10 +493,10 @@ target = "work/main"
 - **独立黑盒契约测试工具 `scripts/plugin-conformance.ts`（分两步交付）**：
   - **PR 1 提前交付最小可执行检查**：随公开契约包一起交付清单校验 + 环境变量防泄漏 + 握手 + 正常单回合/单消息往返 + 优雅退出检查，让三位组员在各自插件开工第一天就能运行自测；
   - **PR 6 扩展为完整 7+7 黑盒契约矩阵**（用法：`bun scripts/plugin-conformance.ts --manifest <path/to/plugin.json> [--config <json>] [--timeout 10000]`）：
-    - **Agent 插件 7 项检查**：1) 清单字段与静态合规检查（非保留名、启动命令与 `program` 不得指向 `claude`）；2) 环境变量中无敏感凭据泄漏；3) 握手成功并在超时内回传 `ready`；4) 正常一轮问答；5) 提问、`ask_resolved` 闭环与重复同一 `requestId` 的 `answer` 去重（或不支持命令规范响应）；6) 打断 `interrupt` 与优雅关闭 `close`（及子进程无残留）；7) 畸形/超限输入与模拟失败错误回报规范。
+    - **Agent 插件 7 项检查**：1) 清单字段与静态合规检查（非保留名、启动命令与 `program` 不得指向 `claude`）；2) 环境变量中无敏感凭据泄漏；3) 握手成功并在超时内回传 `ready`；4) 正常一轮问答；5) 提问、首次交付成功后发 `ask_resolved` 闭环与重复同一 `requestId` 的 `answer` 去重（处理中不提前确认），或不支持命令规范响应；6) 打断 `interrupt` 与优雅关闭 `close`（及子进程无残留）；7) 畸形/超限输入与模拟失败错误回报规范。
     - **IM 插件 7 项检查**：1) 清单与能力表校验；2) `init` 握手并在超时内发 `connected`；3) `send` 正常文本与超长/Markdown 边界处理；4) `edit` / `drop_buttons` / `set_menu` 按能力声明一致表现；5) `kept_get` / `kept_set` 读写闭环（含私聊通道映射验证）；6) 模拟发送失败时返回规范 `{ status: "failed" }` 而非进程崩溃；7) `shutdown` 优雅退出且无残留进程。
 - **核心内置最小示例插件（随仓库提交，供 CI 与演示复现）**：
-  - `examples/plugins/echo-agent/`：零依赖脚本，实现 `rh-agent/1`，包含正常回显、工具调用模拟、提问与 `ask_resolved`（含同一进程内按 `requestId` 去重重复 `answer`）、错误触发词（`/fail`）与延迟 `session` 模式。
+  - `examples/plugins/echo-agent/`：零依赖脚本，实现 `rh-agent/1`，包含正常回显、工具调用模拟、提问与 `ask_resolved`（含同一进程内按 `requestId` 去重重复 `answer`，处理中合并等待、首次交付成功后才发 `ask_resolved`）、错误触发词（`/fail`）与延迟 `session` 模式。
   - `examples/plugins/local-im/`：零依赖脚本，实现 `rh-im/1`，模拟独立的用户 ID 与私聊通道 ID 映射，经本地回环接口演示收发、编辑和模拟平台失败。
 
 ### 7.2 故意引入小错误并恢复的演示用例
@@ -636,7 +639,7 @@ flowchart LR
 |---|---|---|---|---|---|
 | **PR 1** | **公开契约包与最小可执行检查**：新增 `packages/plugin-sdk/`（`manifest.ts`、`agent.ts`、`im.ts`，零 `src/` 依赖）、最小可执行 `scripts/plugin-conformance.ts`（清单校验 + 握手 + 正常单回合/单消息往返 + 优雅退出）与示例插件骨架（`examples/plugins/echo-agent`、`local-im`） | 无 | 小（约 0.5–1 人日） | 首步串行 | `packages/plugin-sdk/` 零外部与核心内部导入；最小契约检查脚本对示例插件骨架直接跑通，三位组员可立即开工并跑通自检 |
 | **PR 2** | **核心查找表放开、清单加载与合规检查**：放开 `src/contracts.ts`、`src/agents.ts`、`src/platforms.ts`、`src/tui.ts`、`src/router.ts`、`src/commands.ts`、`src/im-commands.ts`、`src/feishu.ts`、`src/windows-tui-launch.ts`；新增 `src/plugin-loader.ts`；扩展 `src/config.ts`（相对路径解析、超时期限与保留名含 `herdr`、禁拉起 `claude`）；增强 `src/doctor.ts` 对插件进程子树的 `--bare`/Anthropic 巡检 | PR 1 | 中（约 1.5–2 人日） | 合并后解锁 PR 3/4/5 | 覆盖合法清单、损坏 JSON、保留名（含 `herdr`）、禁 `claude` 启动命令、版本过低、`enabled = false` 与文档同款样例校验的单元测试通过 |
-| **PR 3** | **通用 Agent 插件驱动与幂等托管记录**：新增 `src/plugin-agent.ts` 与完整 `examples/plugins/echo-agent/`（含按 `requestId` 去重重复 `answer`）；更新 `src/runner.ts`、`src/transcript.ts` 接入 `PluginAgentDriver`，实现重开截断残缺末行与先 `fsync` 后提交 `outOffset` 事务、按 `holder.runId` + `lineEndOffset` 幂等落盘、`taken` 事务前读原文、重复 `answer` 至多交付一次、`ask_resolved` 闭合、`pending_asks` 对账、迟到 `session` 落库、`interrupt` 超时升级、`ask_timeout` 默认回答、`init.program` 与带空格路径 | PR 2 | 中大（约 2 人日） | 与 PR 4、PR 5 并行 | 跑通 §7.1 `plugin-agent.test.ts` 全部边界与恢复断言（含半行修复 `/api/messages` + `rh read` 双读与重复 `answer` 计数校验），以及无下游 CLI 离线回放和带空格多目录测试 |
+| **PR 3** | **通用 Agent 插件驱动与幂等托管记录**：新增 `src/plugin-agent.ts` 与完整 `examples/plugins/echo-agent/`（按 `requestId` 去重重复 `answer`，处理中合并等待、首次交付成功后才发 `ask_resolved`）；更新 `src/runner.ts`、`src/transcript.ts` 接入 `PluginAgentDriver`，实现重开扫描截断残尾并统一 `fsync`（命中已有 `"k"` 须确认文件已同步后才推进 `outOffset`）、按 `holder.runId` + `lineEndOffset` 幂等落盘、`taken` 事务前读原文、重复 `answer` 至多交付一次、`ask_resolved` 闭合、`pending_asks` 对账、迟到 `session` 落库、`interrupt` 超时升级、`ask_timeout` 默认回答、`init.program` 与带空格路径 | PR 2 | 中大（约 2 人日） | 与 PR 4、PR 5 并行 | 跑通 §7.1 `plugin-agent.test.ts` 全部边界与恢复断言（含半行修复 `/api/messages` + `rh read` 双读、“已写未同步”调用顺序断言、重复 `answer` 交付计数 === 1 且成功前确认数 === 0），以及无下游 CLI 离线回放和带空格多目录测试 |
 | **PR 4** | **通用 IM 插件适配器与私聊往返**：新增 `src/plugin-im.ts` 与完整 `examples/plugins/local-im/`；更新 `src/daemon.ts` 接入 `PluginImAdapter`、能力表校验、懒下载附件、`kept` 键隔离、超时 `unknown`、退避熔断与私聊地址归一 | PR 2 | 中大（约 2 人日） | 与 PR 3、PR 5 并行 | 跑通 §7.1 `plugin-im.test.ts`，验证 `user-1` vs `dm-channel-99`“配对 -> 主窗口 -> 重启 -> 主动发回原私聊”与陌生人零触发 |
 | **PR 5** | **看板动态元数据与跨平台本地模拟**：更新 `src/board.ts`（动态 `THROUGH` 正则与插件元数据接口）、`web/src/*`（`common.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`tools.tsx`/`write.tsx`/`faces.tsx` 通用渲染与隐藏插件 TUI/导入入口）、`src/fake-im.ts` 与 `src/dev.ts`（增加回环 TCP 与 Windows 打包路径修补） | PR 2 | 中（约 1.5 人日） | 与 PR 3、PR 4 并行 | 看板在未知 agent/platform 下正常展示徽章和托管对话记录；Windows/Linux 下 `rh dev --fake` 跑通 |
 | **PR 6** | **完整契约矩阵、跨平台 CI 与零 Key 演示**：扩展 `scripts/plugin-conformance.ts` 至完整 7+7 矩阵与文档示例校验；复用 `src/detached.ts`（`RHODIUM_TEST_DETACHED=1`）并开放 `holder/src/main.rs` Linux `probe`/`live.lock`；新增 `bunfig.ci.toml`、`scripts/ci-test.sh`、`.github/workflows/ci.yml`（迁移现有 Windows 必跑构建与 `smoke` 步骤并加入插件测试，保留预览打包与探针门控）并调整 `release.yml`；补全 `demo/` 无账号基线假 agent 与演示脚本 | PR 3, 4, 5 | 中（约 1.5 人日） | 汇聚收尾 | GitHub Actions 在 `main` 的 `push` 与 PR 上跑通 Linux 与 Windows 真实构建与测试并留有成功记录；阶段 A 零 Key 演示走通 |
@@ -655,7 +658,7 @@ flowchart LR
 **最终交付前统一验收节点（由全体核对，成品随最终提交一起产出）**：
 1. **全新目录零 Key 集成验收**：全组插件 PR 合入后，在全新空目录构建或解压运行包，验证不改动任何核心源码的前提下接入三个插件完成完整对比演示。
 2. **文档与交付物定稿**：
-   - 更新 `README.md` 与 `README_zh.md`：明确交代上游版本（`RhodiumTeam/Rhodium` 1.5.0，MIT 许可）与课程起始快照（由 `windows-native@cc72fea` 导出），清晰区分基线已继承的 Windows/macOS 原生能力与本次插件化增量、列出本次明确不实现范围、填写“成员贡献与 AI 核验”表、保留必要第三方许可说明；
+   - 更新 `README.md` 与 `README_zh.md`：明确交代基线来源（上游仓库为 `RhodiumTeam/Rhodium`，课程基线由 `windows-native@cc72fea` 导出，快照内 `package.json` 的版本为 `1.5.0`，许可证为 MIT；Windows/macOS 原生能力随该快照继承），清晰区分随快照继承的能力与本次插件化增量、列出本次明确不实现范围、填写“成员贡献与 AI 核验”表、保留必要第三方许可说明；
    - 定稿 `docs/DESIGN.docx`（约 8 页及以上，含总体架构图、关键流程时序图与独立扩展接入示例，与最终代码严格一致）；
    - 为最终干净提交打附注版本 Tag，并在仓库外 `release/RELEASE.md` 中记录最终完整 Commit SHA、Tag 目标、制品 `SHA-256`、真实 GitHub Actions 成功运行编号/链接与实跑结果，把完整工程（含 `.git/` 与 `docs/DESIGN.docx`）及 `release/` 打包成提交 ZIP 并在新目录解压自检。
 
