@@ -841,6 +841,10 @@ describe("commands, router, and transcript guards for plugin agents", () => {
     const im = (text: string) => route(state, { kind: "im", message: { bot: "b1", chat: "u1", sender: "u1", messageId: "m", at: ctx.now, text } }, ctx);
     expect(im("later").writes).toContainEqual(expect.objectContaining({ table: "agentInput", row: expect.objectContaining({ queueReason: "after_turn" }) }));
     expect(outboundTexts(im("/model")).join(" ")).toContain("该 agent 不支持此命令");
+    for (const background of [true, false]) {
+      const end = route(state, { kind: "agent", event: { type: "turn_end", proc: 1, conv: "c1", ...(background && { background: true }) } }, ctx);
+      expect(end.writes).toContainEqual({ op: "update", table: "conversation", where: { id: "c1" }, patch: { background: background ? 1 : 0 } });
+    }
     const died = route(state, { kind: "agent", event: { type: "exit", from: "agent", conv: "c1", proc: 1, code: 1, signal: null, why: "bad config", retryable: false } }, ctx);
     expect(slotPatch(died).state).toBe("off");
     expect(died.effects.some((e) => e.kind === "start")).toBe(false);

@@ -225,6 +225,7 @@ export async function runAgentPlugin(
   void (opts?.interruptTimeoutMs ?? 10_000);
 
   const stopController = new AbortController();
+  let endedTurns = 0;
   let initialized = false;
   let initializing = false;
   let finished = false;
@@ -275,6 +276,7 @@ export async function runAgentPlugin(
       replyOrOpts?: string | { reply?: string; background?: boolean; session?: string },
       extraOpts?: { background?: boolean; session?: string },
     ) {
+      endedTurns++;
       if (typeof replyOrOpts === "string" || replyOrOpts === undefined) {
         emit({
           type: "turn_end",
@@ -347,6 +349,7 @@ export async function runAgentPlugin(
 
     switch (msg.type) {
       case "send": {
+        const endedBeforeSend = endedTurns;
         void (async () => {
           try {
             await plugin.send(msg, ctx);
@@ -357,6 +360,7 @@ export async function runAgentPlugin(
               await terminate(1, true);
             } else {
               emit({ type: "error", detail: errorMessage(err), recoverable: true });
+              if (msg.mode === "turn" && endedTurns === endedBeforeSend) ctx.turnEnd();
             }
           }
         })();

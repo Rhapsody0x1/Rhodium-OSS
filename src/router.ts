@@ -2005,6 +2005,9 @@ function agentEvent(state: State, e: AgentEvent, ctx: Ctx): Decision {
       break;
     }
     case "turn_end": {
+      if (!isBuiltinAgent(agentOf(state, slot))) {
+        d.writes.push({ op: "update", table: "conversation", where: { id: e.conv }, patch: { background: e.background ? 1 : 0 } });
+      }
       turnOver(d, ctx, slot);
       // Your /compact's turn ends with no reply: the event says so before its idle, which the web's
       // 未读 takes as a final_reply (spec web-maximize "未读和跑完提醒怎么做").

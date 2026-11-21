@@ -111,3 +111,38 @@ test("disabling a live plugin on restart closes its old holder and leaves its hi
     await rhodium.cleanup();
   }
 }, 20_000);
+
+test("an SDK send failure ends the turn so a non-steering plugin can receive the next input", async () => {
+  const rhodium = newInstance({
+    bots: { q: { like: "qq", owner: "owner", target: "w/plug" } },
+    toml: '[plugins.flaky]\npath = "."',
+  });
+  const manifest = JSON.parse(readFileSync(resolve(import.meta.dir, "../examples/plugins/echo-agent/plugin.json"), "utf8"));
+  writeFileSync(join(rhodium.dir, "plugin.json"), JSON.stringify({ ...manifest, id: "flaky", command: [process.execPath, "${PLUGIN_DIR}/flaky.ts"] }));
+  writeFileSync(join(rhodium.dir, "flaky.ts"), `
+    import { runAgentPlugin } from ${JSON.stringify(resolve(import.meta.dir, "../packages/plugin-sdk/index.ts"))};
+    runAgentPlugin({
+      async init() { return { session: "session" }; },
+      async send(msg, ctx) {
+        ctx.taken(msg.id);
+        ctx.turnStart(msg.id);
+        if (msg.text.includes("first")) throw new Error("downstream unavailable");
+        ctx.turnEnd("next delivered");
+      },
+      async interrupt() {}
+    });
+  `);
+  try {
+    await rhodium.start();
+    await rhodium.slots("main");
+    await rhodium.ok("new", "w/plug", "--agent", "flaky");
+    const send = (text: string) => rhodium.im.inject("q", { chat: "owner", sender: "owner", text });
+    await send("first");
+    await until(async () => (await rhodium.ok("read", "w/plug")).includes("first"));
+    await send("next");
+    await until(async () => (await rhodium.im.log("q", "owner")).some((m) => m.text === "next delivered"));
+    expect(await rhodium.ok("read", "w/plug")).toContain("next delivered");
+  } finally {
+    await rhodium.cleanup();
+  }
+}, 20_000);
