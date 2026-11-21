@@ -30,7 +30,7 @@ test("the board, slot and service report the selectable plugins and load failure
   } finally { await r.cleanup(); }
 }, 20_000);
 
-test("a plugin conversation keeps its IM badge and transcript after disabling both plugins", async () => {
+test("a plugin conversation keeps its IM badge with a shared label, disabled plugins and a replacement bot", async () => {
   let send = false;
   const platform = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
     const url = new URL(req.url);
@@ -40,10 +40,15 @@ test("a plugin conversation keeps its IM badge and transcript after disabling bo
     return Response.json({ status: "sent", messageId: "posted" });
   } });
   const example = (id: string) => JSON.stringify(resolve(import.meta.dir, "../examples/plugins", id));
-  const r = newInstance({ toml: [
+  const alternate = '[plugins.other-im]\nenabled = true\npath = "alternate"';
+  const r = newInstance({ toml: [alternate,
     "[plugins.echo-agent]", "enabled = true", 'path = "echo-fixture"', "[plugins.local-im]", "enabled = true", "path = " + example("local-im"),
     "[bots.local]", 'platform = "local-im"', 'owner = "owner"', 'target = "w/echo"', "endpoint = " + JSON.stringify(platform.url.origin),
   ].join("\n") });
+  const im = resolve(import.meta.dir, "../examples/plugins/local-im");
+  const sameLabel = { ...JSON.parse(readFileSync(resolve(im, "plugin.json"), "utf8")), id: "other-im", command: [process.execPath, resolve(im, "index.ts")] };
+  mkdirSync(resolve(r.dir, "alternate"));
+  writeFileSync(resolve(r.dir, "alternate/plugin.json"), JSON.stringify(sameLabel));
   const echo = resolve(import.meta.dir, "../examples/plugins/echo-agent");
   const manifest = JSON.parse(readFileSync(resolve(echo, "plugin.json"), "utf8"));
   manifest.capabilities.commands.push("usage");
@@ -75,7 +80,7 @@ test("a plugin conversation keeps its IM badge and transcript after disabling bo
       expect(data.blocks.at(-1)).toMatchObject({ kind: "assistant", text: expect.stringContaining("check the board") });
     }
     await r.stop();
-    const config = readFileSync(r.config, "utf8").replaceAll("enabled = false", "enabled = true")
+    const config = readFileSync(r.config, "utf8").replaceAll("enabled = false", "enabled = true").replace(alternate, "")
       .replace('platform = "local-im"', 'platform = "fake"\nlike = "qq"\nsocket = ' + JSON.stringify(resolve(r.dir, "fake-im.sock")));
     writeFileSync(r.config, config);
     daemon = await r.start();

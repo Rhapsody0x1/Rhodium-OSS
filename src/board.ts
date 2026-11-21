@@ -575,13 +575,17 @@ const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** The bot and chat a source line names, as the bots are now (each by the name chats call it).
  *  Written when its platform had one bot, the line names none: the platform's only bot now, if it
  *  still has one. id null for a bot gone or one of several. null for a line naming no chat. */
-export function saidThrough(source: string | null, bots: { id: string; name: string; platform: Platform }[]): { platform: Platform; bot: string | null; id: string | null; private: boolean } | null {
+export function saidThrough(source: string | null, bots: { id: string; name: string; platform: Platform }[], origin?: Platform): { platform: Platform; bot: string | null; id: string | null; private: boolean } | null {
   const labels = allPlatformLabels().sort((a, b) => b.label.length - a.label.length);
   if (!labels.length) return null;
   const through = new RegExp(`^(${labels.map((p) => escapeRegex(p.label)).join("|")})(?: Bot (.+) 的| ?)(私聊|聊天窗口)(?:${SENT_AT}.*)?$`);
   const m = source === null ? null : through.exec(source);
-  const platform = m && labels.find((p) => p.label === m[1])?.id;
-  if (!m || !platform) return null;
+  if (!m) return null;
+  const matches = labels.filter(p => p.label === m[1]);
+  // Several platforms may use the same display name. The inbound chat identifies which one sent it.
+  const platform = matches.find(p => p.id === origin)?.id
+    ?? matches.find(p => bots.some(b => b.platform === p.id && (!m[2] || b.name === m[2])))?.id
+    ?? matches[0]!.id;
   const mine = bots.filter((b) => b.platform === platform);
   const bot = m[2] !== undefined ? mine.find((b) => b.name === m[2]) : mine.length === 1 ? mine[0] : undefined;
   return { platform, bot: bot?.name ?? m[2] ?? null, id: bot?.id ?? null, private: m[3] === "私聊" };
@@ -611,9 +615,10 @@ async function withFrom(store: Store, cfg: Config, slot: string, conversation: s
   return Promise.all(
     blocks.map(async (b, n): Promise<Block> => {
       if (b.kind !== "user") return b;
-      const said = saidThrough(b.source, named);
       const chat = chats.find((c) => c.id === came[n]);
-      const origin = bots.find((x) => x.id === (chat?.bot ?? said?.id));
+      const recorded = chat && bots.find(b => b.id === chat.bot);
+      const said = saidThrough(b.source, named, recorded?.platform);
+      const origin = recorded ?? bots.find(b => b.id === said?.id);
       if (!said && (!origin || isBuiltinPlatform(origin.platform))) return { ...b, from: null };
       // Prefer the recorded label: the same bot row can now belong to a different platform.
       const platform = said?.platform ?? origin?.platform;
