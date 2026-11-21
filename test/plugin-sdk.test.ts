@@ -3,6 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
+import { pathToFileURL } from "node:url";
 import {
   AGENT_RESERVED_IDS,
   IM_RESERVED_IDS,
@@ -191,7 +192,26 @@ describe("manifest.ts", () => {
     expect(compareSemver("1.5.0-alpha.2", "1.5.0-alpha.1")).toBeGreaterThan(0);
   });
 
-  test("validates verbatim agent and im examples from docs/spec/plugins.md", () => {
+  test("validates the published JSON examples directly from docs/spec/plugins.md", async () => {
+    const spec = readFileSync(join(REPO_ROOT, "docs/spec/plugins.md"), "utf8");
+    const { checkExamples } = await import("../scripts/plugin-conformance");
+    expect(() => checkExamples(spec)).not.toThrow();
+    expect(() => checkExamples(spec.replace('"menu":{"scope":"global","maxItems":0}', '"menu":{"scope":"typo","maxItems":0}'))).toThrow();
+    expect(() => checkExamples(spec.replace('{"type":"ready","proto":1', '{"type":"ready","proto":2'))).toThrow();
+  });
+
+  test("the documented ready handshake accepts nullable sessions and rejects malformed model and self-start fields", async () => {
+    const spec = readFileSync(join(REPO_ROOT, "docs/spec/plugins.md"), "utf8");
+    const { checkExamples } = await import("../scripts/plugin-conformance");
+    const ready = { type: "ready", proto: 1, session: null };
+    const use = (fields: object) => spec.replace(/^\{"type":"ready".*$/m, JSON.stringify({ ...ready, ...fields }));
+    expect(() => checkExamples(use({ selfStarted: true, capabilities: { models: [{ id: "m", label: "M", efforts: ["low"] }] } }))).not.toThrow();
+    for (const fields of [{ selfStarted: "yes" }, { capabilities: { models: ["m"] } }, { capabilities: { models: [{id:"m", efforts: [2]}] } }]) {
+      expect(() => checkExamples(use(fields))).toThrow("ready");
+    }
+  });
+
+  test("validates example agent and IM manifests and plaintext IM capabilities", () => {
     const agentRes = validateManifest(docAgentManifest);
     expect(agentRes.ok).toBe(true);
 
@@ -1413,7 +1433,7 @@ describe("scripts/plugin-conformance.ts and examples/plugins", () => {
     );
     writeFileSync(
       join(pluginDir, "index.ts"),
-      `import { runAgentPlugin } from ${JSON.stringify(join(REPO_ROOT, "packages", "plugin-sdk", "index.ts"))};
+      `import { runAgentPlugin } from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "packages", "plugin-sdk", "index.ts")).href)};
 runAgentPlugin({
   async init() {
     return { session: "s-empty", capabilities: {} };
@@ -1450,15 +1470,21 @@ runAgentPlugin({
       );
       writeFileSync(
         join(pluginDir, "index.ts"),
-        `import { readJsonLines } from ${JSON.stringify(join(REPO_ROOT, "packages", "plugin-sdk", "index.ts"))};
+        `import { readJsonLines } from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "packages", "plugin-sdk", "index.ts")).href)};
 
 readJsonLines<Record<string, unknown>>(process.stdin, {
+  onError() { process.stdout.write('{"type":"error","detail":"invalid frame"}\\n'); },
   onMessage(msg) {
-    if (msg.type === "init") {
-      process.stdout.write(JSON.stringify({ type: "ready", proto: 1, session: "s-batch" }) + "\\n");
+    if (msg.type === "command") {
+      process.stdout.write(JSON.stringify({type:"command_result", id:msg.id, ok:false, error:"unsupported"}) + "\\n");
+    } else if (msg.type === "interrupt") {
+      process.stdout.write('{"type":"turn_end"}\\n');
+    } else if (msg.type === "init") {
+      const ready = msg.proto === 1 ? { type: "ready", proto: 1, session: "s-batch" } : {type:"fatal", message:"unsupported version"};
+      process.stdout.write(JSON.stringify(ready) + "\\n");
     } else if (msg.type === "send") {
       const id = String(msg.id);
-      const lines = (${sendLinesFactory})(id);
+      const lines = msg.text === "wait for interruption" ? [{type:"turn_start",input:id}] : (${sendLinesFactory})(id);
       process.stdout.write(lines.map((line: unknown) => JSON.stringify(line)).join("\\n") + "\\n");
     } else if (msg.type === "close") {
       process.exit(0);
@@ -1526,12 +1552,194 @@ process.stdin.resume();
     expect(Date.now() - startedAt).toBeLessThan(3000);
   }, 6000);
 
-  test("passes minimal conformance checks for echo-agent and local-im examples", async () => {
+  test("runs all seven conformance groups for each bundled example", async () => {
     const agentRes = await runConformance(join(REPO_ROOT, "examples", "plugins", "echo-agent", "plugin.json"));
+    expect(agentRes.stderr).toBe("");
     expect(agentRes.code).toBe(0);
+    expect(agentRes.stdout.match(/^ok \d+ - /gm)).toHaveLength(7);
 
     const imRes = await runConformance(join(REPO_ROOT, "examples", "plugins", "local-im", "plugin.json"));
+    expect(imRes.stderr).toBe("");
     expect(imRes.code).toBe(0);
+    expect(imRes.stdout.match(/^ok \d+ - /gm)).toHaveLength(7);
+  }, 20_000);
+
+  test.skipIf(process.platform !== "win32")("conformance launches a .cmd wrapper in a directory with spaces on Windows", async () => {
+    const dir = makeTempDir("rhodium Windows wrapper ");
+    const example = join(REPO_ROOT, "examples/plugins/echo-agent");
+    const file = join(dir, "plugin.json");
+    const manifest = JSON.parse(readFileSync(join(example, "plugin.json"), "utf8"));
+    manifest.commandByPlatform = { win32: ["cmd.exe", "/d", "/c", "call", "${PLUGIN_DIR}/offline fixture.cmd"] };
+    writeFileSync(file, JSON.stringify(manifest));
+    writeFileSync(join(dir, "conformance.json"), readFileSync(join(example, "conformance.json")));
+    writeFileSync(join(dir, "offline fixture.cmd"), `@"${process.execPath}" "${join(example, "index.ts")}"\r\n@exit /b %errorlevel%\r\n`);
+    const checked = await runConformance(file);
+    expect(checked.stderr).toBe("");
+    expect(checked.code).toBe(0);
+  }, 30_000);
+
+  test("conformance detects an early permission acknowledgement and a subprocess left running after close", async () => {
+    const dir = makeTempDir("rhodium negative agent ");
+    const example = join(REPO_ROOT, "examples/plugins/echo-agent");
+    const file = join(dir, "plugin.json");
+    writeFileSync(file, readFileSync(join(example, "plugin.json")));
+    writeFileSync(join(dir, "conformance.json"), readFileSync(join(example, "conformance.json")));
+    const sdk = JSON.stringify(join(REPO_ROOT, "packages/plugin-sdk/index.ts"));
+    const echo = JSON.stringify(pathToFileURL(join(example, "index.ts")).href);
+    const script = join(dir, "index.ts");
+    writeFileSync(script, `
+      import { runAgentPlugin } from ${sdk}; import { EchoAgentPlugin } from ${echo};
+      class Premature extends EchoAgentPlugin {
+        async init(params, ctx) {
+          if (process.env.PRE_READY) ctx.textDelta("starting");
+          return super.init(params, ctx);
+        }
+        async answer(id, value) {
+          if (!process.env.PRE_READY) console.log(JSON.stringify({type:"ask_resolved",requestId:id}));
+          await super.answer(id, value);
+        }
+      }
+      runAgentPlugin(new Premature());
+    `);
+    const preReady = await runConformance(file, { PRE_READY: "1" }, "1500");
+    expect(preReady.code).not.toBe(0);
+    expect(preReady.stderr).toContain("ready handshake");
+    const early = await runConformance(file, undefined, "1500");
+    expect(early.code).not.toBe(0);
+    expect(early.stderr).toContain("before ask_resolved");
+    const childFile = join(dir, "helper.ts"), readyFile = join(dir, "helper-ready");
+    writeFileSync(childFile, `
+      import { writeFileSync, renameSync } from "node:fs";
+      const http = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(String(process.pid)) });
+      const ready = ${JSON.stringify(readyFile)};
+      writeFileSync(ready + ".tmp", http.url.href);
+      renameSync(ready + ".tmp", ready);
+      setTimeout(() => process.exit(0), 15000);
+    `);
+    writeFileSync(script, `
+      import { spawn } from "node:child_process";
+      import { existsSync, readFileSync } from "node:fs";
+      import { runAgentPlugin } from ${sdk}; import { EchoAgentPlugin } from ${echo};
+      // Without detached, Windows normally ends the helper together with its parent.
+      const child = spawn(process.execPath, [${JSON.stringify(childFile)}], {detached:true, windowsHide:true, stdio:"ignore"});
+      child.unref();
+      const ready = ${JSON.stringify(readyFile)};
+      while (!existsSync(ready)) await Bun.sleep(5);
+      if (await (await fetch(readFileSync(ready, "utf8"), {proxy:""})).text() !== String(child.pid)) throw new Error("helper did not start");
+      runAgentPlugin(new EchoAgentPlugin());
+    `);
+    const url = () => readFileSync(readyFile, "utf8");
+    const ping = () => fetch(url(), {keepalive: false, proxy: "", signal: AbortSignal.timeout(1000)});
+    // Verify the fixture itself: with no checker managing it the helper really outlives the wrapper.
+    const control = Bun.spawn([process.execPath, script], {stdin: "pipe", stdout: "ignore", stderr: "pipe"});
+    control.stdin.write('{"type":"close"}\n');
+    control.stdin.end();
+    const [code, err] = await Promise.all([control.exited, new Response(control.stderr).text()]);
+    expect({code, err}).toEqual({code: 0, err: ""});
+    const pid = Number(await (await ping()).text());
+    expect(pid).toBeGreaterThan(0);
+    process.kill(pid, "SIGKILL");
+    rmSync(readyFile);
+    const leaked = await runConformance(file, undefined, "1500");
+    expect(leaked.code).not.toBe(0);
+    expect(leaked.stderr).toContain("left a child process alive");
+    await expect(ping()).rejects.toThrow();
+  }, 15_000);
+
+  test("IM matrix uses stream and draft ids, closes progress, sends buttons with Markdown and installs slash commands", async () => {
+    const dir = makeTempDir("rhodium strict IM ");
+    const file = join(dir, "plugin.json"), trace = join(dir, "calls.jsonl");
+    const example = JSON.parse(readFileSync(join(REPO_ROOT, "examples/plugins/local-im/plugin.json"), "utf8"));
+    const caps = { ...example.capabilities, buttons: "markdown", maxTextLength: 8,
+      sendLimit: {kind:"rate",perChatPerSecond:100}, menu: {scope:"per_chat", maxItems:1, row:"reply_keyboard"} };
+    writeFileSync(file, JSON.stringify({ ...example, capabilities: caps }));
+    writeFileSync(join(dir, "conformance.json"), JSON.stringify({ stateless:true, failureChat:"refused" }));
+    writeFileSync(join(dir, "index.ts"), `
+      import { appendFileSync } from "node:fs";
+      import { runImPlugin } from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "packages/plugin-sdk/index.ts")).href)};
+      const stream = process.env.PROBE_PROGRESS === "stream";
+      const caps = {...${JSON.stringify(caps)}, ...(stream ? {progress:"append",stream:60000} : {progress:"edit",draftTtl:60000,finalEdit:true})};
+      let open, last;
+      const ops = new Set();
+      const insist = (value, reason) => { if (!value) throw new Error(reason); };
+      runImPlugin({
+        async init(_, ctx) {
+          ctx.connected(true);
+          void ctx.inbound({chat:"conf-user-1",sender:"conf-user-1",messageId:"in-1",text:"test",at:1});
+          return caps;
+        },
+        async send(chat,msg) {
+          if (chat === "refused") return {status:"failed",error:"platform refused"};
+          if (msg.buttons) {
+            insist(msg.markdown && msg.buttons[0].data.startsWith("/"),"buttons need a Markdown slash-command message");
+            return {status:"sent",messageId:"keyboard"};
+          }
+          if (msg.stream || msg.draft) {
+            insist(msg.replyTo === "in-1" && Number.isInteger(msg.seq), "progress is a reply");
+            insist(stream ? msg.stream : msg.draft,"wrong progress method");
+            open = stream ? "stream:123" : "draft:123"; last = msg.text;
+            return {status:"sent",messageId: open};
+          }
+          return {status:"sent",messageId:"ordinary"};
+        },
+        async edit(_,id,msg) {
+          insist(id === open && (!stream || msg.text.startsWith(last)),"wrong edit target or replacement of append-only content");
+          last=msg.text;
+          if(msg.final) { open=undefined; ops.add("closed"); return {status:"sent"}; }
+          ops.add("edit"); open = id + "-updated";
+          return {status:"sent",messageId:open};
+        },
+        async dropButtons(_,id) { insist(id==="keyboard","wrong keyboard"); ops.add("drop"); return stream ? {status:"failed",error:"posted buttons remain"} : {status:"sent",messageId:id}; },
+        async setMenu(items,chat) { insist(items[0].command==="/status" && chat==="conf-user-1","wrong menu"); ops.add("menu"); },
+        async setRow(items,chat) { insist(items[0].command==="/status" && chat==="conf-user-1","wrong row"); ops.add("row"); },
+        async shutdown() {
+          appendFileSync(${JSON.stringify(trace)}, JSON.stringify([...ops])+"\\n");
+        }
+      });
+    `);
+    for (const mode of ["stream", "draft"]) {
+      writeFileSync(trace, "");
+      const r = await runConformance(file, { PROBE_PROGRESS: mode }, "2000");
+      expect({ code: r.code, stderr: r.stderr }).toEqual({ code: 0, stderr: "" });
+      expect(readFileSync(trace, "utf8").trim().split("\n").map(line => JSON.parse(line))).toEqual([["edit", "closed", "drop", "menu", "row"], []]);
+    }
+  }, 15_000);
+
+  test("plain IM conformance accepts capability skips and verifies restored channel, cursor and context, connection and explicit refusal", async () => {
+    const dir = makeTempDir("rhodium negative IM ");
+    const example = JSON.parse(readFileSync(join(REPO_ROOT, "examples/plugins/local-im/plugin.json"), "utf8"));
+    const caps = { progress: "append", draftTtl: 60000, buttons: false, menu: { scope: "global", maxItems: 0 }, maxTextLength: 8,
+      markdown: null, sendLimit: {kind:"rate", perChatPerSecond:10}, maxFileBytes:{file:100,image:100} };
+    const keys = { "dm:conf-user-1": "channel-99", sync_buf: "cursor-1", "ctx:conf-user-1": "context-123" };
+    const file = join(dir, "plugin.json");
+    writeFileSync(file, JSON.stringify({ ...example, id: "plain-im", capabilities: caps }));
+    writeFileSync(join(dir, "conformance.json"), JSON.stringify({ kept: keys, normalText: "hi", failureChat: "missing" }));
+    writeFileSync(join(dir, "index.ts"), `
+      import { runImPlugin } from ${JSON.stringify(join(REPO_ROOT, "packages/plugin-sdk/index.ts"))};
+      const mode = process.env.FIXTURE_CASE;
+      runImPlugin({
+        async init(_, ctx) {
+          for (const [key, value] of Object.entries(${JSON.stringify(keys)})) {
+            if (mode === "ignore-context" && key.startsWith("ctx:")) { await ctx.keptSet(key,value); continue; }
+            if (await ctx.keptGet(key) === null) await ctx.keptSet(key, value);
+          }
+          if (mode !== "offline") ctx.connected(true);
+          return ${JSON.stringify(caps)};
+        },
+        async send(chat, message) {
+          if (chat === "missing") return {status: mode === "unknown" ? "unknown" : "failed",error:"missing context"};
+          if (message.markdown || message.text.length > ${caps.maxTextLength}) throw new Error("invalid plaintext segment");
+          return {status:"sent",messageId:"receipt"};
+        },
+        async shutdown() {}
+      });
+    `);
+    expect((await runConformance(file, undefined, "1500")).code).toBe(0);
+    for (const [mode, problem] of [["ignore-context", "did not read persisted fixture key"], ["offline", "connected(up:true)"], ["unknown", "explicitly refuses"]]) {
+      const wrong = await runConformance(file, { FIXTURE_CASE: mode! }, "1500");
+      expect(wrong.code).not.toBe(0);
+      expect(wrong.stderr).toContain(problem!);
+    }
   }, 20_000);
 
   test("scrubs mixed-case ANTHROPIC/CLAUDE/HERDR env vars, injects RHODIUM_PLUGIN_DIR and PYTHONUTF8, and spawns in space-containing cwd", async () => {
@@ -1556,7 +1764,7 @@ process.stdin.resume();
     writeFileSync(
       join(pluginDir, "index.ts"),
       `import { writeFileSync } from "node:fs";
-import { runAgentPlugin } from ${JSON.stringify(join(REPO_ROOT, "packages", "plugin-sdk", "index.ts"))};
+import { runAgentPlugin } from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "packages", "plugin-sdk", "index.ts")).href)};
 
 runAgentPlugin({
   async init(params) {
@@ -1572,9 +1780,9 @@ runAgentPlugin({
   async send(msg, ctx) {
     ctx.taken(msg.id);
     ctx.turnStart(msg.id);
-    ctx.turnEnd("ok");
+    if (msg.text !== "wait for interruption") ctx.turnEnd("ok");
   },
-  async interrupt() {},
+  async interrupt(ctx) { ctx.turnEnd(); },
 });
 `,
     );

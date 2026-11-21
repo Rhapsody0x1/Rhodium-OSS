@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { headlessEnv, registerAgentPlugin, resetAgentPlugins, terminalUnset } from "../src/agents";
 import { pluginFindings } from "../src/doctor";
-import { auditPluginProcessTree, checkProcessCompliance, descendantPids, isClaudeExecutable, launchesClaude } from "../src/pi-pane-credentials";
+import { descendantPids } from "../scripts/lib/process-tree";
+import { auditPluginProcessTree, checkProcessCompliance, isClaudeExecutable, launchesClaude } from "../src/pi-pane-credentials";
 import { resetPluginRegistry } from "../src/plugin-loader";
 
 const dirs: string[] = [];
@@ -212,56 +213,54 @@ describe("plugin process subtree compliance audit and doctor findings", () => {
 
     const pids = descendantPids(parent.pid);
     expect(pids).toContain(parent.pid);
-    if (process.platform === "linux") {
-      expect(pids).toContain(childPid);
+    expect(pids).toContain(childPid);
 
-      const results = auditPluginProcessTree(parent.pid);
-      const childRes = results.find((r) => r.pid === childPid);
-      expect(childRes).toBeDefined();
-      expect(childRes).toMatchObject({
-        pid: childPid,
-        bare: true,
-        anthropic: true,
-        claudeExec: true,
-      });
+    const results = auditPluginProcessTree(parent.pid);
+    const childRes = results.find((r) => r.pid === childPid);
+    expect(childRes).toBeDefined();
+    expect(childRes).toMatchObject({
+      pid: childPid,
+      bare: true,
+      anthropic: true,
+      claudeExec: true,
+    });
 
-      const doc = pluginFindings(
-        {
-          plugins: {
-            dsh: {
+    const doc = pluginFindings(
+      {
+        plugins: {
+          dsh: {
+            id: "dsh",
+            status: "loaded",
+            dir: "/tmp/dsh",
+            command: ["bun", "run", "/tmp/dsh/index.js"],
+            manifest: {
+              manifestVersion: 1,
+              kind: "agent",
               id: "dsh",
-              status: "loaded",
-              dir: "/tmp/dsh",
-              command: ["bun", "run", "/tmp/dsh/index.js"],
-              manifest: {
-                manifestVersion: 1,
-                kind: "agent",
-                id: "dsh",
-                name: "DeepSeek Harness",
-                statusName: "DeepSeek Harness",
-                version: "0.1.0",
-                protocol: "rh-agent/1",
-                minRhodium: "1.5.0",
-                program: "dsh",
-                command: ["bun", "run", "${PLUGIN_DIR}/index.js"],
-                capabilities: {},
-              },
+              name: "DeepSeek Harness",
+              statusName: "DeepSeek Harness",
+              version: "0.1.0",
+              protocol: "rh-agent/1",
+              minRhodium: "1.5.0",
+              program: "dsh",
+              command: ["bun", "run", "${PLUGIN_DIR}/index.js"],
+              capabilities: {},
             },
-            offp: { id: "offp", status: "disabled", dir: "/tmp/offp" },
-            badp: { id: "badp", status: "failed", dir: "/tmp/badp", error: "bad manifest" },
           },
-          loaded: [],
-          failed: [{ id: "badp", error: "bad manifest" }],
-          disabled: ["offp"],
-          configErrors: [],
+          offp: { id: "offp", status: "disabled", dir: "/tmp/offp" },
+          badp: { id: "badp", status: "failed", dir: "/tmp/badp", error: "bad manifest" },
         },
-        [{ id: "dsh", pid: parent.pid }],
-      );
+        loaded: [],
+        failed: [{ id: "badp", error: "bad manifest" }],
+        disabled: ["offp"],
+        configErrors: [],
+      },
+      [{ id: "dsh", pid: parent.pid }],
+    );
 
-      expect(doc.info.some((l) => l.includes("dsh"))).toBe(true);
-      expect(doc.info.some((l) => l.includes("offp") && l.includes("已禁用"))).toBe(true);
-      expect(doc.findings).toContainEqual({ level: "错误", text: "插件 badp 加载失败：bad manifest" });
-      expect(doc.findings.some((f) => f.level === "错误" && f.text.includes("dsh") && f.text.includes(String(childPid)))).toBe(true);
-    }
+    expect(doc.info.some((l) => l.includes("dsh"))).toBe(true);
+    expect(doc.info.some((l) => l.includes("offp") && l.includes("已禁用"))).toBe(true);
+    expect(doc.findings).toContainEqual({ level: "错误", text: "插件 badp 加载失败：bad manifest" });
+    expect(doc.findings.some((f) => f.level === "错误" && f.text.includes("dsh") && f.text.includes(String(childPid)))).toBe(true);
   });
 });

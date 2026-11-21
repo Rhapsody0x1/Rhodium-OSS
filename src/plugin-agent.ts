@@ -1,5 +1,5 @@
 // Agent plugins speak rh-agent/1 through their holder (spec/plugins §3.2).
-import { MAX_LINE_BYTES, type AgentCapabilities, type AgentInitParams, type AgentToCoreMessage, type CoreToAgentMessage } from "@rhodium-oss/plugin-sdk";
+import { isAgentReady, MAX_LINE_BYTES, type AgentCapabilities, type AgentInitParams, type AgentToCoreMessage, type CoreToAgentMessage } from "@rhodium-oss/plugin-sdk";
 import { headlessEnv } from "./agents";
 import type { AgentAsk, AgentDriver, AgentEmit, AgentEvent, AgentLink, AgentMessage, AskAnswer, CommandResult, CommonCommand, SendMode, SpawnSpec } from "./contracts";
 import { closeLink } from "./holder";
@@ -15,15 +15,6 @@ const nullableString = (value: unknown) => value === null || str(value);
 const optionalString = (value: unknown) => value === undefined || str(value);
 const optionalBool = (value: unknown) => value === undefined || typeof value === "boolean";
 const optionalNumber = (value: unknown) => value === undefined || (typeof value === "number" && Number.isFinite(value));
-const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(str);
-
-function capabilities(value: unknown): value is AgentCapabilities {
-  return object(value) && optionalBool(value.steer) && optionalBool(value.liveApproval)
-    && (value.commands === undefined || strings(value.commands))
-    && (value.models === undefined || (Array.isArray(value.models) && value.models.every((m: unknown) =>
-      object(m) && str(m.id) && optionalString(m.label) && (m.efforts === undefined || strings(m.efforts)))));
-}
-
 const num = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 const nullableNumber = (value: unknown) => value === null || num(value);
 const rows = (value: unknown, test: (row: Record<string, unknown>) => boolean) => Array.isArray(value) && value.every((row) => object(row) && test(row));
@@ -171,7 +162,7 @@ export class PluginAgentDriver implements AgentDriver {
     const send = (e: Body) => { if (!replay) this.emit(e); };
     switch (m.type) {
       case "ready": {
-        if (this.info.capabilities || m.proto !== 1 || !nullableString(m.session) || !optionalBool(m.selfStarted) || (m.capabilities !== undefined && !capabilities(m.capabilities))) break;
+        if (this.info.capabilities || !isAgentReady(m)) break;
         const caps = m.capabilities ?? {};
         const manifest = this.o.plugin?.manifest;
         const declared = manifest?.kind === "agent" ? manifest.capabilities : {};
@@ -182,7 +173,7 @@ export class PluginAgentDriver implements AgentDriver {
           models: manifest ? caps.models : undefined,
         };
         this.info.selfStarted = m.selfStarted === true;
-        this.info.session = m.session as string | null;
+        this.info.session = m.session;
         clearTimeout(this.handshake);
         this.gate?.resolve();
         if (this.replayDone && !replay) this.pendingAsks();
