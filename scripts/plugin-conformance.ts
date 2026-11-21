@@ -224,6 +224,7 @@ async function testAgentPlugin(
       if (typeof msg.reply === "string" && msg.reply.trim().length > 0) {
         hasReplyContent = true;
       }
+      trackingTurn = false;
     }
   };
 

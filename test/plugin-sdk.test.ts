@@ -1402,6 +1402,72 @@ runAgentPlugin({
     expect(res.code).not.toBe(0);
   }, 10_000);
 
+  test("conformance freezes turn tracking at first turn_end even when trailing text_delta arrives in same stdout batch", async () => {
+    const makeBatchPlugin = (id: string, sendLinesFactory: string) => {
+      const pluginDir = makeTempDir(`rhodium batch ${id} `);
+      writeFileSync(
+        join(pluginDir, "plugin.json"),
+        JSON.stringify({
+          manifestVersion: 1,
+          kind: "agent",
+          id,
+          name: id,
+          statusName: id,
+          version: "0.1.0",
+          protocol: "rh-agent/1",
+          minRhodium: "1.5.0",
+          program: id,
+          command: ["bun", "run", "${PLUGIN_DIR}/index.ts"],
+          capabilities: { liveApproval: false, steer: false, commands: [] },
+        }),
+      );
+      writeFileSync(
+        join(pluginDir, "index.ts"),
+        `import { readJsonLines } from ${JSON.stringify(join(REPO_ROOT, "packages", "plugin-sdk", "index.ts"))};
+
+readJsonLines<Record<string, unknown>>(process.stdin, {
+  onMessage(msg) {
+    if (msg.type === "init") {
+      process.stdout.write(JSON.stringify({ type: "ready", proto: 1, session: "s-batch" }) + "\\n");
+    } else if (msg.type === "send") {
+      const id = String(msg.id);
+      const lines = (${sendLinesFactory})(id);
+      process.stdout.write(lines.map((line: unknown) => JSON.stringify(line)).join("\\n") + "\\n");
+    } else if (msg.type === "close") {
+      process.exit(0);
+    }
+  },
+});
+`,
+      );
+      return join(pluginDir, "plugin.json");
+    };
+
+    const negEmptyEnd = makeBatchPlugin(
+      "batch-empty-end",
+      `(id: string) => [{ type: "taken", inputId: id }, { type: "turn_start", input: id }, { type: "turn_end" }]`,
+    );
+    expect((await runConformance(negEmptyEnd)).code).not.toBe(0);
+
+    const negTrailingDelta = makeBatchPlugin(
+      "batch-trailing-delta",
+      `(id: string) => [{ type: "taken", inputId: id }, { type: "turn_start", input: id }, { type: "turn_end" }, { type: "text_delta", text: "late" }]`,
+    );
+    expect((await runConformance(negTrailingDelta)).code).not.toBe(0);
+
+    const posBeforeEnd = makeBatchPlugin(
+      "batch-delta-before",
+      `(id: string) => [{ type: "taken", inputId: id }, { type: "turn_start", input: id }, { type: "text_delta", text: "ok" }, { type: "turn_end" }]`,
+    );
+    expect((await runConformance(posBeforeEnd)).code).toBe(0);
+
+    const posEndReply = makeBatchPlugin(
+      "batch-end-reply",
+      `(id: string) => [{ type: "taken", inputId: id }, { type: "turn_start", input: id }, { type: "turn_end", reply: "ok" }]`,
+    );
+    expect((await runConformance(posEndReply)).code).toBe(0);
+  }, 20_000);
+
   test("conformance bounds cleanup with SIGKILL when a timed-out plugin ignores close and traps SIGTERM", async () => {
     const pluginDir = makeTempDir("rhodium trap sigterm ");
     writeFileSync(
