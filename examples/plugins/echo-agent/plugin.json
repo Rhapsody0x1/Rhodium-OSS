@@ -1,0 +1,19 @@
+{
+  "manifestVersion": 1,
+  "kind": "agent",
+  "id": "echo-agent",
+  "name": "Echo Agent",
+  "statusName": "Echo Agent",
+  "version": "0.1.0",
+  "protocol": "rh-agent/1",
+  "minRhodium": "1.5.0",
+  "program": "echo-agent",
+  "command": ["bun", "run", "${PLUGIN_DIR}/index.ts"],
+  "capabilities": {
+    "liveApproval": false,
+    "steer": false,
+    "commands": ["status", "model"]
+  },
+  "requiredConfig": [],
+  "optionalConfig": ["delayedSession"]
+}

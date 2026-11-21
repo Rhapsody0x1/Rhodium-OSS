@@ -1,0 +1,36 @@
+{
+  "manifestVersion": 1,
+  "kind": "im",
+  "id": "local-im",
+  "name": "Local IM",
+  "label": "Local IM",
+  "version": "0.1.0",
+  "protocol": "rh-im/1",
+  "minRhodium": "1.5.0",
+  "command": ["bun", "run", "${PLUGIN_DIR}/index.ts"],
+  "capabilities": {
+    "progress": "edit",
+    "editEvery": 100,
+    "finalEdit": true,
+    "buttons": true,
+    "maxButtons": 8,
+    "sendLimit": {
+      "kind": "rate",
+      "perChatPerSecond": 20
+    },
+    "menu": {
+      "scope": "global",
+      "maxItems": 10
+    },
+    "maxTextLength": 4000,
+    "maxFileBytes": {
+      "image": 10485760,
+      "file": 26214400
+    },
+    "markdown": {
+      "extensions": ["heading"]
+    }
+  },
+  "requiredConfig": [],
+  "optionalConfig": ["endpoint"]
+}

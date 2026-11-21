@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@rhodium-oss/plugin-sdk": "link:packages/plugin-sdk",
     "@tailwindcss/vite": "4.3.3",
     "@types/bun": "^1.4.3",
     "@types/react": "19.3.0",
