@@ -14,9 +14,10 @@ flowchart TD
   G["GLOSSARY.md<br/>术语表"]:::doc
   P["docs/product.md<br/>产品：是什么、怎么表现"]:::doc
   R["docs/research.md<br/>调研：借鉴了谁"]:::doc
-  D["docs/adr/<br/>14 篇架构决定"]:::doc
+  D["docs/adr/<br/>15 篇架构决定"]:::doc
   A["docs/architecture.md<br/>架构：怎么实现"]:::doc
   S["docs/spec/v1.md<br/>v1 规格：做什么、怎么验收"]:::doc
+  SP["docs/spec/plugins.md<br/>插件化规格"]:::doc
   SW["docs/spec/web-chat.md<br/>网页对话界面规格"]:::doc
   ST["docs/spec/web-topology.md<br/>网页拓扑图规格"]:::doc
   S2["docs/spec/bot-programs.md<br/>Bot 程序规格"]:::doc
@@ -44,6 +45,7 @@ flowchart TD
   S --> SW
   SW --> ST
   S --> S2
+  S --> SP
   ST --> SR
   SR --> TE
   S --> SI
@@ -74,6 +76,7 @@ flowchart TD
 | [docs/architecture.md](architecture.md) | 怎么实现：进程、协议、数据、故障时会怎样 |
 | [docs/im-style.md](im-style.md) | Rhodium 在 QQ、Telegram 里的每类话、工具行、选择面板和按钮具体怎么写 |
 | [docs/spec/v1.md](spec/v1.md) | v1 做什么、不做什么、怎么测试、分几个里程碑 |
+| [docs/spec/plugins.md](spec/plugins.md) | Rhodium-OSS 插件化（agent 驱动与 IM 适配器插件）的形态、协议、加载失败行为、跨平台、测试与 CI、演示路径和实现拆解 |
 | [docs/spec/web-chat.md](spec/web-chat.md) | 网页第 2 步的对话页做什么、不做什么、怎么测试、怎么验收 |
 | [docs/spec/web-topology.md](spec/web-topology.md) | 网页拓扑图的只读部分和对话页的头像做什么、不做什么、怎么测试、怎么验收 |
 | [docs/spec/bot-programs.md](spec/bot-programs.md) | Bot 程序这一期做什么、不做什么、怎么测试、分哪两段 |
