@@ -310,6 +310,8 @@ export const plain = (md: string) =>
     .trim();
 
 export type InboundMessage = {
+  /** Release the platform cursor only after routing commits. An error leaves the message replayable. */
+  acknowledge?(error?: Error): void;
   bot: string; // bot row id
   chat: string; // the platform's chat id
   messageId: string; // the platform's message id

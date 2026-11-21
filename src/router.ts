@@ -13,7 +13,7 @@ import { contextText, formatCommand, left, statusText, time, usageText, type Slo
 import { fileKind, mediaLine, withoutMedia, type Media } from "./media";
 import { buttonRows, CANCEL, layout, moment, PAGE, showPanel, span, unpaged, width, type Candidate, type Panel } from "./panels";
 import type { FlowView } from "./bot-flow";
-import { amid, MADE, PLATFORMS, platformDef, platformLabel, series, type BotDef, type Made } from "./platforms";
+import { isBuiltinPlatform, amid, MADE, PLATFORMS, platformDef, platformLabel, series, type BotDef, type Made } from "./platforms";
 import type { PluginRegistry } from "./plugin-loader";
 import { DECISION_LINE, REPORT_LINE, RESUME_PROMPT, sendLine, sourceLine, withoutSource } from "./prompt";
 import { forIm, localRefs, type Checked } from "./reply-images";
@@ -741,8 +741,11 @@ function im(state: State, m: InboundMessage, ctx: Ctx): Decision {
   if (!yours) return record(null, "忽略：不是本人");
   // Telegram's 开始 sends /start, say once the chat is cleared and the row maybe gone with it: the row
   // is pushed again (architecture §8.4). /start goes on to the agent as ever.
-  if (!m.button && /^\/start(@\S*)?(\s|$)/.test(m.text.trim()) && ctx.capabilities(bot.id)?.menu.row === "reply_keyboard")
-    d.writes.push({ op: "update", table: "bot", where: { id: bot.id }, patch: { rowHash: JSON.stringify({ ...JSON.parse(bot.rowHash ?? "{}"), [m.chat]: null }) } }); // a row per chat (architecture §8.4)
+  const menu = ctx.capabilities(bot.id)?.menu;
+  if (!m.button && /^\/start(@\S*)?(\s|$)/.test(m.text.trim()) && menu?.row === "reply_keyboard") {
+    const rowHash = menu.scope === "per_chat" ? JSON.stringify({ ...chatMenuHashes(bot.rowHash), [m.chat]: null }) : null;
+    d.writes.push({ op: "update", table: "bot", where: { id: bot.id }, patch: { rowHash } });
+  }
   // Your avatar and name under the bot are kept by your private chat with it: there at last, they
   // come now, not with the next day's refresh.
   if (fresh && m.chat === m.sender) d.effects.push({ kind: "avatars", bot: bot.id });
@@ -1763,11 +1766,16 @@ export function menus(state: Bindings, ctx: Pick<Ctx, "config" | "capabilities">
     const row = caps.menu.row ? { row: caps.menu.row === "custom_menu" ? QQ_ROW : TELEGRAM_ROW } : {};
     const want = (chat: Chat | undefined) => {
       const slot = target(state, bot, chat, ctx);
-      return { ...row, menu: slashMenu(state.conversations.find((c) => c.id === slot?.conversation)?.agent) };
+      return { ...row, menu: slashMenu(state.conversations.find((c) => c.id === slot?.conversation)?.agent).slice(0, caps.menu.maxItems) };
     };
     if (caps.menu.scope === "per_chat") return own.map((o) => ({ bot: bot.id, chat: o, ...want(chats.find((c) => c.platformChatId === o)) }));
     return [{ bot: bot.id, ...want(own.length === 1 ? chats[0] : undefined) }];
   });
+}
+
+/** Per-chat hashes are JSON objects. A previous global menu left a single base-36 hash. */
+export function chatMenuHashes(saved: string | null): Record<string, string | null> {
+  return saved?.startsWith("{") ? JSON.parse(saved) : {};
 }
 
 /** The chat row of mainChat in the config, added if new; undefined if there is none. */
@@ -3133,9 +3141,10 @@ function connection(state: State, input: Extract<Input, { kind: "connection" }>,
   const q = quotas(state, ctx, d);
   const to = elsewhere(state, ctx, d, q, bot, undefined);
   const name = `${platformLabel(bot.platform)} Bot ${bot.name}`;
-  const text = input.up
-    ? `${name} 已恢复，又连上平台了。`
-    : `${name} 连不上平台，已经连续失败 ${ctx.config.limits.botFailures} 次。它会一直自动重连，连上之前这个 Bot 的消息收不到也发不出。${input.error ? `\n原因：${input.error}` : ""}`;
+  const down = isBuiltinPlatform(bot.platform)
+    ? `连不上平台，已经连续失败 ${ctx.config.limits.botFailures} 次。它会一直自动重连，连上之前这个 Bot 的消息收不到也发不出。`
+    : "已停止重连。检查插件配置和连接后重启 Rhodium。";
+  const text = input.up ? `${name} 已恢复，又连上平台了。` : `${name} ${down}${input.error ? `\n原因：${input.error}` : ""}`;
   // Rhodium's own words: plain text, not the agent's Markdown (send()).
   if (to) outbound(d, ctx, { chat: to.chat.id, replyTo: null, trace: null, status: place(q, to, null).status, text });
   return d;
