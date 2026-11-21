@@ -33,6 +33,7 @@ export {
 } from "./stdio";
 
 export {
+  isAgentReady,
   PluginFatalError,
   runAgentPlugin,
   type AgentAskPayload,

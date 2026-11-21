@@ -1,11 +1,13 @@
 // Exercise the shipped binary and both example plugins in a disposable, account-free instance.
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
+import type { BoardData } from "../src/board";
+import { holderLive } from "../src/detached";
 import { descendantPids } from "../scripts/lib/process-tree";
 import { createPrivateWindows, windows } from "../src/windows";
 
@@ -41,7 +43,6 @@ async function demo() {
   if (!existsSync(exe) || !existsSync(hold)) throw new Error("Build dist/rhodium and dist/rh-hold first (see README).");
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("expected --port 0..65535");
-  if (values.pause && !process.stdin.isTTY) throw new Error("--pause needs an interactive terminal");
   const cancelled = new AbortController();
   const interrupt = () => cancelled.abort(new Error("Demo interrupted"));
   const boardPort = await freePort(port);
@@ -76,7 +77,6 @@ async function demo() {
   let dev: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
   let printed = "", errors = "";
   let connected = false;
-  const slots: string[] = [];
   const source = join(repo, "examples/plugins");
   async function act(action: object) {
     const res = await fetch(board + "/api/act", { method: "POST", headers: { "Content-Type": "application/json", "Sec-Fetch-Site": "same-origin" },
@@ -130,26 +130,55 @@ async function demo() {
     }
     connected = true;
   }
-  async function stop() {
-    if (!dev) return;
-    if (connected) {
-      for (const id of slots) {
-        await rh("stop", id);
-        await until(async () => (await (await fetch(board + "/api/slot?id=" + id)).json()).phase === "off", "slot stop");
-      }
+  async function holdersGone() {
+    const dir = join(state, "hold");
+    if (!existsSync(dir)) return true;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory() && await holderLive(hold, join(dir, entry.name))) return false;
     }
-    connected = false;
-    if (dev.exitCode === null) await dev.stdin.end();
-    if (await dev.exited) throw new Error("rh dev failed: " + errors + (existsSync(log) ? readFileSync(log, "utf8").slice(-1500) : ""));
+    return true;
+  }
+  async function stop() {
+    const proc = dev;
+    if (!proc) return;
     dev = undefined;
+    try {
+      if (connected) {
+        const data: BoardData = await (await fetch(board + "/api/board")).json();
+        const slots = data.workspaces.flatMap(w => [...Object.values(w.groups).flat(), ...w.archived]);
+        const db = new Database(join(state, "rh.db"), { readonly: true });
+        try {
+          const holder = db.query<{ runId: string | null }, [string]>("SELECT h.runId FROM holder h JOIN slot s ON s.conversation = h.conversation WHERE s.id = ?");
+          for (const slot of slots) {
+            let stopping: string | null | undefined;
+            await until(async () => {
+              const detail = await (await fetch(board + "/api/slot?id=" + slot.id)).json();
+              if (!detail.live && ["off", "crashed"].includes(detail.phase)) return true;
+              const run = holder.get(slot.id)?.runId ?? null;
+              // An input already in flight can start one more holder while its predecessor shuts down.
+              if (run !== stopping) { await rh("stop", slot.id); stopping = run; }
+              return false;
+            }, "demo slot " + slot.ref + " to stop");
+          }
+        } finally { db.close(); }
+        await until(holdersGone, "all demo holders to exit");
+      }
+    } finally {
+      connected = false;
+      if (proc.exitCode === null) await proc.stdin.end();
+      if (await proc.exited) throw new Error("rh dev failed: " + errors + (existsSync(log) ? readFileSync(log, "utf8").slice(-1500) : ""));
+    }
   }
   async function pause() {
     cancelled.signal.throwIfAborted();
     if (!values.pause) return;
     const input = createInterface({ input: process.stdin, output: process.stdout });
+    const eof = () => cancelled.abort(new Error("Demo input closed"));
+    if (process.stdin.readableEnded) eof();
+    process.stdin.once("end", eof);
     input.on("SIGINT", interrupt);
     try { await input.question("Inspect " + board + " then press Enter to continue: ", { signal: cancelled.signal }); }
-    finally { input.close(); }
+    finally { input.close(); process.stdin.off("end", eof); }
   }
   process.once("SIGINT", interrupt);
   process.once("SIGTERM", interrupt);
@@ -164,7 +193,7 @@ async function demo() {
     console.log("Board " + board + " | input: " + question);
     await start("");
     await rh("ws", "course", root);
-    slots.push((await rh("new", "course/baseline")).slot!);
+    await rh("new", "course/baseline");
     const meta = async () => (await (await fetch(board + "/api/board")).json()).metadata.plugins as { id: string; status: string }[];
     if ((await meta()).length || /插件 (echo-agent|local-im)/.test(await doctor())) throw new Error("baseline unexpectedly has plugins");
     await terminal(question);
@@ -175,7 +204,7 @@ async function demo() {
 
     const plugins = `[plugins.echo-agent]\npath = ${literal(join(source, "echo-agent"))}\n[plugins.local-im]\npath = ${literal(join(source, "local-im"))}\n[bots.local]\nplatform = "local-im"\nowner = "demo-owner"\ntarget = "course/echo"\nendpoint = ${literal(platform.url.origin)}\n`;
     await start(plugins);
-    slots.push((await rh("new", "course/echo", "--agent", "echo-agent")).slot!);
+    const echoId = (await rh("new", "course/echo", "--agent", "echo-agent")).slot!;
     const report = await doctor();
     for (const id of ["local-im", "echo-agent"]) if (!report.includes(id) || !(await meta()).some(p => p.id === id && p.status === "loaded")) throw new Error("missing plugin: " + id);
     inject(question);
@@ -184,17 +213,17 @@ async function demo() {
     try {
       const delivered = db.query("SELECT id FROM ask WHERE slot = ? AND status = 'open' AND pushedAt IS NOT NULL");
       await until(() => posts.some(p => p.channel === "demo-dm-99" && p.message.text.includes("允许吗"))
-        && delivered.get(slots[1]!) !== null, "delivered echo approval");
+        && delivered.get(echoId) !== null, "delivered echo approval");
     } finally { db.close(); }
     inject("允许");
     await until(() => posts.some(p => p.channel === "demo-dm-99" && p.message.text.includes("Echo:")), "approved DM reply");
-    const blocks = (await (await fetch(board + "/api/messages?slot=" + slots[1])).json()).blocks;
+    const blocks = (await (await fetch(board + "/api/messages?slot=" + echoId)).json()).blocks;
     if (!blocks.some((b: { result?: {text: string} }) => b.result?.text === "allowed")) throw new Error("missing tool result");
     console.log("PASS plugin approval: local-im → echo-agent → demo-dm-99; tool result: allowed");
     await pause();
     inject("/fail");
     await until(async () => {
-      const events = await (await fetch(board + "/api/slot-events?id=" + slots[1])).json();
+      const events = await (await fetch(board + "/api/slot-events?id=" + echoId)).json();
       return events.some((event: { type: string }) => event.type === "agent_crashed")
         && posts.some(p => p.message.text.includes("崩溃"));
     }, "plugin crash event and IM notice");
@@ -205,7 +234,7 @@ async function demo() {
     await start(plugins.replace("[plugins.echo-agent]", "[plugins.echo-agent]\nenabled = false") + '[plugins.broken]\npath = "broken"\n');
     const states = await meta();
     if (!states.some(p => p.id === "broken" && p.status === "failed") || !states.some(p => p.id === "echo-agent" && p.status === "disabled")) throw new Error("missing failure status");
-    const disabled = await act({ kind: "say", slot: slots[1], text: "probe" }).then(r => r.text, err => String(err));
+    const disabled = await act({ kind: "say", slot: echoId, text: "probe" }).then(r => r.text, err => String(err));
     if (!disabled.includes("已禁用") || !(await doctor()).includes("broken")) throw new Error("missing disabled/broken plugin diagnosis: " + disabled);
     await terminal(question);
     await until(() => printed.includes(reply), "healthy built-in after plugin failure");
@@ -219,6 +248,7 @@ async function demo() {
       await platform.stop(true);
       process.off("SIGINT", interrupt);
       process.off("SIGTERM", interrupt);
+      if (!await holdersGone()) throw new Error("Demo holder still running; kept private state in " + sandbox);
       rmSync(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }

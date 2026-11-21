@@ -200,6 +200,17 @@ describe("manifest.ts", () => {
     expect(() => checkExamples(spec.replace('{"type":"ready","proto":1', '{"type":"ready","proto":2'))).toThrow();
   });
 
+  test("the documented ready handshake accepts nullable sessions and rejects malformed model and self-start fields", async () => {
+    const spec = readFileSync(join(REPO_ROOT, "docs/spec/plugins.md"), "utf8");
+    const { checkExamples } = await import("../scripts/plugin-conformance");
+    const ready = { type: "ready", proto: 1, session: null };
+    const use = (fields: object) => spec.replace(/^\{"type":"ready".*$/m, JSON.stringify({ ...ready, ...fields }));
+    expect(() => checkExamples(use({ selfStarted: true, capabilities: { models: [{ id: "m", label: "M", efforts: ["low"] }] } }))).not.toThrow();
+    for (const fields of [{ selfStarted: "yes" }, { capabilities: { models: ["m"] } }, { capabilities: { models: [{id:"m", efforts: [2]}] } }]) {
+      expect(() => checkExamples(use(fields))).toThrow("ready");
+    }
+  });
+
   test("validates example agent and IM manifests and plaintext IM capabilities", () => {
     const agentRes = validateManifest(docAgentManifest);
     expect(agentRes.ok).toBe(true);
@@ -1628,10 +1639,68 @@ process.stdin.resume();
     await expect(ping()).rejects.toThrow();
   }, 15_000);
 
+  test("IM matrix uses stream and draft ids, closes progress, sends buttons with Markdown and installs slash commands", async () => {
+    const dir = makeTempDir("rhodium strict IM ");
+    const file = join(dir, "plugin.json"), trace = join(dir, "calls.jsonl");
+    const example = JSON.parse(readFileSync(join(REPO_ROOT, "examples/plugins/local-im/plugin.json"), "utf8"));
+    const caps = { ...example.capabilities, buttons: "markdown", maxTextLength: 8,
+      sendLimit: {kind:"rate",perChatPerSecond:100}, menu: {scope:"per_chat", maxItems:1, row:"reply_keyboard"} };
+    writeFileSync(file, JSON.stringify({ ...example, capabilities: caps }));
+    writeFileSync(join(dir, "conformance.json"), JSON.stringify({ stateless:true, failureChat:"refused" }));
+    writeFileSync(join(dir, "index.ts"), `
+      import { appendFileSync } from "node:fs";
+      import { runImPlugin } from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "packages/plugin-sdk/index.ts")).href)};
+      const stream = process.env.PROBE_PROGRESS === "stream";
+      const caps = {...${JSON.stringify(caps)}, ...(stream ? {progress:"append",stream:60000} : {progress:"edit",draftTtl:60000,finalEdit:true})};
+      let open, last;
+      const ops = new Set();
+      const insist = (value, reason) => { if (!value) throw new Error(reason); };
+      runImPlugin({
+        async init(_, ctx) {
+          ctx.connected(true);
+          void ctx.inbound({chat:"conf-user-1",sender:"conf-user-1",messageId:"in-1",text:"test",at:1});
+          return caps;
+        },
+        async send(chat,msg) {
+          if (chat === "refused") return {status:"failed",error:"platform refused"};
+          if (msg.buttons) {
+            insist(msg.markdown && msg.buttons[0].data.startsWith("/"),"buttons need a Markdown slash-command message");
+            return {status:"sent",messageId:"keyboard"};
+          }
+          if (msg.stream || msg.draft) {
+            insist(msg.replyTo === "in-1" && Number.isInteger(msg.seq), "progress is a reply");
+            insist(stream ? msg.stream : msg.draft,"wrong progress method");
+            open = stream ? "stream:123" : "draft:123"; last = msg.text;
+            return {status:"sent",messageId: open};
+          }
+          return {status:"sent",messageId:"ordinary"};
+        },
+        async edit(_,id,msg) {
+          insist(id === open && (!stream || msg.text.startsWith(last)),"wrong edit target or replacement of append-only content");
+          last=msg.text;
+          if(msg.final) { open=undefined; ops.add("closed"); } else ops.add("edit");
+          return {status:"sent",messageId:id};
+        },
+        async dropButtons(_,id) { insist(id==="keyboard","wrong keyboard"); ops.add("drop"); return stream ? {status:"failed",error:"posted buttons remain"} : {status:"sent",messageId:id}; },
+        async setMenu(items,chat) { insist(items[0].command==="/status" && chat==="conf-user-1","wrong menu"); ops.add("menu"); },
+        async setRow(items,chat) { insist(items[0].command==="/status" && chat==="conf-user-1","wrong row"); ops.add("row"); },
+        async shutdown() {
+          appendFileSync(${JSON.stringify(trace)}, JSON.stringify([...ops])+"\\n");
+        }
+      });
+    `);
+    for (const mode of ["stream", "draft"]) {
+      writeFileSync(trace, "");
+      const r = await runConformance(file, { PROBE_PROGRESS: mode }, "2000");
+      expect({ code: r.code, stderr: r.stderr }).toEqual({ code: 0, stderr: "" });
+      expect(readFileSync(trace, "utf8").trim().split("\n").map(line => JSON.parse(line))).toEqual([["edit", "closed", "drop", "menu", "row"], []]);
+    }
+  }, 15_000);
+
   test("plain IM conformance accepts capability skips and verifies restored channel, cursor and context, connection and explicit refusal", async () => {
     const dir = makeTempDir("rhodium negative IM ");
     const example = JSON.parse(readFileSync(join(REPO_ROOT, "examples/plugins/local-im/plugin.json"), "utf8"));
-    const caps = { progress: "append", buttons: false, menu: { scope: "global", maxItems: 0 }, maxTextLength: 8,
+    const caps = { progress: "append", draftTtl: 60000, buttons: false, menu: { scope: "global", maxItems: 0 }, maxTextLength: 8,
       markdown: null, sendLimit: {kind:"rate", perChatPerSecond:10}, maxFileBytes:{file:100,image:100} };
     const keys = { "dm:conf-user-1": "channel-99", sync_buf: "cursor-1", "ctx:conf-user-1": "context-123" };
     const file = join(dir, "plugin.json");

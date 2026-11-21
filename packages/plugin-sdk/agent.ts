@@ -121,6 +121,21 @@ export type AgentReadyInfo = {
   version?: string;
 };
 
+/** The rh-agent/1 ready wire shape, shared by the host and offline conformance checker. */
+export function isAgentReady(value: unknown): value is { type: "ready"; proto: 1 } & AgentReadyInfo {
+  const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+  const optionalBool = (v: unknown) => v === undefined || typeof v === "boolean";
+  const optionalString = (v: unknown) => v === undefined || typeof v === "string";
+  const strings = (v: unknown) => Array.isArray(v) && v.every(s => typeof s === "string");
+  if (!record(value) || value.type !== "ready" || value.proto !== 1 || (value.session !== null && typeof value.session !== "string")
+    || !optionalBool(value.selfStarted) || !optionalString(value.version)) return false;
+  const c = value.capabilities;
+  return c === undefined || (record(c) && optionalBool(c.steer) && optionalBool(c.liveApproval)
+    && (c.commands === undefined || strings(c.commands))
+    && (c.models === undefined || (Array.isArray(c.models) && c.models.every(m =>
+      record(m) && typeof m.id === "string" && optionalString(m.label) && (m.efforts === undefined || strings(m.efforts))))));
+}
+
 export type AgentUsage = {
   inputTokens?: number;
   outputTokens?: number;

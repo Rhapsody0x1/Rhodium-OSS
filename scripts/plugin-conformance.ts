@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { MAX_LINE_BYTES, compareSemver, validateImCapabilities, validateManifest, type Capabilities } from "@rhodium-oss/plugin-sdk";
+import { MAX_LINE_BYTES, compareSemver, isAgentReady, validateImCapabilities, validateManifest, type Capabilities } from "@rhodium-oss/plugin-sdk";
 import { Peer, bounded, check, childEnv, nonempty, object, sensitiveKey, type Frame, type Options } from "./lib/conformance-peer";
 
 const ok = (n: number, description: string) => console.log("ok " + n + " - " + description);
@@ -12,7 +12,7 @@ const strings = (v: unknown): v is Record<string, string> => object(v) && Object
 
 type Fixture = {
   normalText?: string; interruptText?: string; askText?: string; deliveredText?: string; failureText?: string;
-  chat?: string; failureChat?: string; kept?: Record<string, string>; stateless?: boolean; localPlatform?: boolean;
+  chat?: string; replyTo?: string; failureChat?: string; kept?: Record<string, string>; stateless?: boolean; localPlatform?: boolean;
 };
 
 function fixtureAt(dir: string): Fixture {
@@ -20,7 +20,7 @@ function fixtureAt(dir: string): Fixture {
   if (!existsSync(path)) return {};
   const f = json(path);
   check(object(f), "conformance.json must be an object");
-  for (const key of ["normalText", "interruptText", "askText", "deliveredText", "failureText", "chat", "failureChat"]) {
+  for (const key of ["normalText", "interruptText", "askText", "deliveredText", "failureText", "chat", "replyTo", "failureChat"]) {
     check(f[key] === undefined || nonempty(f[key]), "Invalid fixture field: " + key);
   }
   check(f.kept === undefined || strings(f.kept), "Fixture kept must map keys to string values");
@@ -46,12 +46,7 @@ function agentInit(o: Options) {
     approval: false, model: null, effort: null, resumed: false, config: o.config };
 }
 function checkReady(frame: Frame) {
-  check(frame.type === "ready" && frame.proto === 1 && (frame.session === null || nonempty(frame.session)), "Invalid agent ready handshake");
-  if (frame.capabilities !== undefined) {
-    const c = frame.capabilities;
-    check(object(c) && (c.steer === undefined || typeof c.steer === "boolean") && (c.liveApproval === undefined || typeof c.liveApproval === "boolean")
-      && (c.commands === undefined || Array.isArray(c.commands) && c.commands.every(nonempty)), "Invalid agent ready capabilities");
-  }
+  check(isAgentReady(frame), "Invalid agent ready handshake");
 }
 
 async function ready(p: Peer) {
@@ -208,9 +203,24 @@ async function imInit(p: Peer): Promise<Capabilities> {
   await p.wait(0, f => f.method === "connected" && object(f.params) && f.params.up === true, "connected(up:true)");
   return c.capabilities;
 }
-async function imSend(p: Peer, chat: string, message: Frame) {
-  const r = await p.rpc("send", { chat, message });
-  check(r.status === "sent" && (r.messageId === undefined || nonempty(r.messageId)), "Expected sent receipt");
+/** The host paces chat writes and attaches a sequence number to outbound posts. */
+function chatRpc(p: Peer, caps: Capabilities) {
+  let nextAt = 0, seq = 0;
+  return async (method: string, params: Frame) => {
+    const wait = Math.max(0, nextAt - Date.now(), method === "edit" ? caps.editEvery ?? 0 : 0);
+    check(wait <= p.options.ms, "IM rate limit exceeds --timeout");
+    if (wait > 0) await Bun.sleep(wait);
+    nextAt = Date.now() + 1000 / caps.sendLimit.perChatPerSecond;
+    if (method === "send" && object(params.message)) params = { ...params, message: { ...params.message, seq: ++seq } };
+    return p.rpc(method, params);
+  };
+}
+function sent(r: Frame): boolean {
+  return r.status === "sent" && (r.messageId === undefined || typeof r.messageId === "string") && (r.ref === undefined || typeof r.ref === "string");
+}
+async function imSend(rpc: Peer["rpc"], chat: string, message: Frame) {
+  const r = await rpc("send", { chat, message });
+  check(sent(r), "Expected sent receipt");
   return r.messageId;
 }
 async function imClose(p: Peer) {
@@ -253,30 +263,43 @@ async function testIm(o: Options, fixture: Fixture) {
     }
     const normal = fixture.normalText ?? "hello conformance".slice(0, c.maxTextLength);
     check(normal.length <= c.maxTextLength, "Fixture normalText exceeds negotiated limit");
-    const messageId = await imSend(p, chat, { text: normal });
+    const rpc = chatRpc(p, c);
+    const messageId = await imSend(rpc, chat, { text: normal });
     // The core owns splitting. Send its two wire segments, including the exact advertised boundary.
     const size = Math.min(c.maxTextLength, MAX_LINE_BYTES - 1024);
     check(size > 0, "IM must accept nonempty text");
     const text = "x".repeat(size) + "!";
-    await imSend(p, chat, { text: text.slice(0, size) });
-    await imSend(p, chat, c.markdown === null ? { text: "!" } : { text: "!", markdown: "**!**" });
+    await imSend(rpc, chat, { text: text.slice(0, size) });
+    await imSend(rpc, chat, c.markdown === null ? { text: "!" } : { text: "!", markdown: size >= 5 ? "**!**" : "!" });
     ok(3, "normal text, split boundary and negotiated Markdown");
-    if (c.progress === "edit" || c.stream) {
+    if (c.stream || (c.progress === "edit" && c.draftTtl)) {
+      const inbound = p.frames.find(f => f.method === "inbound" && object(f.params) && f.params.chat === chat)?.params;
+      const replyTo = fixture.replyTo ?? (object(inbound) ? inbound.messageId : undefined);
+      const id = await imSend(rpc, chat, { text: "a", ...(nonempty(replyTo) && { replyTo }), ...(c.stream ? { stream: true } : { draft: true }) });
+      check(nonempty(id), "Missing stream or draft id");
+      for (const [text, final] of [["ab", false], ["abc", true]] as const) {
+        const r = await rpc("edit", { chat, messageId: id, message: { text: text.slice(0, size), ...(final && { final: true }) } });
+        check(sent(r), final ? "Finalizing progress failed" : "Editing progress failed");
+      }
+    } else if (c.progress === "edit") {
       check(nonempty(messageId), "Editable offline send needs a message id");
-      check((await p.rpc("edit", { chat, messageId, message: { text: "edited".slice(0, size) } })).status === "sent", "edit failed");
+      check(sent(await rpc("edit", { chat, messageId, message: { text: "edited".slice(0, size), ...(c.finalEdit && { final: true }) } })), "edit failed");
     }
     if (c.buttons) {
-      const buttonId = await imSend(p, chat, { text: "button".slice(0, size), buttons: [{ label: "OK", data: "ok" }] });
-      check(nonempty(buttonId), "Button message needs an id");
-      check((await p.rpc("drop_buttons", { chat, messageId: buttonId })).status === "sent", "drop_buttons failed");
+      const text = "button".slice(0, size);
+      const id = await imSend(rpc, chat, { text, ...(c.buttons === "markdown" && { markdown: text }), buttons: [{ label: "Status", data: "/status" }] });
+      check(nonempty(id), "Button message needs an id");
+      const r = await rpc("drop_buttons", { chat, messageId: id });
+      // Append-only platforms may explicitly refuse to change buttons on a posted message.
+      check(sent(r) || (c.progress === "append" && r.status === "failed" && nonempty(r.error)), "drop_buttons failed");
     }
     if (c.menu.maxItems > 0) {
       const target = c.menu.scope === "per_chat" ? { chat } : {};
-      check((await p.rpc("set_menu", { ...target, items: [{ command: "status", description: "Status" }] })).ok === true, "set_menu failed");
+      check((await rpc("set_menu", { ...target, items: [{ command: "/status", description: "Status" }] })).ok === true, "set_menu failed");
     }
     if (c.menu.row) {
       const target = c.menu.scope === "per_chat" ? { chat } : {};
-      check((await p.rpc("set_row", { ...target, row: [{ label: "Status", command: "/status" }] })).ok === true, "set_row failed");
+      check((await rpc("set_row", { ...target, row: [{ label: "Status", command: "/status" }] })).ok === true, "set_row failed");
     }
     ok(4, "declared edit, buttons and menu capabilities only");
     const expected = Object.entries(fixture.kept ?? Object.fromEntries(kept));
@@ -288,7 +311,8 @@ async function testIm(o: Options, fixture: Fixture) {
     const postsBeforeRestart = channels.length, pollsBeforeRestart = cursors.length;
     p = imPeer(o, kept, reads);
     const restoredCaps = await imInit(p);
-    await imSend(p, chat, { text: "after restart".slice(0, restoredCaps.maxTextLength) });
+    const restoredRpc = chatRpc(p, restoredCaps);
+    await imSend(restoredRpc, chat, { text: "after restart".slice(0, restoredCaps.maxTextLength) });
     for (const [key, value] of expected) {
       if (reads.get(key) !== value) await p.wait(0, () => reads.get(key) === value, "plugin did not read persisted fixture key after restart: " + key);
     }
@@ -297,7 +321,7 @@ async function testIm(o: Options, fixture: Fixture) {
       check(cursors[pollsBeforeRestart] === "1", "Platform polled with stale cursor after restart");
     }
     ok(5, expected.length ? "kept writes and reads across restart" : "stateless IM: no checkpoint required");
-    const refused = await p.rpc("send", { chat: fixture.failureChat ?? "conf-missing-context", message: { text: fixture.failureText ?? "no context".slice(0, restoredCaps.maxTextLength) } });
+    const refused = await restoredRpc("send", { chat: fixture.failureChat ?? "conf-missing-context", message: { text: fixture.failureText ?? "no context".slice(0, restoredCaps.maxTextLength) } });
     check(refused.status === "failed" && nonempty(refused.error), "Provide a fixture that explicitly refuses a send or lacks chat context");
     ok(6, "explicit sending failure reported without exiting");
     await imClose(p);
@@ -346,7 +370,8 @@ async function main() {
       "  Agent: normalText, interruptText (a turn that stays pending), failureText (reported downstream error).",
       "         askText + deliveredText test duplicate permission answers using one observable downstream tool receipt;",
       "         without askText the checker requests an unsupported command instead.",
-      "  IM: chat, normalText, failureChat/failureText (a known platform refusal). kept maps expected keys to values",
+      "  IM: chat, normalText, replyTo (inbound message id for stream/draft), failureChat/failureText (a known refusal).",
+      "      kept maps expected keys to values",
       "      that must be written and then read after restart, including DM, cursor or context keys as applicable.",
       "      Declare stateless:true only for platforms that use no persisted keys. localPlatform:true enables the",
       "      bundled example's loopback HTTP fixture if --config does not already specify an endpoint.",
