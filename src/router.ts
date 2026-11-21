@@ -4,16 +4,17 @@
 import { expandHome, sameDirectory } from "./paths";
 import { basename, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { AGENT_KINDS, AGENTS, DEFAULT_AGENT, TYPING } from "./agents";
+import { agentDef, allAgentKinds, DEFAULT_AGENT, isBuiltinAgent, isRegisteredAgent, TYPING } from "./agents";
 import { askButtons, askLine, askText, parseAnswer, timeoutAnswer, type Answer, type AskKind, type AskPrompt, type ConfirmInput, type Said } from "./asks";
 import { COMMANDS, IM_COMMANDS, homeButtons, imCommand, imUsage, QQ_ROW, SETTINGS, slashMenu, SLOT_HINT, TELEGRAM_ROW, tilde, type Lists, type SettingKey, type SlotEntry } from "./commands";
 import { formatDuration, formatGB, fixedOwners, formatMB, gb, memoryText, ownerCode, owners, paired, parseDuration, type Config } from "./config";
-import { FROM_BOARD, parseCommand, quoteOf, quoting, type AgentAsk, type AgentEvent, type AgentKind, type BoardAct, type Button, type Capabilities, type Choice, type CommandResult, type CommonCommand, type Importable, type InboundMessage, type Input, type MenuItem, type PanelUi, type RowButton, type RhCaller, type TimerKind, type Used } from "./contracts";
+import { FROM_BOARD, parseCommand, quoteOf, quoting, type AgentAsk, type AgentEvent, type AgentKind, type BoardAct, type BuiltinAgentKind, type Button, type Capabilities, type Choice, type CommandResult, type CommonCommand, type Importable, type InboundMessage, type Input, type MenuItem, type PanelUi, type Platform, type RhCaller, type RowButton, type TimerKind, type Used } from "./contracts";
 import { contextText, formatCommand, left, statusText, time, usageText, type SlotInfo } from "./im-commands";
 import { fileKind, mediaLine, withoutMedia, type Media } from "./media";
 import { buttonRows, CANCEL, layout, moment, PAGE, showPanel, span, unpaged, width, type Candidate, type Panel } from "./panels";
 import type { FlowView } from "./bot-flow";
-import { amid, MADE, PLATFORMS, series, type BotDef, type Made } from "./platforms";
+import { amid, MADE, PLATFORMS, platformDef, platformLabel, series, type BotDef, type Made } from "./platforms";
+import type { PluginRegistry } from "./plugin-loader";
 import { DECISION_LINE, REPORT_LINE, RESUME_PROMPT, sendLine, sourceLine, withoutSource } from "./prompt";
 import { forIm, localRefs, type Checked } from "./reply-images";
 import { append, chunkText, clip, edit, finish, finishEdit, flow, freeze, hide, hush, markdown, md, moveOn, pause, plain, queryMarkdown, runningText, settle, start, unpanel, type Flow, type Msg, type Progress, type View } from "./render";
@@ -92,7 +93,17 @@ export type Ctx = {
   retarget: (from: string, to: string) => { bots: string[]; backup: string } | null;
   dropBot: (name: string) => void;
   inboundOf: (chat: string) => string[];
+  plugins?: PluginRegistry;
 };
+
+function pluginProblem(ctx: Ctx, agent: AgentKind): string | undefined {
+  if (isBuiltinAgent(agent)) return undefined;
+  const rec = ctx.plugins?.plugins[agent];
+  if (!rec) return undefined;
+  if (rec.status === "disabled") return `插件 ${agent} 已禁用，请启用或切换对话`;
+  if (rec.status === "failed") return `插件 ${agent} 加载失败：${rec.error}`;
+  return undefined;
+}
 
 export type Write = {
   [K in keyof Tables]:
@@ -561,6 +572,8 @@ function boardSay(state: State, ctx: Ctx, d: Decision, id: string, act: Extract<
     boardCommon(state, ctx, d, id, { kind: "common", slot: slot.id, name: cmd.name, args: cmd.args });
     return null;
   }
+  const blocked = pluginProblem(ctx, agentOf(state, slot));
+  if (blocked && !(cmd?.kind === "common" && (cmd.name === "new" || cmd.name === "stop" || cmd.name === "resume"))) refuse(blocked);
   const ref = slotView(state, slot).ref;
   const typed = typedFor(state, slot, ctx);
   // A / or ! command its agent runs goes in bare, as you typed it (#737); the rest led by them as from IM.
@@ -617,6 +630,8 @@ const fromBoard = (state: State, slot: Slot) => state.queued.filter((i) => i.con
  *  under way, at the quota's reset, or at once with neither. */
 function boardQueued(state: State, ctx: Ctx, d: Decision, act: Extract<BoardAct, { kind: "queued" }>): string {
   const slot = state.slots.find((s) => s.id === act.slot) ?? refuse("没有这个槽位。");
+  const blocked = pluginProblem(ctx, agentOf(state, slot));
+  if (blocked && act.op !== "drop") refuse(blocked);
   const ref = slotView(state, slot).ref;
   const mine = fromBoard(state, slot);
   const patch: Patch<Slot> = {};
@@ -856,6 +871,11 @@ function im(state: State, m: InboundMessage, ctx: Ctx): Decision {
     return record(slot.id, reason);
   };
   const tui = slot.mode === "tui";
+  const blocked = pluginProblem(ctx, agentOf(state, slot));
+  if (blocked && !(cmd?.kind === "common" && (!tui || cmd.name === "status") && (cmd.name === "new" || cmd.name === "stop" || cmd.name === "resume" || cmd.name === "status"))) {
+    reply(d, ctx, chat.id, id, blocked);
+    return done(blocked, false);
+  }
   // In TUI the agent is the terminal's; /status is Rhodium's to answer (common()).
   if (cmd?.kind === "common" && (!tui || cmd.name === "status")) return done(common(state, slot, cmd, patch, d, ctx, chat.id, id, ui));
   // With asks open, your message is for them (product §5.3); a ! message interrupts instead. So it
@@ -944,10 +964,13 @@ function toAgent(
   const held = !halting && (slot.state === "running" || slot.state === "waiting") && (("bang" in m && m.bang) || slot.interruptedAt !== null);
   // Out of Claude's quota, the agent would only be refused again: it waits for the reset (product §4.6).
   const quota = !halting && slot.state === "rate_limited";
+  const kind = agentOf(state, slot);
   // From the board, what would join a turn under way waits in the queue above where you type, for the
-  // turn to end (spec web-write "待发队列"). IM has nowhere to show a queue: yours there joins the turn.
+  // turn to end (spec web-write "待发队列"). IM has nowhere to show a queue: yours there joins the turn
+  // when steer is supported; plugins with steer: false wait for AFTER_TURN.
   const queued = "queue" in m && !halting && !held && !quota && (slot.state === "starting" || slot.state === "running" || slot.state === "waiting");
-  const queueReason = held ? AFTER_INTERRUPT : quota ? AFTER_QUOTA : queued ? WEB_QUEUE : null;
+  const noSteer = !agentDef(kind).steer && !halting && !held && !quota && !queued && (slot.state === "starting" || slot.state === "running" || slot.state === "waiting");
+  const queueReason = held ? AFTER_INTERRUPT : quota ? AFTER_QUOTA : queued ? WEB_QUEUE : noSteer ? AFTER_TURN : null;
   // One queued already goes on from where it waits.
   if ("input" in m) d.writes.push({ op: "update", table: "agentInput", where: { id: m.input.id, status: "queued" }, patch: { queueReason } });
   else
@@ -973,6 +996,7 @@ function toAgent(
     d.events.push({ source: "im", type: "slot_unarchived", trace: id, slot: slot.id });
   }
   if (queued) return { reason: "排队" };
+  if (noSteer) return { reason: "等当前回合结束，再开始新回合" };
   // A turn the board's page began is yours from IM to take over: its reply goes to you there (product §7).
   const board = slot.turnChat === BOARD && turn.turnChat !== BOARD;
   let reason: string;
@@ -997,7 +1021,7 @@ function toAgent(
     // The first message since the refusal takes the turn, should the refused one have had none.
     if (slot.turnChat === null || board) Object.assign(patch, turn);
     lift(state, ctx, d, slot);
-    told = `${slotView(state, slot).ref} 在等 ${AGENTS[agentOf(state, slot)].name} 额度，${moment(slot.resumeAt!, ctx.now)} 恢复。这条先存着，到时交给它。`;
+    told = `${slotView(state, slot).ref} 在等 ${agentDef(agentOf(state, slot)).name} 额度，${moment(slot.resumeAt!, ctx.now)} 恢复。这条先存着，到时交给它。`;
     reason = "等额度，排队";
   } else if (slot.state === "off" || slot.state === "crashed") {
     Object.assign(patch, { state: "starting", ...turn });
@@ -1055,7 +1079,7 @@ function lift(state: State, ctx: Ctx, d: Decision, slot: Slot): void {
 export function chatOf(config: Pick<Config, "bots">, bot: Pick<Bot, "name" | "platform">, what: "私聊" | "聊天窗口"): string {
   const name = nameAmong(config, bot);
   // A space between Latin letters and Chinese, none between Chinese and Chinese: QQ 私聊, 飞书私聊.
-  const { label } = PLATFORMS[bot.platform];
+  const label = platformLabel(bot.platform);
   return `${label}${name !== null ? ` Bot ${name} 的` : /[A-Za-z]$/.test(label) ? " " : ""}${what}`;
 }
 
@@ -1094,7 +1118,7 @@ function rhCommand(state: State, cmd: { word: string; args: string }, here: Slot
     // on Telegram, in place of it, with 返回 to it, as /status's buttons do (§7).
     const buttons = layout(homeButtons(here?.mode).map((c) => ({ label: c.label, data: c.command, ...(c.fill !== undefined && { fill: c.fill }) })), true);
     buttons.push({ label: "取消", data: CANCEL, row: buttons.at(-1)!.row! + 1, muted: true });
-    const text = here ? `这里的消息交给 ${slotView(state, here).ref}，用 ${AGENTS[agentOf(state, here)].name}。` : "这里还没指定槽位。";
+    const text = here ? `这里的消息交给 ${slotView(state, here).ref}，用 ${agentDef(agentOf(state, here)).name}。` : "这里还没指定槽位。";
     answer(d, ctx, at, text, fitting(ctx.capabilities(im!.bot.id), buttons));
     return null;
   }
@@ -1120,7 +1144,7 @@ function rhCommand(state: State, cmd: { word: string; args: string }, here: Slot
           ? ["这个 Bot 的默认槽位换成哪个？", ...(byDefault ? [`现在：${ref(byDefault)}`] : [])]
           : name === "archive"
             ? ["归档哪个槽位？", "归档会停掉它的进程，对话保留，随时能恢复。"]
-            : [`${ref(here!)} 换哪个 agent？`, `现在：${AGENTS[agentOf(state, here!)].name}`, "换了会开一段新对话，旧对话发 /resume 能回去。"];
+            : [`${ref(here!)} 换哪个 agent？`, `现在：${agentDef(agentOf(state, here!)).name}`, "换了会开一段新对话，旧对话发 /resume 能回去。"];
     showIn(state, ctx, d, at, { command: `/rh_${name}`, head, candidates: def.list!(lists), ...home });
     return null;
   }
@@ -1214,7 +1238,7 @@ function rhCommand(state: State, cmd: { word: string; args: string }, here: Slot
       return picked("这里的消息交给谁？", ref(chosen), `这里的消息改交给 ${ref(chosen)}。`, waitsHere(chosen, ctx.now));
     }
     if (name === "bind") return picked("这个 Bot 的默认槽位换成哪个？", ref(chosen!), `这个 Bot 的默认槽位改成 ${ref(chosen!)}。单独选过槽位的窗口不受影响。`);
-    const a = name === "agent" && AGENT_KINDS.includes(args[0] as AgentKind) && AGENTS[args[0] as AgentKind].name;
+    const a = name === "agent" && args[0] && isRegisteredAgent(args[0]) && agentDef(args[0]).name;
     if (a && sub.events.some((e) => e.type === "slot_agent")) return picked(`${argv[1]} 换哪个 agent？`, a, `${argv[1]} 换成了 ${a}，下一条消息开始新对话。`);
     if (out === null) return null;
     // A pick whose result is more than the pick, as one waiting for the turn to end, shows in place
@@ -1281,9 +1305,26 @@ function common(state: State, slot: Slot, cmd: { name: CommonCommand; args: stri
   }
   // Claude's alone: pi is not started for it.
   const kind = agentOf(state, slot);
-  if (cmd.name === "ultracode" && !AGENTS[kind].ultracode) {
-    refused(`${AGENTS[kind].name} 没有 ultracode。`);
-    return `通用命令 /ultracode：${AGENTS[kind].name} 没有`;
+  if (
+    cmd.name !== "new" &&
+    cmd.name !== "stop" &&
+    cmd.name !== "resume" &&
+    !(cmd.name === "status" && (slot.state === "off" || slot.state === "crashed" || slot.state === "starting" || slot.mode === "tui"))
+  ) {
+    const problem = pluginProblem(ctx, kind);
+    if (problem) {
+      refused(problem);
+      return `通用命令 /${cmd.name}：${problem}`;
+    }
+  }
+  const def = agentDef(kind);
+  if (cmd.name === "ultracode" && !def.ultracode) {
+    refused(`${def.name} 没有 ultracode。`);
+    return `通用命令 /ultracode：${def.name} 没有`;
+  }
+  if (!def.builtin && cmd.name !== "new" && cmd.name !== "stop" && cmd.name !== "resume" && !(def.supportedCommands ?? []).includes(cmd.name)) {
+    refused("该 agent 不支持此命令。");
+    return `通用命令 /${cmd.name}：该 agent 不支持`;
   }
   switch (cmd.name) {
     case "new": {
@@ -1416,7 +1457,7 @@ const LEVEL_KEPT = "cancel:level";
  *  it (docs/im-style.md §2.4); with none, as it was set. */
 function remembered(state: State, r: Extract<CommandResult, { command: "status" }>, slot: Slot): CommandResult {
   const kind = agentOf(state, slot);
-  const agent = AGENTS[kind];
+  const agent = agentDef(kind);
   const names = state.models[kind] ?? {};
   const model = slot.model && ((agent.modelNames && names[slot.model]) || slot.model);
   // Claude's: the slot keeps a model once Claude has switched to it, which a startup message re-read
@@ -1557,7 +1598,7 @@ function commandReply(state: State, ctx: Ctx, d: Decision, at: At, r: CommandRes
       }
       if (r.choices) return void answer(d, ctx, at, formatCommand(r, info, ctx.now));
       const which = r.name ?? "那段";
-      const other = r.agent && r.agent !== info.agent ? `agent 换成了 ${AGENTS[r.agent].name}。` : "";
+      const other = r.agent && r.agent !== info.agent ? `agent 换成了 ${agentDef(r.agent).name}。` : "";
       return void answer(d, ctx, at, edit ? `回到哪段对话？\n已选：${which}${other ? `\n${other}` : ""}` : `已回到${which}对话。${other}`);
     }
     case "context":
@@ -1669,7 +1710,7 @@ function lsPanel(state: State, ctx: Ctx, bot: Bot, chat: Chat, all: boolean): Pa
 function slotPanel(state: State, ctx: Ctx, s: Slot, chat: Chat, bot: Bot): Panel {
   const ref = slotView(state, s).ref;
   const parent = parentOf(state, s);
-  const agent = AGENTS[agentOf(state, s)].name;
+  const agent = agentDef(agentOf(state, s)).name;
   const origin = parent ? `它是 ${slotView(state, parent).ref} 派生的${LIFETIME[s.lifetime]}槽位，用 ${agent}。` : `用 ${agent}。`;
   const changed = changedSettings(s, ctx.config);
   // Its head as /status's, a query reply's (docs/im-style.md §8.3).
@@ -1976,10 +2017,16 @@ function agentEvent(state: State, e: AgentEvent, ctx: Ctx): Decision {
       if (tui) releaseQueued(d, e.conv, AFTER_TURN, IN_TUI);
       // What waited for this turn to end, with no message held for an interrupt to run first, runs now
       // as a turn of its own (AFTER_TURN): an internal message's, with no chat to reply to.
+      const steer = agentDef(agentOf(state, slot)).steer;
       const next = () => {
         if (tui || swap || !queuedFor(AFTER_TURN)) return;
-        releaseQueued(d, e.conv, AFTER_TURN);
-        set({ state: "running" });
+        const first = state.queued.find((i) => i.conversation === e.conv && i.queueReason === AFTER_TURN)!;
+        if (steer) releaseQueued(d, e.conv, AFTER_TURN);
+        else d.writes.push({ op: "update", table: "agentInput", where: { id: first.id, status: "queued" }, patch: { queueReason: null } });
+        set({
+          state: "running",
+          ...(first.source === "human" && { turnChat: state.chatOf[first.id] ?? BOARD, turnInbound: first.trace }),
+        });
         d.effects.push({ kind: "deliver", conversation: e.conv });
       };
       // Refused for quota: no reply, as the reply is the refusal, and the turn carries on at the
@@ -2012,7 +2059,7 @@ function agentEvent(state: State, e: AgentEvent, ctx: Ctx): Decision {
         // its chat is the turn's already; what waited for the interrupted turn's end goes in with it.
         if (!tui && !swap && queuedFor(AFTER_INTERRUPT)) {
           release();
-          releaseQueued(d, e.conv, AFTER_TURN);
+          if (steer) releaseQueued(d, e.conv, AFTER_TURN);
           set({ interruptedAt: null, turnSentMe: null });
           d.effects.push({ kind: "deliver", conversation: e.conv });
         } else {
@@ -2171,7 +2218,7 @@ function agentEvent(state: State, e: AgentEvent, ctx: Ctx): Decision {
       if (asked) quoteBack(state, ctx, d, slot, state.unsure.filter((i) => i.source === "human"), (n) => `${slotView(state, slot).ref} 停下了，${n}不确定它收到没有，需要的话再发一遍：`);
       if (rewait) {
         d.effects.push({ kind: "start", slot: slot.id });
-        crashed(state, ctx, d, slot, e, `还在等 ${AGENTS[agentOf(state, slot)].name} 额度，已经重新启动，${moment(slot.resumeAt!, ctx.now)} 照常恢复。`);
+        crashed(state, ctx, d, slot, e, `还在等 ${agentDef(agentOf(state, slot)).name} 额度，已经重新启动，${moment(slot.resumeAt!, ctx.now)} 照常恢复。`);
         break;
       }
       if (again && !low) {
@@ -2253,7 +2300,7 @@ function agentEvent(state: State, e: AgentEvent, ctx: Ctx): Decision {
       // The agent runs on its own default now, and the next process starts with it too.
       if (slot.model !== e.model) break; // /model set another meanwhile
       set({ model: null });
-      const agent = AGENTS[state.conversations.find((c) => c.id === e.conv)!.agent].name;
+      const agent = agentDef(state.conversations.find((c) => c.id === e.conv)!.agent).name;
       const why = e.error ? `\n原因：${clip(e.error, 200)}` : "";
       inform(state, ctx, d, slot, slot.turnInbound ?? ctx.newId(), `${slotView(state, slot).ref} 记着的模型 ${e.model} 在这一版 ${agent} 里没有了，改用了默认模型。${why}`);
       break;
@@ -2358,7 +2405,7 @@ function stagger(state: State, ctx: Ctx, d: Decision, slot: Slot, resetsAt: numb
  *  notice in each of their contact chats, naming all of them there. */
 function quotaNotice(state: State, ctx: Ctx, d: Decision, agent: AgentKind): void {
   const chats = new Map<string | undefined, Slot[]>();
-  const quota = `${AGENTS[agent].name} 额度`;
+  const quota = `${agentDef(agent).name} 额度`;
   for (const s of waitingFor(state, agent).filter((s) => s.quotaUntold)) {
     d.writes.push({ op: "update", table: "slot", where: { id: s.id }, patch: { quotaUntold: null } });
     const chat = contactChat(state, ctx, d, s)?.id;
@@ -2388,7 +2435,7 @@ function clock(state: State, input: Extract<Input, { kind: "clock" }>, ctx: Ctx)
   const d = nothing();
   if (input.timer === "quota_notice") {
     // Also sent at startup, should a slot waiting for quota be untold still. Keyed by the agent.
-    if (Object.hasOwn(AGENTS, input.key)) quotaNotice(state, ctx, d, input.key as AgentKind);
+    if (isRegisteredAgent(input.key)) quotaNotice(state, ctx, d, input.key as AgentKind);
     return d;
   }
   if (input.timer === "ask_timeout") {
@@ -2621,7 +2668,7 @@ function rebind(state: State, ctx: Ctx, d: Decision, chats: [Chat, Slot | null][
 /** A bot as you call it: its platform, and its name where the platform has more than one (chatName). */
 function botName(ctx: Pick<Ctx, "config">, b: Bot): string {
   const name = nameAmong(ctx.config, b);
-  return `${PLATFORMS[b.platform].label} Bot${name !== null ? ` ${name}` : ""}`;
+  return `${platformLabel(b.platform)} Bot${name !== null ? ` ${name}` : ""}`;
 }
 
 /** The bots the slot is the default target of, as you call them (botName); "" for none. */
@@ -2702,7 +2749,8 @@ function wake(state: State, ctx: Ctx, d: Decision, slot: Slot, input: { source: 
           ? AFTER_ASKS
           : slot.interruptedAt !== null
             ? AFTER_INTERRUPT
-            : slot.turnChat !== null && (input.source === "report" || input.source === "rh" || input.source === "confirm")
+            : (slot.turnChat !== null || (!agentDef(agentOf(state, slot)).steer && (slot.state === "starting" || slot.state === "running" || slot.state === "waiting"))) &&
+                (input.source === "report" || input.source === "rh" || input.source === "confirm")
               ? AFTER_TURN
               : null;
   d.writes.push({
@@ -3073,7 +3121,7 @@ function connection(state: State, input: Extract<Input, { kind: "connection" }>,
   d.events.push(input.up ? { source: "connection", type: "bot_online", data: { bot: bot.name } } : { source: "connection", type: "bot_faulted", data: { bot: bot.name, error: input.error } });
   const q = quotas(state, ctx, d);
   const to = elsewhere(state, ctx, d, q, bot, undefined);
-  const name = `${PLATFORMS[bot.platform].label} Bot ${bot.name}`;
+  const name = `${platformLabel(bot.platform)} Bot ${bot.name}`;
   const text = input.up
     ? `${name} 已恢复，又连上平台了。`
     : `${name} 连不上平台，已经连续失败 ${ctx.config.limits.botFailures} 次。它会一直自动重连，连上之前这个 Bot 的消息收不到也发不出。${input.error ? `\n原因：${input.error}` : ""}`;
@@ -3253,7 +3301,7 @@ function tuiBack(state: State, input: Extract<Input, { kind: "tui_back" }>, ctx:
     if (i.noticedAt === null) d.effects.push({ kind: "timer", timer: "tui_unconfirmed", key: i.id, at: unconfirmedDue(state, ctx, i, true) });
   }
   // What you changed in a terminal Rhodium launched, which the slot keeps as if set with /effort or /model.
-  const kept = !slot.tuiLaunched ? {} : CARRY[conv.agent](slot, state.modelInfo, b.used, b.before);
+  const kept = !slot.tuiLaunched ? {} : (CARRY[conv.agent as BuiltinAgentKind]?.(slot, state.modelInfo, b.used, b.before) ?? {});
   // A turn in the terminal going back to you ends with the switch, its message left as it was and no
   // final reply (architecture §10.6): so headless never sees the terminal's turn fields. Yours taken in
   // and not started are let go.
@@ -3315,7 +3363,7 @@ export function carriedBack(slot: Pick<Slot, "model" | "effort" | "ultracode">, 
 }
 
 /** What each agent's terminal leaves the slot, by its kind. */
-const CARRY: Record<AgentKind, typeof carriedBack> = { claude: carriedBack, pi: (_, __, used, was) => piCarriedBack(used, was), codex: (slot, _, used, was) => codexCarriedBack(slot, used, was) };
+const CARRY: Partial<Record<BuiltinAgentKind, typeof carriedBack>> = { claude: carriedBack, pi: (_, __, used, was) => piCarriedBack(used, was), codex: (slot, _, used, was) => codexCarriedBack(slot, used, was) };
 
 /** The same for Codex (spec codex.md), from the settings line of its turns, as for Claude: against what
  *  the slot set, which the terminal was launched with, else the turn before the terminal's (was). A
@@ -4105,7 +4153,7 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
       const [wsName, slotName] = splitRef(pos[0]!);
       const ws = state.workspaces.find((w) => w.name === wsName);
       if (!ws) refuse(`没有工作区 ${wsName}。先用 rh ws ${wsName} <目录> 建一个。`);
-      const agent = agentKind(values.agent);
+      const agent = agentKind(values.agent, ctx);
       const slotDir = values.dir === undefined ? ws.dir : dir(values.dir);
       diskRoom(state, ctx, who, `新建槽位 ${pos[0]}`);
       const slot = addSlot(state, ctx, d, { workspace: ws, name: slotName, dir: slotDir, agent, state: "off", lifetime: "longterm" });
@@ -4119,7 +4167,7 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
       const task = words.join(" ");
       if (name === undefined || !task.trim()) return usage();
       if (!NAME.test(name)) refuse(`槽位名字只能由文字、数字和 _ . - 组成，不超过 64 个字符：${name}`);
-      const agent = agentKind(values.agent);
+      const agent = agentKind(values.agent, ctx);
       const childDir = dir(values.dir ?? ".");
       const parent = who.kind === "slot" ? who.slot : null;
       if (parent) spawnLimits(state, ctx, parent);
@@ -4175,7 +4223,7 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
       // A running agent switches now (product §4.8); one not running starts in the new mode.
       const kind = s.conversation ? state.conversations.find((c) => c.id === s.conversation)?.agent : undefined;
       if (patch.approval !== undefined && s.conversation && s.state !== "off" && s.state !== "crashed") {
-        if (kind && !AGENTS[kind].liveApproval) {
+        if (kind && !agentDef(kind).liveApproval) {
           // pi can't switch while it runs: it goes once idle, now if it is (architecture §6.3).
           if (s.state === "idle") stop(s, d);
           else d.writes.push({ op: "update", table: "slot", where: { id: s.id }, patch: { approvalStale: 1 } });
@@ -4199,13 +4247,13 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
         }
       }
       // Codex's turn under way keeps the old mode (product §4.8).
-      const later = kind && AGENTS[kind].liveApproval === "next turn" && patch.approval !== undefined && mode(patch.approval) !== mode(s.approval) && (s.state === "running" || s.state === "waiting");
+      const later = kind && agentDef(kind).liveApproval === "next turn" && patch.approval !== undefined && mode(patch.approval) !== mode(s.approval) && (s.state === "running" || s.state === "waiting");
       return [
         `已改 ${pos[0]}。`,
         `生命周期: ${LIFETIME[patch.lifetime ?? s.lifetime]}`,
         ...settingLines({ ...s, ...patch }, ctx.config),
         ...(dropped ? ["崩溃后改了审批模式：不再自动恢复这段对话，等你发消息。"] : []),
-        ...(later ? [`${AGENTS[kind].name} 从下一个回合起按新设置跑。`] : []),
+        ...(later ? [`${agentDef(kind).name} 从下一个回合起按新设置跑。`] : []),
       ].join("\n");
     }
 
@@ -4232,15 +4280,15 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
     case "agent": {
       if (pos.length < 2 || pos.length > 3 || (pos[2] !== undefined && !/^[!！]$/.test(pos[2]))) usage();
       const s = findSlot(state, pos[0]!);
-      const agent = agentKind(pos[1]);
+      const agent = agentKind(pos[1], ctx);
       const ref = slotView(state, s).ref;
       if (s.mode === "tui") refuse(`${ref} 在 TUI 里，切回无头后再换 agent。`);
       // The agent it has already: nothing to do, but a switch waiting for the turn is called off
       // (docs/im-style.md §9.1). /new is for a new conversation.
       if (agent === agentOf(state, s)) {
-        if (s.nextAgent === null) return `${ref} 本来就是 ${AGENTS[agent].name}，没有改动。`;
+        if (s.nextAgent === null) return `${ref} 本来就是 ${agentDef(agent).name}，没有改动。`;
         d.writes.push({ op: "update", table: "slot", where: { id: s.id }, patch: { nextAgent: null } });
-        return `${ref} 不换成 ${AGENTS[s.nextAgent].name} 了，还是 ${AGENTS[agent].name}。`;
+        return `${ref} 不换成 ${agentDef(s.nextAgent).name} 了，还是 ${agentDef(agent).name}。`;
       }
       const turn = (s.state === "starting" || s.state === "running" || s.state === "waiting") && !stopping(state, s.conversation!);
       // Still starting, there is no turn to cut short yet, as for /stop (common()).
@@ -4276,10 +4324,11 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
       const ref = slotView(state, s).ref;
       // Telegram's row has no 切回无头 (docs/im-style.md §6.3): here it is.
       if (s.herdrPane !== null) return { text: `${ref} 已经在 TUI 里了。`, buttons: [{ label: "切回无头", data: `/rh_release ${Buffer.byteLength(`/rh_release ${ref}`) <= 64 ? ref : s.id}` }] };
+      const conv = state.conversations.find((c) => c.id === s.conversation)!;
+      if (!agentDef(conv.agent).tui) refuse("该 agent 插件不支持终端模式。");
       // Before anything stops: no switch can go through (product §4.2).
       if (!ctx.herdr()) refuse(`没装 Herdr，${ref} 切不到 TUI。`);
       if (s.nextAgent !== null) refuse(`${ref} 在等这一回合结束换成 ${s.nextAgent}，换完再切到 TUI。`);
-      const conv = state.conversations.find((c) => c.id === s.conversation)!;
       const unavailable = ctx.tuiUnavailable?.(conv.agent);
       if (unavailable) refuse(unavailable);
       // A turn under way gets the session written before it ends; a slot with none yet starts one in
@@ -4673,6 +4722,8 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
  * and you are told, while yours from a terminal always wakes it (product §6.1). Returns the reply.
  */
 function sendTo(state: State, ctx: Ctx, d: Decision, to: Slot, who: Caller, text: string, trace: string): string {
+  const blocked = pluginProblem(ctx, agentOf(state, to));
+  if (blocked) refuse(blocked);
   const ref = slotView(state, to).ref;
   const from = who.kind === "slot" ? who.slot : undefined;
   const { maxRunning } = ctx.config.limits;
@@ -4783,7 +4834,7 @@ function sendYou(state: State, ctx: Ctx, d: Decision, trace: string, from: Slot 
   // the one you used last, else the main chat if it is there. None, or one that can't send now: the default.
   const bot = PLATFORM_WORDS.includes(to) ? undefined : state.bots.find((b) => b.name === to);
   const on = (b: Bot) => (bot ? b.id === bot.id : b.platform === to) && Object.hasOwn(ctx.config.bots, b.name);
-  const what = bot ? `${PLATFORMS[bot.platform].label} Bot ${bot.name}` : (PLATFORMS[to as Made]?.label ?? `Bot ${to}`);
+  const what = bot ? `${platformLabel(bot.platform)} Bot ${bot.name}` : (platformDef(to as Platform)?.label ?? `Bot ${to}`);
   const main = state.bots.find((b) => b.name === ctx.config.mainChat?.bot);
   const chat = yours(state, ctx, on, from) ?? (main && on(main) ? mainChat(state, ctx, d) : undefined);
   const done = chat && post(chat, true);
@@ -5023,8 +5074,14 @@ function stop(s: Slot, d: Decision, source: NewEvent["source"] = "rh", brake = f
 }
 
 /** The agent kind --agent names, the default if none. */
-function agentKind(agent: string = DEFAULT_AGENT): Conversation["agent"] {
-  if (!(AGENT_KINDS as string[]).includes(agent)) refuse(`没有叫 ${agent} 的 agent，可以选 ${AGENT_KINDS.slice(0, -1).join("、")} 或 ${AGENT_KINDS.at(-1)}。`);
+function agentKind(agent: string = DEFAULT_AGENT, ctx?: Ctx): Conversation["agent"] {
+  if (!isBuiltinAgent(agent)) {
+    const rec = ctx?.plugins?.plugins[agent];
+    if (rec?.status === "disabled") refuse(`插件 ${agent} 已禁用`);
+    if (rec?.status === "failed") refuse(`插件 ${agent} 加载失败：${rec.error}`);
+  }
+  const kinds = allAgentKinds();
+  if (!kinds.includes(agent)) refuse(`没有叫 ${agent} 的 agent，可以选 ${kinds.slice(0, -1).join("、")} 或 ${kinds.at(-1)}。`);
   return agent as Conversation["agent"];
 }
 

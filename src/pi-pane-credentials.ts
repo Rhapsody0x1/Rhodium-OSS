@@ -3,9 +3,22 @@
 // macOS the kernel's copy of both (KERN_PROCARGS2), Windows its process parameters block. Only the
 // answer leaves this file, and each buffer is wiped once looked at.
 import { dlopen, toArrayBuffer } from "bun:ffi";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { isForbiddenClaudeToken } from "@rhodium-oss/plugin-sdk";
 import { READ_BY_PI } from "./agents";
 import { refuseBare } from "./claude";
+
+const CLAUDE_ENV_PREFIX = /^(ANTHROPIC_|CLAUDE)/;
+
+function hasClaudeEnv(entries: Iterable<string>, ignoreCase = false): boolean {
+  for (const kv of entries) {
+    const eq = kv.indexOf("=", 1);
+    if (eq < 0 || eq === kv.length - 1) continue;
+    const key = ignoreCase ? kv.slice(0, eq).toUpperCase() : kv.slice(0, eq);
+    if (CLAUDE_ENV_PREFIX.test(key)) return true;
+  }
+  return false;
+}
 
 /** Whether entries ("NAME=value") set any of pi's four keys to something nonempty. Windows names
  *  ignore case. */
@@ -189,4 +202,69 @@ export async function piPaneHasCredentials(pid: number): Promise<boolean | null>
  *  environment, a wrapper's additions included when it execs claude; null if unknown. */
 export function doctorBare(pid: number): boolean | null {
   return inspect(pid, bareIn);
+}
+
+/** Checks a single process's argv/env for bare mode, Anthropic/Claude credentials (case-insensitive by
+ *  default), and forbidden claude executable tokens. */
+export function checkProcessCompliance(
+  argv: string[],
+  env: string[],
+  ignoreCase = true,
+): { bare: boolean; anthropic: boolean; claudeExec: boolean } {
+  return {
+    bare: bareIn(argv, env, ignoreCase),
+    anthropic: anthropicSet(env, ignoreCase) || hasClaudeEnv(env, ignoreCase),
+    claudeExec: argv.some((arg) => isForbiddenClaudeToken(arg)),
+  };
+}
+
+/** Collects rootPid and all descendant pids reachable via /proc on Linux. */
+export function descendantPids(rootPid: number): number[] {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
+  if (process.platform !== "linux") {
+    // ponytail: descendant subtree enumeration reads /proc on Linux; macOS and Windows audit root pid only until native child-tree walk is added.
+    return [rootPid];
+  }
+  const children = new Map<number, number[]>();
+  try {
+    for (const entry of readdirSync("/proc", { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+      const pid = Number(entry.name);
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        const tail = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        const ppid = Number(tail[1]);
+        if (Number.isInteger(ppid) && ppid > 0) {
+          const list = children.get(ppid);
+          if (list) list.push(pid);
+          else children.set(ppid, [pid]);
+        }
+      } catch {} // process exited during scan
+    }
+  } catch {}
+  const out: number[] = [];
+  const seen = new Set<number>();
+  const queue = [rootPid];
+  while (queue.length) {
+    const pid = queue.shift()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    out.push(pid);
+    for (const child of children.get(pid) ?? []) {
+      if (!seen.has(child)) queue.push(child);
+    }
+  }
+  return out;
+}
+
+/** Audits rootPid and its live descendants for bare mode, Anthropic/Claude env leaks, and claude launches. */
+export function auditPluginProcessTree(
+  rootPid: number,
+): { pid: number; bare: boolean; anthropic: boolean; claudeExec: boolean }[] {
+  const out: { pid: number; bare: boolean; anthropic: boolean; claudeExec: boolean }[] = [];
+  for (const pid of descendantPids(rootPid)) {
+    const res = inspect(pid, (argv, env) => checkProcessCompliance(argv, env, true));
+    if (res) out.push({ pid, ...res });
+  }
+  return out;
 }

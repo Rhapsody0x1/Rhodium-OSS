@@ -5,7 +5,7 @@ import type * as Lark from "@larksuiteoapi/node-sdk";
 import { createReadStream, type ReadStream } from "node:fs";
 import { extname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { AGENT_KINDS } from "./agents";
+import { allAgentKinds } from "./agents";
 import { slashMenu } from "./commands";
 import type { BotConfig } from "./config";
 import type { AdapterDeps, Capabilities, Connected, ImAdapter, InboundMessage, MenuItem, OutboundMessage, Profile, RowButton, SendResult } from "./contracts";
@@ -52,7 +52,7 @@ const BUSY_WAIT_MS = 1000;
 // More changes than this to a card's elements go as one replacement of the whole card instead.
 const MOST_OPS = 4;
 // The commands any agent's / menu has: the app's own others are left alone (spec "/ 菜单").
-const OURS = new Set(AGENT_KINDS.flatMap((a) => slashMenu(a)).map((i) => i.command.slice(1)));
+const isOurs = (command: string) => allAgentKinds().some((a) => slashMenu(a).some((i) => i.command.slice(1) === command));
 
 type Log = (msg: string) => void;
 /** A part of a card: its text in Markdown, or plain; a tool part as a folding panel, its text inside. */
@@ -538,7 +538,7 @@ export class FeishuAdapter implements ImAdapter {
       const description = want.get(c.command);
       const at = `${SLASH}/${encodeURIComponent(c.command_id)}`;
       if (description === undefined) {
-        if (OURS.has(c.command)) ok(await this.call("DELETE", at));
+        if (isOurs(c.command)) ok(await this.call("DELETE", at));
       } else if (c.description?.default_value !== description) ok(await this.call("PATCH", at, { description: { default_value: description } }));
     }
     for (const [command, description] of want) if (!have.some((c) => c.command === command)) ok(await this.call("POST", SLASH, { command, description: { default_value: description } }));

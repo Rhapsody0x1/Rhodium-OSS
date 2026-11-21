@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentKind } from "../src/contracts";
+import type { BuiltinAgentKind } from "../src/contracts";
 import type { Posted } from "../src/fake-im";
 import type { Script, Step } from "./fake-agent/fake-agent";
 import { codexKilledUntaken, codexKilledWithSteer, crashing, endTurn, joinTurn, lifecycle, on, piKilledUntaken, piKilledWithSteer, queueMidTurn, saying, selfStart, startTurn, state as claudeState, takeQueued, toolUse } from "./fake-agent/scripts";
@@ -161,7 +161,7 @@ test("story 123: a quote too long for the copy button, but not for a message, fo
 // only at the next tool boundary (command_lifecycle started); pi, a steering message, once the tool
 // ends (a user message_start); Codex, once its user message item carries the message's id. Killed before then, the agent never had it, though the holder wrote
 // it whole: a real-device check on 2026-10-22 lost one so, unquoted.
-const killedWith: Record<AgentKind, (taken: boolean) => InstanceOptions> = {
+const killedWith: Record<BuiltinAgentKind, (taken: boolean) => InstanceOptions> = {
   claude: (taken) => {
     const steps = [...startTurn, toolUse("toolu_sleep", "Bash", { command: "sleep 60" }), ...queueMidTurn, ...(taken ? [takeQueued] : []), { sleep: 100 }, { kill: "SIGKILL" as const }];
     return { claude: { script: { on, steps } } };
@@ -198,7 +198,7 @@ for (const [agent, taken] of [["claude", false], ["claude", true], ["pi", false]
 }
 
 /** What each run of the agent was written, as you sent it: Claude's user frames, pi's prompts, Codex's turn/starts. */
-const written = (agent: AgentKind) =>
+const written = (agent: BuiltinAgentKind) =>
   rhodium[agent].runs().map((r) =>
     r.stdin
       .map((l) => JSON.parse(l))
@@ -212,7 +212,7 @@ const written = (agent: AgentKind) =>
 // old work instead.
 // From idle, Claude says it is running before it takes the message in, so the kill lands after a
 // turn start and still before the message is in the conversation.
-const killedUntaken: Record<AgentKind, InstanceOptions> = {
+const killedUntaken: Record<BuiltinAgentKind, InstanceOptions> = {
   claude: { claude: { script: { on, steps: [...startTurn, ...endTurn("fake reply"), { wait: { type: "user" } }, { emit: [claudeState("running"), lifecycle("queued")] }, { sleep: 100 }, { kill: "SIGKILL" }] } } },
   pi: { pi: { script: piKilledUntaken } },
   codex: { codex: { script: codexKilledUntaken } },

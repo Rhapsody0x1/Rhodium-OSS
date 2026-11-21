@@ -7,7 +7,7 @@ import { Bell, Bot, Brain, Check, ChevronRight, CircleX, FilePen, FileText, Glob
 import { createContext, Fragment, useContext, useEffect, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type MouseEvent } from "react";
 import { defaultRemarkPlugins, defaultComponents, Streamdown, type ExtraProps, type StreamdownProps } from "streamdown";
 import type { FullData } from "../../src/board";
-import type { AgentKind } from "../../src/contracts";
+import type { AgentKind, BuiltinAgentKind } from "../../src/contracts";
 import { decoded, elsewhere, inPage, linkWords } from "../../src/local";
 import { span } from "../../src/panels";
 import { named, NOT_TOOLS, shortParts, type ShortParts } from "../../src/tool-line";
@@ -254,7 +254,7 @@ export type Kind = keyof typeof KINDS;
 
 // Each agent's tool names, lower-cased, as its transcript has them. pi's read, edit, write, bash and
 // grep are Claude's names too; an agent whose transcript format maps its tools to Claude's has none.
-const NAMES: Record<AgentKind, Record<string, Kind>> = {
+const NAMES: Partial<Record<BuiltinAgentKind, Record<string, Kind>>> = {
   claude: {
     ...{ read: "read", notebookread: "read" },
     ...{ edit: "edit", multiedit: "edit", write: "edit", notebookedit: "edit" },
@@ -269,7 +269,7 @@ const NAMES: Record<AgentKind, Record<string, Kind>> = {
     ...{ spawn_agent: "agent", send_input: "agent", resume_agent: "agent", wait: "agent", close_agent: "agent", send_message: "agent", followup_task: "agent", interrupt_agent: "agent", list_agents: "agent" },
   },
 };
-const BY_NAME = new Map<string, Kind>(Object.values(NAMES).flatMap((n) => Object.entries(n)));
+const BY_NAME = new Map<string, Kind>(Object.values(NAMES).flatMap((n) => (n ? Object.entries(n) : [])));
 
 /** A tool call's kind, by its name as the transcript has it, Claude's or pi's; an MCP server's tools are mcp. */
 export const kindOf = (name: string): Kind => (name.startsWith("mcp__") ? "mcp" : (BY_NAME.get(name.toLowerCase()) ?? "other"));

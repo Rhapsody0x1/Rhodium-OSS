@@ -19,10 +19,10 @@ import { windowsConversationLock } from "./tui-lock";
 import { isWindowsAgentNodeEntry, windowsPaneCommand } from "./windows-tui-launch";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { AGENTS, AGENT_KINDS, terminalUnset, TYPING } from "./agents";
+import { AGENTS, AGENT_KINDS, agentDef, isBuiltinAgent, terminalUnset, TYPING } from "./agents";
 import { claudeFlags } from "./claude";
 import { locate, type Config } from "./config";
-import type { AgentKind, Capabilities, Importable, ImportFound, Input, TuiPane, Used } from "./contracts";
+import type { AgentKind, BuiltinAgentKind, Capabilities, Importable, ImportFound, Input, TuiPane, Used } from "./contracts";
 import { saveMedia } from "./media";
 import { lock, log, type Loop } from "./daemon";
 import { call, request, sessionSocket, subscribe } from "./herdr";
@@ -79,7 +79,7 @@ export function ancestors(pid: number): string[] {
 }
 
 /** Whether rh import takes a Herdr pane that reports an agent by this name: one of ours with paneImport. */
-const importsPane = (name: string | undefined): boolean => Object.hasOwn(AGENTS, name ?? "") && AGENTS[name as AgentKind].paneImport;
+const importsPane = (name: string | undefined): boolean => !!name && isBuiltinAgent(name) && agentDef(name).paneImport;
 
 /** The names of the login shells (/etc/shells): what a pane of yours, or one Herdr restored, runs. */
 const shells = () => new Set(readFileSync("/etc/shells", "utf8").split("\n").filter((l) => l.startsWith("/")).map((l) => basename(l.trim())));
@@ -129,7 +129,7 @@ export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabiliti
    * it reports its session, which it does only at its first turn (Codex, §6.4). prompt: the slot's
    * terminal system prompt, its file and what it says (§6.1).
    */
-  const TERMINAL: Record<AgentKind, { args: (slot: Slot, session: string | null, models: Record<string, string>, prompt: { file: string; text: string }) => Promise<string[]>; presets: boolean; ownSettings: boolean; hidden: boolean; named: boolean }> = {
+  const TERMINAL: Partial<Record<BuiltinAgentKind, { args: (slot: Slot, session: string | null, models: Record<string, string>, prompt: { file: string; text: string }) => Promise<string[]>; presets: boolean; ownSettings: boolean; hidden: boolean; named: boolean }>> = {
     claude: {
       // By the slot's /model, /effort, /ultracode and approval mode, as its headless agent goes, but
       // for a model the last handshake no longer offered: the conversation's own then. Approval on is
@@ -264,7 +264,8 @@ export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabiliti
     let tab: string | undefined;
     let opened: Extract<Input, { kind: "tui" }>["opened"];
     try {
-      const terminal = TERMINAL[conv.agent];
+      if (!agentDef(conv.agent).tui) fail("该 agent 插件不支持终端模式");
+      const terminal = TERMINAL[conv.agent as BuiltinAgentKind]!;
       // No conversation yet: a new one, under an id of Rhodium's if the agent takes one (stories 544,
       // 545). A Codex thread with no record, which codex resume cannot open, is as none (§10.3).
       let session = conv.sessionId;
@@ -286,7 +287,7 @@ export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabiliti
       // Kept for the watch: Herdr gone right after the switch is then tried every RETRY, not every LOOK.
       socket = await sessionSocket(program(cfg.programs.herdr), cfg.herdr.session);
       let { snapshot } = await request(socket, "session.snapshot");
-      const agent = program(cfg.programs[conv.agent]);
+      const agent = program(cfg.programs[conv.agent] ?? agentDef(conv.agent).program);
       // The slot's tab may be there already: a rhodium that died after starting the agent, before it
       // heard back, left it, and this is recovery trying again. Its agent, once up, is taken over
       // if it has the conversation (architecture §10.1).
@@ -690,7 +691,7 @@ export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabiliti
     // pi's terminal: each session there (the slot's, one you /resume or /new) starts on what its file
     // says before it, whatever the slot has; one started there, on your defaults. The slot's own with
     // nothing written down yet started by the slot's settings, as pi narrowed them: its first lines there.
-    if (TERMINAL[conv.agent].ownSettings) {
+    if (TERMINAL[conv.agent as BuiltinAgentKind]?.ownSettings) {
       const before = await read(session, "before");
       if (before.model !== undefined || session !== conv.sessionId || s.model === null) return { used, before };
       return { used, before: await read(session, "first") };
@@ -741,7 +742,9 @@ export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabiliti
     const rows = typedIn(s);
     if (!rows.length) return;
     const agent = agentOf(s);
-    const late = RULES[agent].late === true;
+    const rule = RULES[agent as BuiltinAgentKind];
+    if (!rule) return;
+    const late = rule.late === true;
     const file = await fileOf(s);
     let lines: string[] = [];
     if (file) {
@@ -814,7 +817,9 @@ export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabiliti
     // Its trace comes after this: with nothing else to look for, the transcript is read from where it ends now.
     const file = typedIn(s).length ? null : await fileOf(s);
     if (file) readTo.set(file, statSync(file, { throwIfNoEntry: false })?.size ?? 0);
-    let typed = typedFrom(next.body!, next.source === "human")!.replace(RULES[agent].drop ?? /(?!)/, "");
+    const rule = RULES[agent as BuiltinAgentKind];
+    if (!rule) return;
+    let typed = typedFrom(next.body!, next.source === "human")!.replace(rule.drop ?? /(?!)/, "");
     // A long one, or one the agent's box could not show whole, goes in the media dir: its source line and path are typed.
     // A command typed bare has no source line and stays whole: one the box cannot show is left unsent there.
     const [line] = typed.split("\n", 1) as [string];
@@ -1303,7 +1308,7 @@ function piBox(screen: string): Box {
  * ponytail: height counts a box's lines as if wrapped at characters, where the agents wrap at words: a
  * line short, so one is left spare. Wrap at words here too if a box of long words ever overflows it.
  */
-const RULES: Record<AgentKind, { box: (screen: string) => Box; pasted: RegExp; folds: (lines: number, chars: number) => boolean; margin: number; height: (rows: number) => number; drop?: RegExp; said: (v: any) => unknown; command?: (text: string) => string; late?: true }> = {
+const RULES: Partial<Record<BuiltinAgentKind, { box: (screen: string) => Box; pasted: RegExp; folds: (lines: number, chars: number) => boolean; margin: number; height: (rows: number) => number; drop?: RegExp; said: (v: any) => unknown; command?: (text: string) => string; late?: true }>> = {
   // Its box at most half the pane's rows less 5 (2026-11-15, rows 24 to 40).
   claude: {
     box: claudeBox,
@@ -1347,7 +1352,9 @@ const RULES: Record<AgentKind, { box: (screen: string) => Box; pasted: RegExp; f
  *  editorMode is vim, where only the INSERT mark under the box says it takes text; NORMAL shows none. */
 export function inputState(agent: AgentKind, status: string | undefined, screen: string | undefined, vim = false): TuiInput {
   if (status === undefined || screen === undefined) return "unknown";
-  const { dialog, box, under } = RULES[agent].box(screen);
+  const rule = RULES[agent as BuiltinAgentKind];
+  if (!rule) return "unknown";
+  const { dialog, box, under } = rule.box(screen);
   if (status === "blocked" || dialog) return "dialog";
   if (status === "unknown" || !box) return "unknown";
   if (vim && !under.some((l) => l.trim().startsWith("-- INSERT --"))) return "draft";
@@ -1386,7 +1393,9 @@ const squeezed = (t: string) => t.replace(/<\/?pasted_content\b[^>]*>/g, "").rep
 /** Whether the agent's box holds just what was typed, before Enter (architecture §10.5): no dialog, and
  *  the box's text is it, or the agent's one placeholder for a paste, alone. */
 export function inBox(agent: AgentKind, screen: string, typed: string): boolean {
-  const { dialog, box, shell, picked } = RULES[agent].box(screen);
+  const rule = RULES[agent as BuiltinAgentKind];
+  if (!rule) return false;
+  const { dialog, box, shell, picked } = rule.box(screen);
   if (dialog || !box) return false;
   // Enter takes the command picked in Claude's list, which must be the one typed.
   if (typed.startsWith("/") && picked !== undefined && picked !== typed.split(/\s/, 1)[0]) return false;
@@ -1395,14 +1404,15 @@ export function inBox(agent: AgentKind, screen: string, typed: string): boolean 
   // leaves it out (#737 probe): the typed command with more after it.
   // ponytail: text you begin to type there at that moment passes too; tell the suggestion apart if its style ever shows.
   if (shell && typed.startsWith("!") && shown.startsWith(want)) return true;
-  return shown === want || RULES[agent].pasted.test(shown);
+  return shown === want || rule.pasted.test(shown);
 }
 
 /** Whether the agent's box can show the typed text whole, so the look before Enter can see it: one it
  *  folds into a placeholder always can; else by the box's width on this screen and its height in a pane
  *  of rows. */
 export function fitsBox(agent: AgentKind, typed: string, screen: string, rows: number): boolean {
-  const rule = RULES[agent];
+  const rule = RULES[agent as BuiltinAgentKind];
+  if (!rule) return true;
   const lines = typed.split("\n");
   if (rule.folds(lines.length, [...typed].length)) return true;
   const width = rule.box(screen).cols - rule.margin;
@@ -1415,6 +1425,8 @@ export function fitsBox(agent: AgentKind, typed: string, screen: string, rows: n
  *  (architecture §10.5): a line of your message (RULES' said), of a second before it or later, whose
  *  text holds all of it, paste tags and whitespace aside. */
 export function traced(agent: AgentKind, typed: string, at: number, lines: string[]): boolean {
+  const rule = RULES[agent as BuiltinAgentKind];
+  if (!rule) return false;
   const want = squeezed(typed);
   return lines.some((raw) => {
     let v: any;
@@ -1424,7 +1436,7 @@ export function traced(agent: AgentKind, typed: string, at: number, lines: strin
       return false;
     }
     if (!(Date.parse(v?.timestamp) >= at - 1000)) return false;
-    const text = textIn(agent, RULES[agent].said(v));
+    const text = textIn(agent, rule.said(v));
     // Claude's enqueue line for a ! command typed while it works leaves the ! out (#737 probe).
     return text !== "" && (text.includes(want) || (want.startsWith("!") && v.type === "queue-operation" && text === want.slice(1)));
   });
@@ -1437,8 +1449,10 @@ export function traced(agent: AgentKind, typed: string, at: number, lines: strin
  *  queued_command attachment it runs a queued one as, not the enqueue line written at Enter. 0 for none. */
 export function reads(agent: AgentKind, typed: string, at: number, v: any): number {
   if (!(Date.parse(v?.timestamp) >= at - 1000)) return 0;
+  const rule = RULES[agent as BuiltinAgentKind];
+  if (!rule && agent !== "claude") return 0;
   const content =
-    agent === "claude" ? (v.type === "user" ? v.message?.content : v.type === "attachment" && v.attachment?.type === "queued_command" ? v.attachment.prompt : localCommand(v) ? v.content : undefined) : RULES[agent].said(v);
+    agent === "claude" ? (v.type === "user" ? v.message?.content : v.type === "attachment" && v.attachment?.type === "queued_command" ? v.attachment.prompt : localCommand(v) ? v.content : undefined) : rule!.said(v);
   return textIn(agent, content).split(squeezed(typed)).length - 1;
 }
 
@@ -1446,7 +1460,7 @@ export function reads(agent: AgentKind, typed: string, at: number, v: any): numb
  *  was typed (RULES' command). */
 function textIn(agent: AgentKind, content: unknown): string {
   const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((b: any) => (typeof b?.text === "string" ? b.text : "")).join("\n") : "";
-  return squeezed(RULES[agent].command?.(text) ?? text);
+  return squeezed(RULES[agent as BuiltinAgentKind]?.command?.(text) ?? text);
 }
 
 /** Claude's line for a built-in command (#737 probe, 2.1.325): a system line with the command's name,

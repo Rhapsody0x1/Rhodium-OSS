@@ -3,7 +3,7 @@
 // (runner.ts), the transcript format (transcript.ts), the terminal's launch (tui.ts), the settings
 // carried back from it (router.ts), the logo and the tool names (web/). A kind missing from any of
 // them does not compile. No imports but types: every rh call and the board's page load this.
-import type { AgentKind } from "./contracts";
+import type { AgentKind, BuiltinAgentKind, CommonCommand } from "./contracts";
 
 export type AgentDef = {
   name: string; // as Rhodium's own words call it: Claude, pi
@@ -21,9 +21,14 @@ export type AgentDef = {
   modelNames: boolean; // names its models, Claude in its handshake, Codex in model/list, which the store keeps (store's modelNames)
   paneImport: boolean; // rh import takes a Herdr pane it runs in, named after the kind (product §4.3)
   claudeKeys: boolean; // may have Claude's keys and subscription; no other agent may (product §12)
+  builtin: boolean; // true only for the three built-in drivers
+  tui: boolean; // whether rh tui / Herdr terminal switching is supported
+  importable: boolean; // whether rh import scans local disk transcripts
+  steer: boolean; // whether running turns accept mid-turn messages without queuing AFTER_TURN
+  supportedCommands: readonly CommonCommand[] | null; // null means all built-in commands (subject to ultracode)
 };
 
-export const AGENTS: Record<AgentKind, AgentDef> = {
+export const AGENTS: Record<BuiltinAgentKind, AgentDef> = {
   claude: {
     name: "Claude",
     statusName: "Claude Code",
@@ -35,6 +40,11 @@ export const AGENTS: Record<AgentKind, AgentDef> = {
     modelNames: true,
     paneImport: true,
     claudeKeys: true,
+    builtin: true,
+    tui: true,
+    importable: true,
+    steer: true,
+    supportedCommands: null,
   },
   pi: {
     name: "pi",
@@ -47,6 +57,11 @@ export const AGENTS: Record<AgentKind, AgentDef> = {
     modelNames: false,
     paneImport: true,
     claudeKeys: false,
+    builtin: true,
+    tui: true,
+    importable: true,
+    steer: true,
+    supportedCommands: null,
   },
   codex: {
     name: "Codex",
@@ -59,12 +74,85 @@ export const AGENTS: Record<AgentKind, AgentDef> = {
     modelNames: true,
     paneImport: false,
     claudeKeys: false,
+    builtin: true,
+    tui: true,
+    importable: true,
+    steer: true,
+    supportedCommands: null,
   },
 };
 
-export const AGENT_KINDS = Object.keys(AGENTS) as AgentKind[];
+export const AGENT_KINDS = Object.keys(AGENTS) as BuiltinAgentKind[];
 /** The agent of a slot made without one, and the one the /resume list and rh ls leave unmarked. */
-export const DEFAULT_AGENT: AgentKind = "claude";
+export const DEFAULT_AGENT: BuiltinAgentKind = "claude";
+
+const pluginAgents = new Map<string, AgentDef>();
+
+/** Register a non-builtin agent plugin capability descriptor (enforcing sandbox/non-builtin invariants). */
+export function registerAgentPlugin(
+  id: string,
+  def: Partial<AgentDef> & Pick<AgentDef, "name" | "statusName">,
+): void {
+  if (isBuiltinAgent(id)) throw new Error(`cannot override builtin agent ${id}`);
+  pluginAgents.set(id, {
+    name: def.name,
+    statusName: def.statusName,
+    program: def.program || id,
+    sessionIdOpens: false,
+    liveApproval: def.liveApproval === "now" || def.liveApproval === "next turn" ? def.liveApproval : false,
+    ultracode: false,
+    apiPrice: false,
+    modelNames: Boolean(def.modelNames),
+    paneImport: false,
+    claudeKeys: false,
+    builtin: false,
+    tui: false,
+    importable: false,
+    steer: Boolean(def.steer),
+    supportedCommands: def.supportedCommands ? [...def.supportedCommands] : [],
+  });
+}
+
+export function unregisterAgentPlugin(id: string): void {
+  pluginAgents.delete(id);
+}
+
+export function resetAgentPlugins(): void {
+  pluginAgents.clear();
+}
+
+export function isBuiltinAgent(kind: string): kind is BuiltinAgentKind {
+  return Object.hasOwn(AGENTS, kind);
+}
+
+export function isRegisteredAgent(kind: string): boolean {
+  return isBuiltinAgent(kind) || pluginAgents.has(kind);
+}
+
+export function allAgentKinds(): AgentKind[] {
+  return [...AGENT_KINDS, ...pluginAgents.keys()];
+}
+
+const FALLBACK_AGENT: Omit<AgentDef, "name" | "statusName" | "program"> = {
+  sessionIdOpens: false,
+  liveApproval: false,
+  ultracode: false,
+  apiPrice: false,
+  modelNames: false,
+  paneImport: false,
+  claudeKeys: false,
+  builtin: false,
+  tui: false,
+  importable: false,
+  steer: false,
+  supportedCommands: [],
+};
+
+/** Resolve an agent definition across built-ins, loaded plugins, or a safe non-builtin fallback. */
+export function agentDef(kind: AgentKind): AgentDef {
+  if (isBuiltinAgent(kind)) return AGENTS[kind];
+  return pluginAgents.get(kind) ?? { name: kind, statusName: kind, program: kind, ...FALLBACK_AGENT };
+}
 
 /** By agent, whether Rhodium types what comes for it into its terminal (architecture §10.5); busy: also
  *  while Herdr says it works, as Claude takes it into the turn; runs: what of yours from the board led by
@@ -96,15 +184,19 @@ export const READ_BY_PI = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "ANTHRO
 /** The environment a headless agent of the kind is launched with: env without what a parent session
  *  hands down, nor Claude's keys unless it may have them. */
 export function headlessEnv(agent: AgentKind, env: Record<string, string>): Record<string, string> {
-  const keys = AGENTS[agent].claudeKeys;
-  return Object.fromEntries(Object.entries(env).filter(([k]) => !PARENT_SESSION.test(process.platform === "win32" ? k.toUpperCase() : k) && (keys || !CLAUDE_KEYS.test(process.platform === "win32" ? k.toUpperCase() : k))));
+  const keys = agentDef(agent).claudeKeys;
+  return Object.fromEntries(
+    Object.entries(env).filter(([k]) => {
+      const upper = k.toUpperCase();
+      return !PARENT_SESSION.test(upper) && (keys || !CLAUDE_KEYS.test(upper));
+    }),
+  );
 }
 
 /** What the agent's terminal goes without, by name for env -u, as the pane's environment is the Herdr
  *  server's (architecture §10.3): Claude's keys, as headless, by those env has, which Herdr's
- *  environment shares, and those pi reads. Its Herdr variables stay: its hook or extension reports
- *  the pane's session with them. */
+ *  environment shares, and those pi reads, matched case-insensitively on all platforms. */
 export function terminalUnset(agent: AgentKind, env: Record<string, string | undefined>): string[] {
-  if (AGENTS[agent].claudeKeys) return [];
-  return [...new Set([...READ_BY_PI, ...Object.keys(env).filter((k) => CLAUDE_KEYS.test(process.platform === "win32" ? k.toUpperCase() : k))])];
+  if (agentDef(agent).claudeKeys) return [];
+  return [...new Set([...READ_BY_PI, ...Object.keys(env).filter((k) => CLAUDE_KEYS.test(k.toUpperCase()))])];
 }

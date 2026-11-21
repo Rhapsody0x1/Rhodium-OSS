@@ -8,11 +8,11 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { AGENTS, DEFAULT_AGENT } from "./agents";
+import { agentDef, DEFAULT_AGENT, isBuiltinAgent } from "./agents";
 import { ClaudeDriver } from "./claude";
 import { CodexDriver } from "./codex";
 import { locate, type Config } from "./config";
-import type { AgentDriver, AgentEmit, AgentEvent, AgentKind, AgentMessage, Capabilities, CommandResult, CommonCommand, PanelUi, SpawnSpec } from "./contracts";
+import type { AgentDriver, AgentEmit, AgentEvent, AgentKind, AgentMessage, BuiltinAgentKind, Capabilities, CommandResult, CommonCommand, PanelUi, SpawnSpec } from "./contracts";
 import { log, type Loop } from "./daemon";
 import { connectHolder, holderPaths, spawnHolder, unitGone, type HolderEvents, type HolderLink } from "./holder";
 import { forAgent, pictureType } from "./media";
@@ -196,7 +196,7 @@ export function createRunner(o: {
   const report = (event: AgentEvent) => loop.enqueue({ kind: "agent", event });
 
   /** Each agent's driver, for a conversation. */
-  const DRIVERS: Record<AgentKind, (common: { conv: string; boot: number; emit: AgentEmit; stopGrace: number }) => AgentDriver> = {
+  const DRIVERS: Record<BuiltinAgentKind, (common: { conv: string; boot: number; emit: AgentEmit; stopGrace: number }) => AgentDriver> = {
     claude: (common) => new ClaudeDriver({ ...common, onVersion: o.onVersion, onModels: (models) => setModelNames(store, models) }),
     pi: (common) => new PiDriver({ ...common, extensionDir: join(cfg.stateDir, "pi") }),
     codex: (common) => new CodexDriver({ ...common, onModels: (names) => setMeta(store, modelNames("codex"), JSON.stringify(names)) }),
@@ -213,6 +213,7 @@ export function createRunner(o: {
         if (e.type === "pending_asks") void deliver(conversation);
       };
       // The agent kind belongs to the conversation, so its driver never changes.
+      if (!isBuiltinAgent(conv.agent)) throw new Error(`agent plugin driver not available for ${conv.agent}`);
       const driver = DRIVERS[conv.agent]({ conv: conversation, boot, emit, stopGrace: cfg.durations.stopGrace });
       live.set(conversation, (l = { driver, proc: 0, link: null, delivering: false, session: null, stopping: 0, adopt: false, seen: 0, behind: false, reapply: false, waiting: false, missing: null }));
     }
@@ -242,7 +243,7 @@ export function createRunner(o: {
     // one you switched to in the terminal, before its first message: it starts under that id
     // (architecture §6.2). pi's --session-id opens a session or starts it alike (sessionIdOpens).
     const id = conv.sessionId;
-    const session = id && (AGENTS[conv.agent].sessionIdOpens || (await hasTranscript(conv.agent, id))) ? { resume: id } : { new: id ?? randomUUID() };
+    const session = id && (agentDef(conv.agent).sessionIdOpens || (await hasTranscript(conv.agent, id))) ? { resume: id } : { new: id ?? randomUUID() };
     me.session = session.new ?? null;
     // After a crash Claude runs the interrupted turn again by itself (architecture §4.8); deliver
     // writes it the resume prompt only if it has none. Only then: rhodium's own environment never
@@ -255,7 +256,7 @@ export function createRunner(o: {
       env,
       resumed,
       approval: Boolean(slot.approval ?? cfg.defaults.approval),
-      program: cfg.programs[conv.agent],
+      program: cfg.programs[conv.agent] ?? agentDef(conv.agent).program,
       model: slot.model,
       effort: slot.effort,
       ultracode: slot.ultracode === null ? null : slot.ultracode === 1,
@@ -395,7 +396,7 @@ export function createRunner(o: {
       // conversation open in a terminal.
       const busy = conv.sessionId ? await o.inUse(conv.sessionId) : null;
       if (busy) return report({ type: "exit", code: null, signal: null, from: "holder", busy, conv: conv.id, proc: me.proc }), null;
-      const program = cfg.programs[conv.agent];
+      const program = cfg.programs[conv.agent] ?? agentDef(conv.agent).program;
       const gone = (why: { missing: string } | { stopped: 1 | 2 }) => report({ type: "exit", code: null, signal: null, from: "holder", ...why, conv: conv.id, proc: me.proc });
       for (const end = Date.now() + cfg.durations.programWait; ; ) {
         const path = locate(program, cfg.agentPath);
