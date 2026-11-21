@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { headlessEnv, registerAgentPlugin, resetAgentPlugins, terminalUnset } from "../src/agents";
 import { pluginFindings } from "../src/doctor";
-import { descendantPids } from "../scripts/lib/process-tree";
+import { descendantPids, descendantsIn } from "../scripts/lib/process-tree";
 import { auditPluginProcessTree, checkProcessCompliance, isClaudeExecutable, launchesClaude } from "../src/pi-pane-credentials";
 import { resetPluginRegistry } from "../src/plugin-loader";
 
@@ -94,6 +94,13 @@ describe("mixed-case credential and session env isolation", () => {
 });
 
 describe("plugin process subtree compliance audit and doctor findings", () => {
+  test("a reused Windows parent PID does not adopt an older process or its children", () => {
+    const parents: [number, number][] = [[2, 1], [3, 2], [4, 1], [5, 4], [6, 4], [7, 1]];
+    const starts = [0n, 100n, 10n, 120n, 110n, 105n, 110n];
+    // PID 2 predates the new root, PID 5 predates its apparent parent. PID 7's time is unknown.
+    expect(descendantsIn(1, parents, pid => starts[pid])).toEqual([1, 4, 7, 6]);
+  });
+
   test("checkProcessCompliance flags --bare, CLAUDE_CODE_SIMPLE, mixed-case Anthropic/Claude keys, and path-aware claude launches without false positives", () => {
     expect(isClaudeExecutable("/opt/Claude Tools/pi")).toBe(false);
     expect(isClaudeExecutable("/opt/Claude Tools/claude")).toBe(true);
