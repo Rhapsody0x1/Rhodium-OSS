@@ -1,0 +1,105 @@
+name: Windows native exploration
+on:
+  push:
+    branches: [windows-native]
+  workflow_dispatch:
+    inputs:
+      repeat_pi_identity:
+        description: Repeat the managed pi multi-child regression under concurrent load
+        type: boolean
+        default: false
+      herdr_tui_probe:
+        description: Run only the isolated Herdr terminal probe
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: windows-native-exploration-${{ inputs.herdr_tui_probe && 'herdr' || 'daemon' }}
+  cancel-in-progress: true
+jobs:
+  smoke:
+    if: github.ref == 'refs/heads/windows-native' && !inputs.herdr_tui_probe
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - name: Select Rust toolchain for the preview notices
+        if: github.event_name == 'workflow_dispatch' || (github.run_attempt != '1' && contains(github.event.head_commit.message, '[preview package]'))
+        shell: pwsh
+        run: |
+          $version = (Get-Item release/licenses/rust-*.md).BaseName.Substring(5)
+          $toolchain = "$version-x86_64-pc-windows-msvc"
+          rustup toolchain install $toolchain --profile minimal --no-self-update
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "RUSTUP_TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
+      - run: ./scripts/windows-build.ps1
+      - name: Validate logon task definition without registering it
+        shell: powershell
+        run: ./scripts/windows-task.ps1 -InstallDir dist -TaskName rhodium-test-native -WhatIf
+      - name: Repeat the reported managed pi identity check with synthetic children
+        if: inputs.repeat_pi_identity
+        shell: pwsh
+        run: |
+          $jobs = 1..3 | ForEach-Object { Start-Job -ScriptBlock {
+            Set-Location $using:PWD
+            bun test test/windows-tui-launch.test.ts -t "official managed pi" --rerun-each 20 2>&1 | ForEach-Object { "$_" }
+          } }
+          $output = @($jobs | Wait-Job | Receive-Job)
+          $jobs | Remove-Job
+          $output
+          if (@($output | Select-String '\(pass\) official managed pi').Count -ne 60 -or ($output -match '\(fail\)')) { throw 'Managed pi stress check failed' }
+      - name: Protocol and native process smoke tests
+        shell: pwsh
+        run: |
+          $env:RHODIUM_TEST_HOLD = (Resolve-Path dist/rh-hold.exe).Path
+          $env:RHODIUM_TEST_EXE = (Resolve-Path dist/rhodium.exe).Path
+          bun build --compile test/fake-agent/windows-cli.ts --outfile dist/rhodium-test-claude.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:RHODIUM_TEST_AGENT = (Resolve-Path dist/rhodium-test-claude.exe).Path
+          bun test test/hold.test.ts test/windows-paths.test.ts test/session-processes.test.ts test/tui-process.test.ts test/windows-tui-launch.test.ts test/windows-native.test.ts test/native-holders.test.ts test/pi-pane-credentials.test.ts
+      - name: Register real tasks and verify automatic daemon restart
+        if: github.event_name == 'workflow_dispatch'
+        shell: powershell
+        run: ./scripts/windows-task-smoke.ps1
+      # A branch-only workflow may require an explicit manual re-run of a marked push.
+      - name: Package tested Windows binaries
+        if: github.event_name == 'workflow_dispatch' || (github.run_attempt != '1' && contains(github.event.head_commit.message, '[preview package]'))
+        shell: pwsh
+        run: ./scripts/windows-package.ps1
+      - name: Upload preview ZIP and checksum
+        if: github.event_name == 'workflow_dispatch' || (github.run_attempt != '1' && contains(github.event.head_commit.message, '[preview package]'))
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: windows-preview
+          path: |
+            dist/rhodium-*-windows-preview-*-win-x64.zip
+            dist/rhodium-*-windows-preview-*-win-x64.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+  herdr-tui:
+    if: github.ref == 'refs/heads/windows-native' && inputs.herdr_tui_probe
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: ./scripts/windows-build.ps1
+      - name: Verify native and official managed launcher identities and arguments
+        run: bun test test/windows-tui-launch.test.ts test/pane-import-policy.test.ts
+      - name: Open and release real Herdr-backed Claude, Codex and pi slots with account-free fixtures
+        shell: pwsh
+        run: ./scripts/probes/herdr-tui/windows.ps1 -SlotOnly
