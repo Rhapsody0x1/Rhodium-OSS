@@ -1,449 +1,388 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+// Run against an offline plugin or recording. Optional sibling conformance.json describes its test inputs.
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import {
-  expandPluginCommand,
-  readJsonLines,
-  validateImCapabilities,
-  validateManifest,
-  type AgentPluginManifest,
-  type ImPluginManifest,
-} from "@rhodium-oss/plugin-sdk";
+import { parseArgs } from "node:util";
+import { MAX_LINE_BYTES, compareSemver, validateImCapabilities, validateManifest, type Capabilities } from "@rhodium-oss/plugin-sdk";
+import { Peer, bounded, check, childEnv, nonempty, object, sensitiveKey, type Frame, type Options } from "./lib/conformance-peer";
 
-const SENSITIVE_ENV_RE = /^(?:anthropic_|claude|herdr_)/i;
+const ok = (n: number, description: string) => console.log("ok " + n + " - " + description);
+const json = (path: string) => JSON.parse(readFileSync(path, "utf8")) as unknown;
+const strings = (v: unknown): v is Record<string, string> => object(v) && Object.values(v).every(x => typeof x === "string");
 
-type CliArgs = {
-  manifestPath: string;
-  config: Record<string, string>;
-  timeoutMs: number;
+type Fixture = {
+  normalText?: string; interruptText?: string; askText?: string; deliveredText?: string; failureText?: string;
+  chat?: string; failureChat?: string; kept?: Record<string, string>; stateless?: boolean; localPlatform?: boolean;
 };
 
-function parseArgs(argv: string[]): CliArgs {
-  let manifestPath = "";
-  let configRaw = "{}";
-  let timeoutMs = 10_000;
+function fixtureAt(dir: string): Fixture {
+  const path = join(dir, "conformance.json");
+  if (!existsSync(path)) return {};
+  const f = json(path);
+  check(object(f), "conformance.json must be an object");
+  for (const key of ["normalText", "interruptText", "askText", "deliveredText", "failureText", "chat", "failureChat"]) {
+    check(f[key] === undefined || nonempty(f[key]), "Invalid fixture field: " + key);
+  }
+  check(f.kept === undefined || strings(f.kept), "Fixture kept must map keys to string values");
+  check(f.askText === undefined || nonempty(f.deliveredText), "askText requires a downstream deliveredText marker");
+  check(f.stateless === undefined || typeof f.stateless === "boolean", "Invalid stateless fixture flag");
+  check(f.localPlatform === undefined || typeof f.localPlatform === "boolean", "Invalid localPlatform fixture flag");
+  return f as Fixture;
+}
 
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg === "--manifest" && i + 1 < argv.length) {
-      manifestPath = argv[++i]!;
-    } else if (arg === "--config" && i + 1 < argv.length) {
-      configRaw = argv[++i]!;
-    } else if (arg === "--timeout" && i + 1 < argv.length) {
-      timeoutMs = Number(argv[++i]!);
-    } else {
-      throw new Error(`Unknown or incomplete argument: ${arg}`);
+async function verifyEnv(o: Options) {
+  const probe = Bun.spawn([process.execPath, "-e", "console.log(JSON.stringify(Object.keys(process.env)))"], {
+    cwd: o.cwd, env: childEnv(o.dir), windowsHide: true, stdin: "ignore", stdout: "pipe", stderr: "ignore",
+  });
+  try {
+    const [code, output] = await bounded(Promise.all([probe.exited, new Response(probe.stdout).text()]), o.ms, "child environment probe");
+    check(code === 0 && !(JSON.parse(output) as string[]).some(sensitiveKey), "Sensitive keys present in plugin launch environment");
+  } finally { if (probe.exitCode === null) probe.kill(); }
+}
+
+function agentInit(o: Options) {
+  return { type: "init", proto: 1, conv: "conf-conv-1", session: { new: "conf-session-1" }, cwd: o.cwd,
+    systemPromptFile: join(o.cwd, "system-prompt.md"), program: o.manifest.kind === "agent" && o.manifest.program,
+    approval: false, model: null, effort: null, resumed: false, config: o.config };
+}
+function checkReady(frame: Frame) {
+  check(frame.type === "ready" && frame.proto === 1 && (frame.session === null || nonempty(frame.session)), "Invalid agent ready handshake");
+  if (frame.capabilities !== undefined) {
+    const c = frame.capabilities;
+    check(object(c) && (c.steer === undefined || typeof c.steer === "boolean") && (c.liveApproval === undefined || typeof c.liveApproval === "boolean")
+      && (c.commands === undefined || Array.isArray(c.commands) && c.commands.every(nonempty)), "Invalid agent ready capabilities");
+  }
+}
+
+async function ready(p: Peer) {
+  p.write(agentInit(p.options));
+  checkReady(await p.wait(0, f => f.type === "ready" || f.type === "fatal", "agent ready"));
+}
+
+function send(p: Peer, id: string, text: string): number {
+  const from = p.frames.length;
+  p.write({ type: "send", id, text, human: true, mode: "turn" });
+  return from;
+}
+async function normalTurn(p: Peer, text: string) {
+  const id = "conf-in-1", from = send(p, id, text);
+  const end = await p.wait(from, f => f.type === "turn_end" || f.type === "error", "normal turn_end");
+  const turn = p.frames.slice(from, p.frames.indexOf(end) + 1);
+  check(end.type === "turn_end" && turn.some(f => f.type === "taken" && f.inputId === id)
+    && turn.some(f => f.type === "turn_start" && (f.input === id || f.input === undefined))
+    && (nonempty(end.reply) || turn.some(f => f.type === "text_delta" && nonempty(f.text)
+      || f.type === "item" && object(f.item) && f.item.kind === "message" && nonempty(f.item.text))), "Incomplete normal agent turn");
+}
+
+async function testAnswer(p: Peer, fixture: Fixture) {
+  if (!fixture.askText) {
+    const from = p.frames.length;
+    p.write({ type: "command", id: "unsupported", name: "__conformance_unsupported__", args: "" });
+    const r = await p.wait(from, m => m.type === "command_result" && m.id === "unsupported", "unsupported command result");
+    check(r.ok === false && nonempty(r.error), "Unsupported command must return ok:false and an error");
+    return "unsupported command rejected";
+  }
+  const from = send(p, "conf-ask", fixture.askText);
+  const ask = await p.wait(from, f => f.type === "ask", "offline permission request");
+  check(ask.kind === "permission" && nonempty(ask.requestId), "Expected offline permission request with requestId");
+  const resolved = (f: Frame) => f.type === "ask_resolved" && f.requestId === ask.requestId;
+  check(!p.frames.slice(from).some(resolved), "Permission acknowledged before an answer was sent");
+  const answer = { type: "answer", requestId: ask.requestId, answer: { kind: "permission", allow: true } };
+  p.write(answer);
+  p.write(answer);
+  const ack = await p.wait(from, resolved, "ask_resolved");
+  await p.wait(from, f => f.type === "turn_end", "answered turn_end");
+  const deliveries = p.frames.slice(from).filter(f => f.type === "item" && object(f.item) && f.item.kind === "tool" && object(f.item.result) && f.item.result.text === fixture.deliveredText);
+  check(deliveries.length === 1 && p.frames.indexOf(deliveries[0]!) < p.frames.indexOf(ack),
+    "Expected exactly one downstream receipt before ask_resolved");
+  return "repeated answer, one downstream receipt before acknowledgement";
+}
+
+async function failureProbe(o: Options, fixture: Fixture, probe: "malformed" | "oversize" | "failure" | "handshake") {
+  const p = new Peer(o);
+  try {
+    if (probe === "handshake") {
+      p.write({ ...agentInit(o), proto: 999 });
+      const error = await p.wait(0, f => f.type === "ready" || f.type === "fatal", "unsupported protocol version");
+      check(error.type === "fatal" && nonempty(error.message), "Unsupported init version must return fatal");
+      return;
     }
-  }
-
-  if (!manifestPath) {
-    throw new Error("Usage: bun scripts/plugin-conformance.ts --manifest <path> [--config <json>] [--timeout 10000]");
-  }
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error(`Invalid --timeout value: ${timeoutMs}`);
-  }
-  const parsedConfig = JSON.parse(configRaw) as unknown;
-  if (typeof parsedConfig !== "object" || parsedConfig === null || Array.isArray(parsedConfig)) {
-    throw new Error("--config must be a JSON object");
-  }
-  const config: Record<string, string> = {};
-  for (const [k, v] of Object.entries(parsedConfig)) {
-    config[k] = typeof v === "string" ? v : JSON.stringify(v);
-  }
-  return { manifestPath: resolve(manifestPath), config, timeoutMs };
+    await ready(p);
+    const from = p.frames.length;
+    if (probe === "malformed") p.proc.stdin.write("{bad json}\n");
+    else if (probe === "oversize") {
+      // A syntactically valid JSON line one byte above the cap: invalid JSON alone cannot pass this probe.
+      const chunk = "x".repeat(1024 * 1024);
+      const deadline = Date.now() + o.ms;
+      const prefix = '{"type":"command","id":"large","name":"status","args":"';
+      const suffix = '"}';
+      const padding = MAX_LINE_BYTES + 1 - prefix.length - suffix.length;
+      p.proc.stdin.write(prefix);
+      for (let written = 0; written < padding;) {
+        const size = Math.min(chunk.length, padding - written);
+        p.proc.stdin.write(chunk.slice(0, size));
+        check(Date.now() < deadline, "Timed out writing oversize input");
+        await bounded(Promise.resolve(p.proc.stdin.flush()), deadline - Date.now(), "oversize input write");
+        written += size;
+      }
+      p.proc.stdin.write(suffix + "\n");
+    } else send(p, "conf-failure", fixture.failureText!);
+    const e = await p.wait(from, f => f.type === "error" || f.type === "fatal", probe + " error");
+    check(e.type === "fatal" ? nonempty(e.message) : nonempty(e.detail), "Missing diagnostic for " + probe);
+  } finally { await p.clean(); }
 }
 
-function buildSanitizedEnv(pluginDir: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (SENSITIVE_ENV_RE.test(key)) continue;
-    env[key] = value;
-  }
-  env.RHODIUM_PLUGIN_DIR = pluginDir;
-  env.PYTHONUTF8 = "1";
-  return env;
+async function testAgent(o: Options, fixture: Fixture) {
+  writeFileSync(join(o.cwd, "system-prompt.md"), "Offline conformance test\n");
+  await verifyEnv(o);
+  ok(2, "sanitized child environment");
+  const p = new Peer(o);
+  try {
+    await ready(p);
+    ok(3, "ready handshake");
+    await normalTurn(p, fixture.normalText ?? "hello conformance");
+    ok(4, "taken, turn_start, reply and turn_end");
+    ok(5, await testAnswer(p, fixture));
+    const from = send(p, "conf-interrupt", fixture.interruptText ?? "wait for interruption");
+    await p.wait(from, f => f.type === "turn_start", "interruptible turn_start");
+    check(!p.frames.slice(from).some(f => f.type === "turn_end"), "Offline turn already finished; configure interruptText for a pending turn");
+    const cut = p.frames.length;
+    p.write({ type: "interrupt" });
+    const interrupted = await p.wait(cut, f => f.type === "turn_end", "interrupted turn_end");
+    if (fixture.askText && fixture.askText === fixture.interruptText) {
+      check(!nonempty(interrupted.reply), "Interrupted permission turn unexpectedly produced a final answer");
+    }
+    p.observeChildren();
+    p.write({ type: "close" });
+    await p.exited();
+    ok(6, "active turn interrupted, close and child exit");
+  } finally { await p.clean(); }
+  await failureProbe(o, fixture, "malformed");
+  await failureProbe(o, fixture, "oversize");
+  await failureProbe(o, fixture, fixture.failureText ? "failure" : "handshake");
+  ok(7, fixture.failureText ? "malformed JSON, oversized line and simulated runtime failure" : "malformed JSON, oversized line and failed-version handshake");
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  return new Promise<T>((resolvePromise, rejectPromise) => {
-    const timer = setTimeout(() => {
-      rejectPromise(new Error(`Timed out after ${timeoutMs}ms waiting for ${label}`));
-    }, timeoutMs);
-    promise.then(
-      (val) => {
-        clearTimeout(timer);
-        resolvePromise(val);
-      },
-      (err) => {
-        clearTimeout(timer);
-        rejectPromise(err);
-      },
-    );
+type Kept = Map<string, string>;
+
+function imPeer(o: Options, kept: Kept, restored: Map<string, string>) {
+  const written = new Set<string>();
+  return new Peer(o, (m, p) => {
+    check(m.jsonrpc === "2.0", "Invalid JSON-RPC version from IM plugin");
+    if (!("method" in m)) return;
+    const v = m.params;
+    check(object(v), "Invalid IM request params");
+    if (m.method === "connected") {
+      check(typeof v.up === "boolean" && (v.error === undefined || typeof v.error === "string"), "Invalid connected notification");
+      return;
+    }
+    check(typeof m.id === "number" || nonempty(m.id), "IM reverse call requires an id");
+    let result: Frame;
+    if (m.method === "kept_set") {
+      check(typeof v.key === "string" && (typeof v.value === "string" || v.value === null), "Invalid kept_set");
+      written.add(v.key);
+      if (v.value === null) kept.delete(v.key);
+      else kept.set(v.key, v.value);
+      result = { ok: true };
+    } else if (m.method === "kept_get") {
+      check(typeof v.key === "string", "Invalid kept_get");
+      const value = kept.get(v.key);
+      if (!written.has(v.key) && value !== undefined) restored.set(v.key, value);
+      result = { value: value ?? null };
+    } else if (m.method === "inbound") {
+      check(nonempty(v.chat) && nonempty(v.sender) && nonempty(v.messageId) && typeof v.text === "string" && Number.isFinite(v.at), "Invalid inbound");
+      result = { ok: true };
+    } else {
+      p.write({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "Unsupported reverse method" } });
+      return;
+    }
+    p.write({ jsonrpc: "2.0", id: m.id, result });
   });
 }
 
-function writeLine(stdin: { write(chunk: string | Uint8Array): unknown }, msg: unknown): void {
-  stdin.write(`${JSON.stringify(msg)}\n`);
+async function imInit(p: Peer): Promise<Capabilities> {
+  const r = await p.rpc("init", { proto: 1, botId: "conf-bot-1", botName: p.options.manifest.id, config: p.options.config });
+  check(r.proto === 1, "Invalid IM handshake version");
+  const c = validateImCapabilities(r.capabilities);
+  check(c.ok, "Invalid IM handshake capabilities");
+  await p.wait(0, f => f.method === "connected" && object(f.params) && f.params.up === true, "connected(up:true)");
+  return c.capabilities;
+}
+async function imSend(p: Peer, chat: string, message: Frame) {
+  const r = await p.rpc("send", { chat, message });
+  check(r.status === "sent" && (r.messageId === undefined || nonempty(r.messageId)), "Expected sent receipt");
+  return r.messageId;
+}
+async function imClose(p: Peer) {
+  p.observeChildren();
+  check((await p.rpc("shutdown", {})).ok === true, "Missing shutdown acknowledgement");
+  await p.exited();
 }
 
-async function forceCleanupProcess(
-  proc: ReturnType<typeof Bun.spawn>,
-  graceMs: number,
-): Promise<void> {
-  if (proc.exitCode !== null) return;
+async function testIm(o: Options, fixture: Fixture) {
+  const chat = fixture.chat ?? "conf-user-1";
+  const kept: Kept = new Map();
+  const reads = new Map<string, string>();
+  // This optional loopback service speaks the bundled local-im example's offline test protocol.
+  const channels: string[] = [], cursors: string[] = [];
+  const server = fixture.localPlatform && !o.config.endpoint ? Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname === "/updates") {
+      cursors.push(url.searchParams.get("cursor") ?? "");
+      const input = { channel: "dm-99", sender: chat, messageId: "mock-1", at: Date.now(), text: "offline test" };
+      return Response.json({ messages: url.searchParams.get("cursor") === "1" ? [] : [input], nextCursor: "1" });
+    }
+    if (url.pathname === "/send" || url.pathname === "/edit") {
+      channels.push((await req.json()).channel);
+      return Response.json({ status: "sent", messageId: "offline-post" });
+    }
+    return Response.json({ ok: true });
+  } }) : null;
+  if (server) o = { ...o, config: { ...o.config, endpoint: server.url.origin } };
+  let p: Peer | undefined;
   try {
-    proc.kill("SIGTERM");
-  } catch {
+    await verifyEnv(o);
+    p = imPeer(o, kept, reads);
+    const c = await imInit(p);
+    ok(2, "sanitized launch, init capabilities and connected notification");
+    if (server) {
+      const input = await p.wait(0, m => m.method === "inbound" && object(m.params) && m.params.messageId === "mock-1", "offline inbound");
+      check(object(input.params) && input.params.sender === chat && input.params.chat === chat, "Incorrectly normalized private chat");
+      const cursor = await p.wait(0, m => m.method === "kept_set" && object(m.params) && m.params.key === "sync_buf" && m.params.value === "1", "offline cursor");
+      check(p.frames.indexOf(cursor) > p.frames.indexOf(input), "Cursor advanced before inbound");
+    }
+    const normal = fixture.normalText ?? "hello conformance".slice(0, c.maxTextLength);
+    check(normal.length <= c.maxTextLength, "Fixture normalText exceeds negotiated limit");
+    const messageId = await imSend(p, chat, { text: normal });
+    // The core owns splitting. Send its two wire segments, including the exact advertised boundary.
+    const size = Math.min(c.maxTextLength, MAX_LINE_BYTES - 1024);
+    check(size > 0, "IM must accept nonempty text");
+    const text = "x".repeat(size) + "!";
+    await imSend(p, chat, { text: text.slice(0, size) });
+    await imSend(p, chat, c.markdown === null ? { text: "!" } : { text: "!", markdown: "**!**" });
+    ok(3, "normal text, split boundary and negotiated Markdown");
+    if (c.progress === "edit" || c.stream) {
+      check(nonempty(messageId), "Editable offline send needs a message id");
+      check((await p.rpc("edit", { chat, messageId, message: { text: "edited".slice(0, size) } })).status === "sent", "edit failed");
+    }
+    if (c.buttons) {
+      const buttonId = await imSend(p, chat, { text: "button".slice(0, size), buttons: [{ label: "OK", data: "ok" }] });
+      check(nonempty(buttonId), "Button message needs an id");
+      check((await p.rpc("drop_buttons", { chat, messageId: buttonId })).status === "sent", "drop_buttons failed");
+    }
+    if (c.menu.maxItems > 0) {
+      const target = c.menu.scope === "per_chat" ? { chat } : {};
+      check((await p.rpc("set_menu", { ...target, items: [{ command: "status", description: "Status" }] })).ok === true, "set_menu failed");
+    }
+    if (c.menu.row) {
+      const target = c.menu.scope === "per_chat" ? { chat } : {};
+      check((await p.rpc("set_row", { ...target, row: [{ label: "Status", command: "/status" }] })).ok === true, "set_row failed");
+    }
+    ok(4, "declared edit, buttons and menu capabilities only");
+    const expected = Object.entries(fixture.kept ?? Object.fromEntries(kept));
+    check(expected.length > 0 || fixture.stateless === true, "Provide a stateful offline fixture or explicitly declare stateless");
+    for (const [key, value] of expected) check(kept.get(key) === value, "Missing or incorrect persisted fixture key: " + key);
+    await imClose(p);
+    await p.clean();
+    reads.clear();
+    const postsBeforeRestart = channels.length, pollsBeforeRestart = cursors.length;
+    p = imPeer(o, kept, reads);
+    const restoredCaps = await imInit(p);
+    await imSend(p, chat, { text: "after restart".slice(0, restoredCaps.maxTextLength) });
+    for (const [key, value] of expected) {
+      if (reads.get(key) !== value) await p.wait(0, () => reads.get(key) === value, "plugin did not read persisted fixture key after restart: " + key);
+    }
+    if (server) {
+      check(channels.length === postsBeforeRestart + 1 && channels.every(id => id === "dm-99"), "Private channel not restored on the platform");
+      check(cursors[pollsBeforeRestart] === "1", "Platform polled with stale cursor after restart");
+    }
+    ok(5, expected.length ? "kept writes and reads across restart" : "stateless IM: no checkpoint required");
+    const refused = await p.rpc("send", { chat: fixture.failureChat ?? "conf-missing-context", message: { text: fixture.failureText ?? "no context".slice(0, restoredCaps.maxTextLength) } });
+    check(refused.status === "failed" && nonempty(refused.error), "Provide a fixture that explicitly refuses a send or lacks chat context");
+    ok(6, "explicit sending failure reported without exiting");
+    await imClose(p);
+    ok(7, "shutdown acknowledged and child processes exited");
+  } finally {
+    try { await p?.clean(); } finally { await server?.stop(true); }
+  }
+}
+
+/** Check the actual published manifest and wire conversations, so a stale copy in a test cannot pass. */
+export function checkExamples(markdown: string) {
+  const blocks = [...markdown.replaceAll("\r\n", "\n").matchAll(/^```json\n([\s\S]*?)\n```$/gm)].map(m => m[1]!.trim());
+  const sample = (start: string) => {
+    const block = blocks.find(b => b.startsWith(start));
+    check(block, "Missing documented JSON example: " + start);
+    return block;
+  };
+  const manifest = validateManifest(JSON.parse(sample('{\n  "manifestVersion"')));
+  check(manifest.ok && manifest.manifest.kind === "agent", "Invalid documented agent manifest");
+  const agent: Frame[] = sample('{"type":"init"').split("\n").map(line => JSON.parse(line));
+  const ready = agent.find(f => f.type === "ready");
+  check(agent[0]?.proto === 1 && agent[0].program === manifest.manifest.program && ready, "Invalid documented agent init/ready");
+  checkReady(ready);
+  const req = agent.find(f => f.type === "ask");
+  check(req && nonempty(req.requestId) && agent.some(f => f.type === "answer" && f.requestId === req.requestId)
+    && agent.some(f => f.type === "ask_resolved" && f.requestId === req.requestId), "Unmatched documented permission request");
+  const im: Frame[] = sample('{"jsonrpc":"2.0"').split("\n").map(line => JSON.parse(line));
+  check(im.every(f => f.jsonrpc === "2.0") && im[0]?.method === "init" && object(im[0].params) && im[0].params.proto === 1, "Invalid documented IM init");
+  const handshake = im.find(f => f.id === im[0]!.id && object(f.result))?.result;
+  check(object(handshake) && handshake.proto === 1 && validateImCapabilities(handshake.capabilities).ok, "Invalid documented IM handshake");
+  for (const r of im.filter(f => f.method && f.id !== undefined)) {
+    const result = im.find(f => f.id === r.id && object(f.result))?.result;
+    check(object(result) && (r.method === "init" || (r.method === "send" ? result.status === "sent" : result.ok === true)), "Unmatched documented " + r.method);
+  }
+}
+
+async function main() {
+  const { values } = parseArgs({ args: Bun.argv.slice(2), options: {
+    help: { type: "boolean" }, "check-docs": { type: "boolean" }, manifest: { type: "string" }, config: { type: "string", default: "{}" }, timeout: { type: "string", default: "10000" },
+  } });
+  if (values.help) {
+    console.log([
+      "bun scripts/plugin-conformance.ts --manifest <plugin.json> [--config <JSON>] [--timeout <ms>]",
+      "bun scripts/plugin-conformance.ts --check-docs",
+      "Use an offline plugin configuration. An optional conformance.json beside plugin.json describes test inputs:",
+      "  Agent: normalText, interruptText (a turn that stays pending), failureText (reported downstream error).",
+      "         askText + deliveredText test duplicate permission answers using one observable downstream tool receipt;",
+      "         without askText the checker requests an unsupported command instead.",
+      "  IM: chat, normalText, failureChat/failureText (a known platform refusal). kept maps expected keys to values",
+      "      that must be written and then read after restart, including DM, cursor or context keys as applicable.",
+      "      Declare stateless:true only for platforms that use no persisted keys. localPlatform:true enables the",
+      "      bundled example's loopback HTTP fixture if --config does not already specify an endpoint.",
+    ].join("\n"));
     return;
   }
-  const waitExit = async (ms: number): Promise<boolean> => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        proc.exited.then(() => true).catch(() => true),
-        new Promise<boolean>((resolveTimeout) => {
-          timer = setTimeout(() => resolveTimeout(false), ms);
-        }),
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
-  };
-  const termWaitMs = Math.max(50, Math.min(graceMs, 500));
-  if (await waitExit(termWaitMs)) return;
-  if (proc.exitCode !== null) return;
-  try {
-    proc.kill("SIGKILL");
-  } catch {
-    return;
+  if (values["check-docs"]) {
+    checkExamples(readFileSync(join(import.meta.dir, "../docs/spec/plugins.md"), "utf8"));
+    console.log("PASS documented plugin examples");
+    if (!values.manifest) return;
   }
-  await waitExit(1_000);
+  check(values.manifest, "Usage: bun scripts/plugin-conformance.ts --manifest <path> [--config <json>] [--timeout 10000]");
+  const path = resolve(values.manifest), dir = dirname(path);
+  const validated = validateManifest(json(path));
+  check(validated.ok, "Manifest validation failed" + (validated.ok ? "" : ": " + validated.error));
+  const manifest = validated.manifest;
+  const { version } = JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8"));
+  check(compareSemver(version, manifest.minRhodium) >= 0, "Manifest needs a newer Rhodium version");
+  const cfg: unknown = JSON.parse(values.config);
+  check(object(cfg), "Expected --config JSON object");
+  const config = Object.fromEntries(Object.entries(cfg).map(([key, val]) => [key, typeof val === "string" ? val : JSON.stringify(val)]));
+  for (const key of manifest.requiredConfig ?? []) check(nonempty(config[key]), "Missing requiredConfig key: " + key);
+  const ms = Number(values.timeout);
+  check(Number.isFinite(ms) && ms > 0, "Invalid --timeout");
+  const fixture = fixtureAt(dir);
+  ok(1, "manifest, static compliance and required configuration");
+  const cwd = mkdtempSync(join(tmpdir(), "rhodium conformance "));
+  try {
+    const o = { manifest, config, dir, cwd, ms };
+    if (manifest.kind === "agent") await testAgent(o, fixture);
+    else await testIm(o, fixture);
+    console.log("PASS " + manifest.kind + " plugin conformance: " + manifest.id);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
 }
 
-async function testAgentPlugin(
-  manifest: AgentPluginManifest,
-  pluginDir: string,
-  tempCwd: string,
-  config: Record<string, string>,
-  timeoutMs: number,
-): Promise<void> {
-  const argv = expandPluginCommand(manifest, pluginDir);
-  const promptFile = join(tempCwd, "system-prompt.md");
-  writeFileSync(promptFile, "# Conformance Prompt\n", "utf8");
-
-  const proc = Bun.spawn(argv, {
-    cwd: tempCwd,
-    env: buildSanitizedEnv(pluginDir),
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    windowsHide: true,
-  });
-
-  const stderrPromise = new Response(proc.stderr).text();
-  const waiters: Array<{
-    check: (msg: Record<string, unknown>) => boolean;
-    fail: (err: Error) => void;
-  }> = [];
-  const backlog: Array<Record<string, unknown>> = [];
-  let streamClosed = false;
-
-  const nextMatching = (
-    predicate: (msg: Record<string, unknown>) => boolean,
-    label: string,
-  ): Promise<Record<string, unknown>> => {
-    const idx = backlog.findIndex(predicate);
-    if (idx >= 0) {
-      return Promise.resolve(backlog.splice(idx, 1)[0]!);
-    }
-    if (streamClosed) {
-      return Promise.reject(new Error(`Plugin closed stdout before ${label}`));
-    }
-    return withTimeout(
-      new Promise<Record<string, unknown>>((resolveMatch, rejectMatch) => {
-        waiters.push({
-          check(msg) {
-            if (predicate(msg)) {
-              resolveMatch(msg);
-              return true;
-            }
-            return false;
-          },
-          fail: rejectMatch,
-        });
-      }),
-      timeoutMs,
-      label,
-    );
-  };
-
-  const readerDone = readJsonLines<Record<string, unknown>>(proc.stdout, {
-    onMessage(msg) {
-      if (trackingTurn) {
-        inspectTurnEvent(msg);
-      }
-      for (let i = 0; i < waiters.length; i++) {
-        if (waiters[i]!.check(msg)) {
-          waiters.splice(i, 1);
-          return;
-        }
-      }
-      backlog.push(msg);
-    },
-  }).finally(() => {
-    streamClosed = true;
-    while (waiters.length > 0) {
-      const w = waiters.shift()!;
-      w.fail(new Error("Plugin closed stdout unexpectedly"));
-    }
-  });
-
-  let trackingTurn = false;
-  let sawTaken = false;
-  let sawTurnStart = false;
-  let hasReplyContent = false;
-
-  const inspectTurnEvent = (msg: Record<string, unknown>): void => {
-    if (msg.type === "taken" && msg.inputId === "conf-in-1") {
-      sawTaken = true;
-    } else if (msg.type === "turn_start") {
-      if (msg.input === undefined || msg.input === "conf-in-1") {
-        sawTurnStart = true;
-      }
-    } else if (msg.type === "text_delta") {
-      if (typeof msg.text === "string" && msg.text.trim().length > 0) {
-        hasReplyContent = true;
-      }
-    } else if (msg.type === "item" && typeof msg.item === "object" && msg.item !== null) {
-      const item = msg.item as { kind?: unknown; text?: unknown };
-      if (item.kind === "message" && typeof item.text === "string" && item.text.trim().length > 0) {
-        hasReplyContent = true;
-      }
-    } else if (msg.type === "turn_end") {
-      if (typeof msg.reply === "string" && msg.reply.trim().length > 0) {
-        hasReplyContent = true;
-      }
-      trackingTurn = false;
-    }
-  };
-
-  try {
-    writeLine(proc.stdin, {
-      type: "init",
-      proto: 1,
-      conv: "conf-conv-1",
-      session: { new: "conf-session-1" },
-      cwd: tempCwd,
-      systemPromptFile: promptFile,
-      program: manifest.program,
-      approval: false,
-      model: null,
-      effort: null,
-      resumed: false,
-      config,
-    });
-
-    const readyOrFatal = await nextMatching(
-      (m) => m.type === "ready" || m.type === "fatal",
-      "agent ready handshake",
-    );
-    if (readyOrFatal.type === "fatal") {
-      throw new Error(`Agent emitted fatal during handshake: ${String(readyOrFatal.message)}`);
-    }
-    if (readyOrFatal.proto !== 1) {
-      throw new Error(`Expected ready.proto === 1, got ${String(readyOrFatal.proto)}`);
-    }
-
-    trackingTurn = true;
-    writeLine(proc.stdin, {
-      type: "send",
-      id: "conf-in-1",
-      text: "hello conformance",
-      human: true,
-      mode: "turn",
-    });
-
-    const turnDone = await nextMatching(
-      (m) => m.type === "turn_end" || m.type === "fatal" || (m.type === "error" && m.recoverable === false),
-      "agent turn_end",
-    );
-    if (turnDone.type !== "turn_end") {
-      throw new Error(`Agent turn failed: ${JSON.stringify(turnDone)}`);
-    }
-    const missing: string[] = [];
-    if (!sawTaken) missing.push('taken (inputId: "conf-in-1")');
-    if (!sawTurnStart) missing.push("turn_start");
-    if (!hasReplyContent) missing.push("non-empty reply content (turn_end.reply, text_delta, or message item)");
-    if (missing.length > 0) {
-      throw new Error(`Agent turn round-trip incomplete; missing: ${missing.join(", ")}`);
-    }
-
-    writeLine(proc.stdin, { type: "close" });
-    proc.stdin.end();
-
-    const code = await withTimeout(proc.exited, timeoutMs, "agent graceful exit");
-    await readerDone;
-    if (code !== 0) {
-      const stderrText = await stderrPromise;
-      throw new Error(`Agent exited with code ${code}: ${stderrText}`);
-    }
-  } finally {
-    await forceCleanupProcess(proc, timeoutMs);
-  }
-}
-
-async function testImPlugin(
-  manifest: ImPluginManifest,
-  pluginDir: string,
-  tempCwd: string,
-  config: Record<string, string>,
-  timeoutMs: number,
-): Promise<void> {
-  const argv = expandPluginCommand(manifest, pluginDir);
-  const proc = Bun.spawn(argv, {
-    cwd: tempCwd,
-    env: buildSanitizedEnv(pluginDir),
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    windowsHide: true,
-  });
-
-  const stderrPromise = new Response(proc.stderr).text();
-  const keptStore = new Map<string, string>();
-  const pendingById = new Map<
-    string | number,
-    { resolve: (msg: Record<string, unknown>) => void; reject: (err: Error) => void }
-  >();
-
-  const readerDone = readJsonLines<Record<string, unknown>>(proc.stdout, {
-    onMessage(msg) {
-      if (typeof msg.method === "string") {
-        if (msg.id === undefined) return;
-        const id = msg.id as string | number;
-        const params = (msg.params ?? {}) as Record<string, unknown>;
-        if (msg.method === "kept_get") {
-          const key = String(params.key ?? "");
-          writeLine(proc.stdin, { jsonrpc: "2.0", id, result: { value: keptStore.get(key) ?? null } });
-        } else if (msg.method === "kept_set") {
-          const key = String(params.key ?? "");
-          const value = params.value as string | null;
-          if (value === null) keptStore.delete(key);
-          else keptStore.set(key, value);
-          writeLine(proc.stdin, { jsonrpc: "2.0", id, result: { ok: true } });
-        } else if (msg.method === "inbound") {
-          writeLine(proc.stdin, { jsonrpc: "2.0", id, result: { ok: true } });
-        } else {
-          writeLine(proc.stdin, {
-            jsonrpc: "2.0",
-            id,
-            error: { code: -32601, message: `Unsupported conformance reverse method: ${msg.method}` },
-          });
-        }
-        return;
-      }
-
-      if (msg.id !== undefined) {
-        const key = msg.id as string | number;
-        const waiter = pendingById.get(key);
-        if (!waiter) return;
-        pendingById.delete(key);
-        if ("error" in msg && msg.error !== undefined) {
-          waiter.reject(new Error(`JSON-RPC error: ${JSON.stringify(msg.error)}`));
-        } else {
-          waiter.resolve(msg);
-        }
-      }
-    },
-  }).finally(() => {
-    for (const [key, waiter] of pendingById) {
-      pendingById.delete(key);
-      waiter.reject(new Error("Plugin closed stdout before responding to JSON-RPC request"));
-    }
-  });
-
-  const rpc = (id: number, method: string, params: unknown): Promise<Record<string, unknown>> => {
-    return withTimeout(
-      new Promise<Record<string, unknown>>((resolveRpc, rejectRpc) => {
-        pendingById.set(id, { resolve: resolveRpc, reject: rejectRpc });
-        writeLine(proc.stdin, { jsonrpc: "2.0", id, method, params });
-      }),
-      timeoutMs,
-      `IM RPC ${method}`,
-    );
-  };
-
-  try {
-    const initResp = await rpc(1, "init", {
-      proto: 1,
-      botId: "conf-bot-1",
-      botName: manifest.id,
-      config,
-    });
-    const initResult = initResp.result as { proto?: unknown; capabilities?: unknown } | undefined;
-    if (!initResult || initResult.proto !== 1) {
-      throw new Error(`Expected init result.proto === 1, got ${JSON.stringify(initResp)}`);
-    }
-    const capsCheck = validateImCapabilities(initResult.capabilities);
-    if (!capsCheck.ok) {
-      throw new Error(`Invalid IM capabilities returned from init: ${capsCheck.error}`);
-    }
-
-    const sendResp = await rpc(2, "send", {
-      chat: "conf-user-1",
-      message: { text: "hello conformance" },
-    });
-    const sendResult = sendResp.result as { status?: unknown } | undefined;
-    if (!sendResult || sendResult.status !== "sent") {
-      throw new Error(`Expected send status "sent", got ${JSON.stringify(sendResp)}`);
-    }
-
-    const shutResp = await rpc(3, "shutdown", {});
-    const shutResult = shutResp.result as { ok?: unknown } | undefined;
-    if (!shutResult || shutResult.ok !== true) {
-      throw new Error(`Expected shutdown { ok: true }, got ${JSON.stringify(shutResp)}`);
-    }
-    proc.stdin.end();
-
-    const code = await withTimeout(proc.exited, timeoutMs, "IM graceful exit");
-    await readerDone;
-    if (code !== 0) {
-      const stderrText = await stderrPromise;
-      throw new Error(`IM exited with code ${code}: ${stderrText}`);
-    }
-  } finally {
-    await forceCleanupProcess(proc, timeoutMs);
-  }
-}
-
-async function main(): Promise<void> {
-  const { manifestPath, config, timeoutMs } = parseArgs(process.argv.slice(2));
-  const pluginDir = dirname(manifestPath);
-  const manifestJson = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
-  const checked = validateManifest(manifestJson);
-  if (!checked.ok) {
-    throw new Error(`Manifest validation failed for ${manifestPath}: ${checked.error}`);
-  }
-  const missingConfig = (checked.manifest.requiredConfig ?? []).filter((key) => !(key in config));
-  if (missingConfig.length > 0) {
-    throw new Error(`Missing requiredConfig key(s) for ${checked.manifest.id}: ${missingConfig.join(", ")}`);
-  }
-
-  const tempCwd = mkdtempSync(join(tmpdir(), "rhodium conformance "));
-  try {
-    if (checked.manifest.kind === "agent") {
-      await testAgentPlugin(checked.manifest, pluginDir, tempCwd, config, timeoutMs);
-    } else {
-      await testImPlugin(checked.manifest, pluginDir, tempCwd, config, timeoutMs);
-    }
-    process.stdout.write(`PASS ${checked.manifest.kind} plugin conformance: ${checked.manifest.id}\n`);
-  } finally {
-    rmSync(tempCwd, { recursive: true, force: true });
-  }
-}
-
-main().catch((err) => {
-  process.stderr.write(`FAIL plugin conformance: ${err instanceof Error ? err.message : String(err)}\n`);
+if (import.meta.main) main().catch(err => {
+  console.error("FAIL plugin conformance: " + (err instanceof Error ? err.message : String(err)));
   process.exit(1);
 });

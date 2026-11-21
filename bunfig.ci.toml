@@ -1,0 +1,3 @@
+[test]
+# Hosted machines use the CI job's time limit and a Linux address-space limit.
+preload = []

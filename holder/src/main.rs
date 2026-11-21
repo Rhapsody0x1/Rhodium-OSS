@@ -122,7 +122,6 @@ fn main() {
         ["cli", name] => windows::serve_cli(name),
         #[cfg(windows)]
         ["task", "--config", config] => windows::run_task(config),
-        #[cfg(any(windows, target_os = "macos"))]
         ["probe", lock] => lock_is_held(lock).map(|held| println!("{}", if held { "live" } else { "gone" })),
         #[cfg(unix)]
         ["stop-post", dir] => stop_post(dir),
@@ -153,6 +152,14 @@ fn run(dir: &str, sock: &str, lock: &str, start_ms: u64) -> io::Result<()> {
     for d in [&dir, parent(sock), parent(lock)] {
         DirBuilder::new().recursive(true).mode(0o700).create(d)?;
     }
+    #[cfg(target_os = "linux")]
+    let _instance = if std::env::var("RHODIUM_TEST_DETACHED").as_deref() == Ok("1")
+        && std::env::var("NODE_ENV").as_deref() == Ok("test")
+    {
+        Some(take_lock(dir.join("live.lock"))?)
+    } else {
+        None
+    };
     #[cfg(target_os = "macos")]
     let _instance = {
         let lock = take_lock(dir.join("live.lock"))?;
@@ -431,7 +438,6 @@ fn start(h: &'static Holder, conn: &Conn, m: &J) -> Result<(), ()> {
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "macos"))]
 fn lock_is_held(path: &str) -> io::Result<bool> {
     let f = File::options().write(true).create(true).truncate(false).open(path)?;
     match f.try_lock() {

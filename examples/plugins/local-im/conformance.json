@@ -1,0 +1,5 @@
+{
+  "localPlatform": true,
+  "kept": { "dm:conf-user-1": "dm-99", "sync_buf": "1" },
+  "failureText": "[simulate-fail]"
+}

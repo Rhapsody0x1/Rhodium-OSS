@@ -2,7 +2,10 @@
 import { existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export const detached = process.platform === "win32" || process.platform === "darwin";
+// Read runtime values: the packaged test executable is built in production mode.
+const { NODE_ENV, RHODIUM_TEST_DETACHED } = process.env;
+export const detached = process.platform === "win32" || process.platform === "darwin" ||
+  (process.platform === "linux" && NODE_ENV === "test" && RHODIUM_TEST_DETACHED === "1");
 export const holderExecutable = (configured?: string) => configured || join(dirname(process.execPath), process.platform === "win32" ? "rh-hold.exe" : "rh-hold");
 
 export async function holderLive(bin: string, dir: string) {

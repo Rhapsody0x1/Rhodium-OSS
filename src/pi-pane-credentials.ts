@@ -3,7 +3,8 @@
 // macOS the kernel's copy of both (KERN_PROCARGS2), Windows its process parameters block. Only the
 // answer leaves this file, and each buffer is wiped once looked at.
 import { dlopen, toArrayBuffer } from "bun:ffi";
-import { readdirSync, readFileSync } from "node:fs";
+import { descendantPids } from "../scripts/lib/process-tree";
+import { readFileSync } from "node:fs";
 import { READ_BY_PI } from "./agents";
 import { refuseBare } from "./claude";
 
@@ -417,45 +418,6 @@ export function checkProcessCompliance(
     anthropic: anthropicSet(env, ignoreCase) || hasClaudeEnv(env, ignoreCase),
     claudeExec: launchesClaude(argv),
   };
-}
-
-/** Collects rootPid and all descendant pids reachable via /proc on Linux. */
-export function descendantPids(rootPid: number): number[] {
-  if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
-  if (process.platform !== "linux") {
-    // ponytail: descendant subtree enumeration reads /proc on Linux; macOS and Windows audit root pid only until native child-tree walk is added.
-    return [rootPid];
-  }
-  const children = new Map<number, number[]>();
-  try {
-    for (const entry of readdirSync("/proc", { withFileTypes: true })) {
-      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
-      const pid = Number(entry.name);
-      try {
-        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-        const tail = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-        const ppid = Number(tail[1]);
-        if (Number.isInteger(ppid) && ppid > 0) {
-          const list = children.get(ppid);
-          if (list) list.push(pid);
-          else children.set(ppid, [pid]);
-        }
-      } catch {} // process exited during scan
-    }
-  } catch {}
-  const out: number[] = [];
-  const seen = new Set<number>();
-  const queue = [rootPid];
-  while (queue.length) {
-    const pid = queue.shift()!;
-    if (seen.has(pid)) continue;
-    seen.add(pid);
-    out.push(pid);
-    for (const child of children.get(pid) ?? []) {
-      if (!seen.has(child)) queue.push(child);
-    }
-  }
-  return out;
 }
 
 /** Audits rootPid and its live descendants for bare mode, Anthropic/Claude env leaks, and claude launches. */

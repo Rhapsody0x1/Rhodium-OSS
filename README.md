@@ -54,12 +54,32 @@ When an agent attempts a sensitive action—such as rebinding a chat window you 
 - **Not a new agent harness**: It only hosts the harnesses you have already installed (Claude Code, Codex, pi).
 - **Not a multi-agent orchestrator**: Its slot and CLI design allows basic coordination, but its main goal is practical remote control.
 - **Not a commercial or enterprise platform**: This is a personal project started so the author could more easily control agents on a personal Linux server.
-- **Not a hosted service or SaaS**: It requires a Linux machine with systemd, and everything runs on your own hardware.
+- **Not a hosted service or SaaS**: The production Linux service uses systemd, and all programs run on your own hardware.
 - **Not a personal assistant or an AI coworker**: The bots Rhodium creates are a control UI for the agents on your server. They are not meant to be a general-purpose personal assistant, and they don't join IM group chats as an AI coworker.
 - **Not a multi-user bot platform**: It is built for a single user. Only the paired owner can trigger agents.
 - **Not a way to share accounts or bypass limits**: It does not provide model quotas or bypass official subscription and rate limits.
 
-## Quick Start
+## Course demo without accounts or keys
+
+This MIT-licensed course edition was exported from `RhodiumTeam/Rhodium`'s Windows-native development snapshot (`windows-native@cc72fea`, package version `1.5.0`). The host, board and native Windows/macOS paths came with that snapshot. The course changes add out-of-process agent and IM plugins, their SDK, managed transcripts, conformance checks and CI. This Stage A demo uses the repository's example plugins. The three team-member plugins and their Stage B integration are separate deliverables.
+
+1. From a clean clone of this repository, install Git, Bun 1.4.4 and a recent stable Rust toolchain (1.98.1 was used for the baseline). On Windows use 64-bit Bun and Rust with the MSVC build tools. In the repository root run `bun install --frozen-lockfile`.
+2. Build once. On Linux or macOS run `bash scripts/build.sh dist`. On Windows run `.\scripts\windows-build.ps1` from PowerShell. Keep both files in `dist` together: `rhodium` and `rh-hold` (both end in `.exe` on Windows).
+3. Run `bun demo/run.ts --pause`. Open the printed loopback board (default port 7800). Press Enter in the terminal at each checkpoint. For unattended verification run `bun demo/run.ts --port 0`. The launcher creates a fresh private configuration from `demo/config.toml`, builds the fixture in `demo/baseline-agent`, and uses a temporary home and test holders. All messages come from a simulated terminal IM or a local HTTP fixture.
+4. At **baseline**, the fixed request `列出当前目录并确认是否修改` receives a plain-text reply in `course/baseline`. At **plugin approval**, open `course/echo` to see the same request delivered by `local-im`, a tool, and the result after the fixture answers `允许`. At **failure isolation**, the launcher has sent `/fail`, disabled the agent plugin, and loaded a deliberately broken manifest. Open the board's status page to inspect the diagnostics; the built-in baseline still replies. The final line prints the verified SHA-256 of the same core binary across all phases.
+5. Run the black-box checks from the same directory:
+
+   ```sh
+   bun scripts/plugin-conformance.ts --check-docs
+   bun scripts/plugin-conformance.ts --manifest examples/plugins/echo-agent/plugin.json
+   bun scripts/plugin-conformance.ts --manifest examples/plugins/local-im/plugin.json
+   ```
+
+For the test-failure exercise, make a disposable checkout with `git worktree add --detach ../rhodium-bug-demo HEAD`, enter it, and run `bun install --frozen-lockfile`. In `src/plugin-loader.ts`, reverse the `>` in `compareSemver(manifest.minRhodium, opts.coreVersion) > 0`. Run `bun --config=bunfig.ci.toml test test/plugin-loader.test.ts` and observe the minimum-version assertion fail. In that disposable checkout run `git restore -- src/plugin-loader.ts` and repeat the test; it passes.
+
+Linux and Windows CI run on PRs and pushes to main. To verify the native macOS process-tree audit and demo, select **Plugin CI → Run workflow → Run only the native macOS check**. The [plugin specification](docs/spec/plugins.md) defines the matrix and the two acceptance stages.
+
+## Using the Linux service with real agents
 
 Download the latest release archive (`rhodium-<version>-linux-x86_64.tar.xz` or `rhodium-<version>-linux-arm64.tar.xz`) from GitHub Releases.
 

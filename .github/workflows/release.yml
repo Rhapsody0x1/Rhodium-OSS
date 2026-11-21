@@ -1,7 +1,6 @@
 # Make the install packages for a release (#385): scripts/package.sh on an x86_64 and an arm64
 # runner, then a draft GitHub Release v<version> with both and their SHA256SUMS, for a maintainer to
-# read and publish. Run by hand only, and only in the public repository: the private one carries this
-# file too. How to run it: deploy/README.md, 打安装包.
+# read and publish. Run by hand only. How to run it: deploy/README.md, 打安装包.
 name: Release packages
 
 on: workflow_dispatch
@@ -13,7 +12,6 @@ concurrency: release
 
 jobs:
   package:
-    if: github.repository == 'RhodiumTeam/Rhodium'
     strategy:
       matrix:
         include:

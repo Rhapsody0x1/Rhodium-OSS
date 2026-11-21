@@ -54,12 +54,32 @@ Rhodium 提供命令行工具 `rh`，agent 自己也能直接调用：
 - **不是新的 harness**：它只托管你机器上已经安装好的 harness（Claude Code、Codex、pi）。
 - **不是多 agent 编排器**：由于槽位与命令的设计，它带有一定的编排能力，但主要目标是提供更易用的远程控制。
 - **不是成熟的商用或企业级 agent 平台**：这是个人项目，出发点是作者希望更方便地控制自己 Linux 服务器上的 agent。
-- **不是云端托管服务或 SaaS**：它只支持带有 systemd 的 Linux 机器，所有程序都运行在你自己的设备上。
+- **不是云端托管服务或 SaaS**：生产 Linux 服务使用 systemd，所有程序都运行在你自己的设备上。
 - **不是通用的个人助理或 AI 同事**：Rhodium 创建的 Bot 是一种控制界面，用来指挥服务器上的 agent。它不打算成为通用的个人助理，也不进入 IM 群聊充当 AI 同事。
 - **不是多人共用的 Bot 平台**：它采用单用户设计，只有配对过的 Bot 主人能触发 agent。
 - **不帮你共享账号或绕过限制**：它不提供模型额度，也不绕过官方的订阅与用量限制。
 
-## 快速开始
+## 助教验收：零账号、零 Key 演示
+
+本课程版本源于上游 `RhodiumTeam/Rhodium` 的 Windows 原生开发快照 `windows-native@cc72fea`，快照内的包版本为 `1.5.0`，许可证为 MIT。宿主、看板和 Windows/macOS 原生运行能力随快照继承。本次课程改动包括独立进程插件、SDK、托管对话记录、契约检查器和 CI。下面用仓库内的示例插件验收阶段 A。三位成员的插件及其阶段 B 联调另行交付。
+
+1. 从本仓库克隆一份干净副本。安装 Git、Bun 1.4.4 和近期稳定版 Rust 工具链（基线使用 1.98.1）。Windows 使用 64 位 Bun、Rust 和 MSVC 构建工具。在仓库根目录执行 `bun install --frozen-lockfile`。
+2. 构建一次。Linux 或 macOS 执行 `bash scripts/build.sh dist`；Windows 在 PowerShell 执行 `.\scripts\windows-build.ps1`。`dist` 中的 `rhodium` 和 `rh-hold` 放在一起，Windows 上两者的扩展名都是 `.exe`。
+3. 执行 `bun demo/run.ts --pause`，用浏览器打开终端打印的本地看板地址，默认端口为 7800。每到一个检查点，查看看板后回终端按回车。要自动验收，可执行 `bun demo/run.ts --port 0`。脚本根据 `demo/config.toml` 生成私有临时配置，编译 `demo/baseline-agent` 中的假 agent，并使用独立的临时用户目录和测试托管进程。所有 IM 消息来自终端模拟器或本地回环服务。
+4. **baseline**：打开 `course/baseline`，固定输入“列出当前目录并确认是否修改”得到纯文本回答。**plugin approval**：打开 `course/echo`，查看 `local-im` 送来的同一句话、工具调用，以及模拟用户回答“允许”后的结果。**failure isolation**：脚本已发送 `/fail`，随后禁用 agent 插件并加载一份故意损坏的清单。在看板状态页查看诊断，内置基线仍能回复。最后一行打印三个阶段共用的核心二进制 SHA-256，并验证它保持一致。
+5. 在同一目录核对两套黑盒契约：
+
+   ```sh
+   bun scripts/plugin-conformance.ts --check-docs
+   bun scripts/plugin-conformance.ts --manifest examples/plugins/echo-agent/plugin.json
+   bun scripts/plugin-conformance.ts --manifest examples/plugins/local-im/plugin.json
+   ```
+
+现场演示测试捉错时，用 `git worktree add --detach ../rhodium-bug-demo HEAD` 建一个临时副本，进入后执行 `bun install --frozen-lockfile`。在 `src/plugin-loader.ts` 中把 `compareSemver(manifest.minRhodium, opts.coreVersion) > 0` 的比较符改成 `< 0`，执行 `bun --config=bunfig.ci.toml test test/plugin-loader.test.ts`，观察最低版本断言失败。在这个临时副本内执行 `git restore -- src/plugin-loader.ts`，重跑同一测试，断言通过。
+
+Linux 和 Windows 在提交 PR 和推送至 main 时自动检查。验证 macOS 原生进程树巡检和演示时，在 Actions 选择 **Plugin CI → Run workflow → Run only the native macOS check**。[插件规格](docs/spec/plugins.md) 列出了契约矩阵和两阶段验收内容。
+
+## 使用真实 agent 的 Linux 服务
 
 请前往 GitHub Releases 页面，下载最新的安装包 `rhodium-<版本>-linux-x86_64.tar.xz` 或 `rhodium-<版本>-linux-arm64.tar.xz`。
 

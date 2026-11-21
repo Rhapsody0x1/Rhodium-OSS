@@ -1,0 +1,6 @@
+{
+  "askText": "[ask]",
+  "deliveredText": "allowed",
+  "interruptText": "[ask]",
+  "failureText": "/fail"
+}

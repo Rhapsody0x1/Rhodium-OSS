@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createPrivateWindows, windows } from "../src/windows";
 import { join, resolve } from "node:path";
 import {
   AGENTS,
@@ -34,7 +35,10 @@ const dirs: string[] = [];
 function tempDir(prefix = "rhodium-plugin-loader-"): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   dirs.push(dir);
-  return dir;
+  if (!windows) return dir;
+  const privateDir = join(dir, "private");
+  createPrivateWindows([privateDir]);
+  return privateDir;
 }
 
 afterEach(() => {
@@ -108,7 +112,7 @@ describe("config.ts plugin support", () => {
     writeFileSync(
       cfgPath,
       [
-        `stateDir = "${join(root, "state")}"`,
+        `stateDir = ${JSON.stringify(join(root, "state"))}`,
         "",
         "[programs]",
         `dsh = "custom-dsh"`,
@@ -120,7 +124,7 @@ describe("config.ts plugin support", () => {
         `fixture = "./fixtures/dsh.jsonl"`,
         "",
         "[plugins.weixin]",
-        `path = "${join(root, "missing-weixin-not-read-by-loadConfig")}"`,
+        `path = ${JSON.stringify(join(root, "missing-weixin-not-read-by-loadConfig"))}`,
         `enabled = false`,
         "",
         "[bots.my-weixin]",
@@ -156,7 +160,7 @@ describe("config.ts plugin support", () => {
     const okPiPath = join(root, "claude-dir-pi.toml");
     writeFileSync(
       okPiPath,
-      `stateDir = "${join(root, "state-pi")}"\n[programs]\npi = "/opt/Claude Tools/pi"\n`,
+      `stateDir = ${JSON.stringify(join(root, "state-pi"))}\n[programs]\npi = "/opt/Claude Tools/pi"\n`,
       { mode: 0o600 },
     );
     expect(loadConfig(okPiPath).programs.pi).toBe("/opt/Claude Tools/pi");
@@ -185,7 +189,7 @@ describe("config.ts plugin support", () => {
     ];
 
     for (const c of fatalCases) {
-      const p = join(root, `${c.name.replace(/\s+/g, "-")}.toml`);
+      const p = join(root, `${c.name.replace(/[^\w-]+/g, "-")}.toml`);
       writeFileSync(p, c.toml, { mode: 0o600 });
       expect(() => loadConfig(p)).toThrow(c.match);
     }
@@ -220,16 +224,16 @@ describe("config.ts plugin support", () => {
 
     const localImPath = resolve(import.meta.dir, "../examples/plugins/local-im");
     for (const c of isolatedCases) {
-      const p = join(root, `iso-${c.name.replace(/\s+/g, "-")}.toml`);
+      const p = join(root, `iso-${c.name.replace(/[^\w-]+/g, "-")}.toml`);
       writeFileSync(
         p,
         [
-          `stateDir = "${join(root, "state")}"`,
+          `stateDir = ${JSON.stringify(join(root, "state"))}`,
           `[bots.t]`,
           `platform = "telegram"`,
           `token = "123:abc"`,
           `[plugins.local-im]`,
-          `path = "${localImPath}"`,
+          `path = ${JSON.stringify(localImPath)}`,
           c.toml,
         ].join("\n"),
         { mode: 0o600 },
@@ -381,12 +385,12 @@ describe("plugin-loader.ts manifest validation and failure isolation", () => {
     const missingBinDir = writePluginDir(
       root,
       "missing-bin",
-      dshManifest({ id: "missing-bin", command: ["definitely-missing-rhodium-plugin-bin-xyz"] }),
+      dshManifest({ id: "missing-bin", commandByPlatform: undefined, command: ["definitely-missing-rhodium-plugin-bin-xyz"] }),
     );
     const missingRelBinDir = writePluginDir(
       root,
       "missing-rel",
-      dshManifest({ id: "missing-rel", command: ["${PLUGIN_DIR}/bin/not-there"] }),
+      dshManifest({ id: "missing-rel", commandByPlatform: undefined, command: ["${PLUGIN_DIR}/bin/not-there"] }),
     );
     const agentSecretDir = writePluginDir(
       root,
@@ -491,7 +495,7 @@ describe("plugin-loader.ts manifest validation and failure isolation", () => {
 describe("commands, router, and transcript guards for plugin agents", () => {
   function routerCtx(root: string, plugins: ReturnType<typeof loadPlugins>): Ctx {
     const cfgPath = join(root, "config.toml");
-    writeFileSync(cfgPath, `stateDir = "${join(root, "state")}"\n`, { mode: 0o600 });
+    writeFileSync(cfgPath, `stateDir = ${JSON.stringify(join(root, "state"))}\n`, { mode: 0o600 });
     return {
       now: Date.parse("2026-11-21T10:00:00Z"),
       newId: () => crypto.randomUUID(),
@@ -799,11 +803,11 @@ describe("commands, router, and transcript guards for plugin agents", () => {
     writeFileSync(
       cfgPath,
       [
-        `stateDir = "${join(root, "state")}"`,
+        `stateDir = ${JSON.stringify(join(root, "state"))}`,
         `[plugins.echo-agent]`,
-        `path = "${echoDir}"`,
+        `path = ${JSON.stringify(echoDir)}`,
         `[plugins.local-im]`,
-        `path = "${localImDir}"`,
+        `path = ${JSON.stringify(localImDir)}`,
         `[programs]`,
         `local-im = "foo"`,
         `[bots.x]`,

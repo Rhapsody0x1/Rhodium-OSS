@@ -10,7 +10,7 @@ import type { Kept } from "../src/contracts";
 const caps: Capabilities = { progress: "append", buttons: false, sendLimit: { kind: "rate", perChatPerSecond: 1 },
   maxTextLength: 2000, maxFileBytes: { image: 1000, file: 1000 }, menu: { scope: "global", maxItems: 0 }, markdown: null };
 
-function fixture(code: string, opts: { rpcMs?: number; botFailures?: number } = {}) {
+function fixture(code: string, opts: { rpcMs?: number; botFailures?: number } = {}, viaCmd = false) {
   const dir = mkdtempSync(join(tmpdir(), "rhodium-test-im "));
   const file = join(dir, "im.ts");
   writeFileSync(file, `
@@ -24,7 +24,11 @@ function fixture(code: string, opts: { rpcMs?: number; botFailures?: number } = 
     }`);
   const saved = new Map<string, string>();
   const kept: Kept = { get: k => saved.get(k), set: (k, v) => { if (v === undefined) saved.delete(k); else saved.set(k, v); }, event() {} };
-  const command = [process.execPath, file];
+  let command = [process.execPath, file];
+  if (viaCmd && process.platform === "win32") {
+    writeFileSync(join(dir, "launch.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0im.ts"\r\n`);
+    command = [process.env.ComSpec ?? join(process.env.SystemRoot!, "System32/cmd.exe"), "/d", "/c", "launch.cmd"];
+  }
   const adapter = new PluginImAdapter({
     id: "bot1", name: "local", plugin: { id: "test-im", dir, command, manifest: {
       id: "test-im", kind: "im", manifestVersion: 1, protocol: "rh-im/1", name: "Test IM", label: "Test IM",
@@ -43,15 +47,15 @@ test("each plugin bot negotiates before sending and keeps its process id only wh
       send({id:m.id, result:{proto:1, capabilities:{...caps,maxTextLength:800}}});
     }
     if (m.method === "send") send({id:m.id,result:{status:"sent",messageId:m.params.chat + "-" + m.params.message.text}});
-  `);
+  `, {}, true);
   try {
-    const sent = f.adapter.send("owner", { text: "hello" });
+    const sent = f.adapter.send("owner", { text: "你好" });
     const connected = Promise.withResolvers<boolean>();
     f.adapter.messages(up => connected.resolve(up), f.stop.signal);
     expect(await connected.promise).toBe(true);
     expect(f.adapter.pid).toBeGreaterThan(0);
     expect(f.adapter.capabilities.maxTextLength).toBe(800);
-    expect(await sent).toEqual({ status: "sent", messageId: "owner-hello" });
+    expect(await sent).toEqual({ status: "sent", messageId: "owner-你好" });
   } finally { await f.close(); }
   expect(f.adapter.pid).toBeNull();
 });

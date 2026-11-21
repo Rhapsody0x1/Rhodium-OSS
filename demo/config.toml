@@ -1,0 +1,21 @@
+# The launcher supplies private state directories, binary paths and available loopback ports.
+[programs]
+claude = "rhodium-demo-baseline"
+codex = "rhodium-demo-unavailable"
+pi = "rhodium-demo-unavailable"
+herdr = "rhodium-demo-unavailable"
+
+[herdr]
+session = "rhodium-test"
+
+[board]
+bind = "127.0.0.1"
+port = 7800
+auth = "none"
+
+[bots.terminal]
+platform = "fake"
+like = "qq"
+socket = "127.0.0.1:17801"
+owner = "demo-owner"
+target = "course/baseline"
