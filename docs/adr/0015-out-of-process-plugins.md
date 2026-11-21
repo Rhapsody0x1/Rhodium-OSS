@@ -39,7 +39,7 @@ flowchart TD
   - IM 插件只需要持有一个 Bot 的连接并翻译消息与能力，进程崩溃后由核心按指数退避自动拉起，连续失败触发熔断。
 - **公开接口约定就是清单格式和两套 stdio 协议，与语言无关。**
   - 插件可以使用 TypeScript/Bun、Node.js、Python、Go、Rust 或任何能读写标准输入输出的语言编写，并各自独立管理依赖与打包。
-  - 核心额外提供零内部依赖的 TypeScript 契约包，方便 JS/TS 插件作者复用类型声明与清单校验。
+  - 核心额外提供零内部依赖的 TypeScript 契约与运行时 SDK（`packages/plugin-sdk/`），暴露 `AgentPlugin` / `ImPlugin` 接口与 `runAgentPlugin` / `runImPlugin` 运行时辅助，统一封装按行 JSON 读写、握手、`ready`/`fatal`、重复 `answer` 去重、错误转报与退出清理，让 JS/TS 插件作者只需实现一个类即可接入独立进程架构。
 
 ## 2. 正面回应同进程插件的四项风险
 
