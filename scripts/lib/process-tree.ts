@@ -1,4 +1,4 @@
-// Inspect PID relationships only. A plugin's arguments and environment stay in the doctor's per-process check.
+// Inspect process ancestry. A plugin's arguments and environment stay in the doctor's per-process check.
 import { dlopen } from "bun:ffi";
 import { readdirSync, readFileSync } from "node:fs";
 
@@ -27,6 +27,8 @@ const openSnapshot = () => dlopen("kernel32.dll", {
   CreateToolhelp32Snapshot: { args: ["u32", "u32"], returns: "i64" },
   Process32FirstW: { args: ["i64", "ptr"], returns: "i32" },
   Process32NextW: { args: ["i64", "ptr"], returns: "i32" },
+  OpenProcess: { args: ["u32", "i32", "u32"], returns: "i64" },
+  GetProcessTimes: { args: ["i64", "ptr", "ptr", "ptr", "ptr"], returns: "i32" },
   CloseHandle: { args: ["i64"], returns: "i32" },
 });
 let api: ReturnType<typeof openSnapshot>;
@@ -45,9 +47,23 @@ function* windowsParents(): Iterable<Parent> {
   } finally { k.CloseHandle(snapshot); }
 }
 
+function windowsStart(pid: number): bigint | undefined {
+  const k = (api ??= openSnapshot()).symbols;
+  const handle = k.OpenProcess(0x1000, 0, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+  if (!handle) return undefined;
+  try {
+    const times = Buffer.alloc(32);
+    if (k.GetProcessTimes(handle, times, times.subarray(8), times.subarray(16), times.subarray(24))) return times.readBigUInt64LE();
+  } finally { k.CloseHandle(handle); }
+}
+
 export function descendantPids(rootPid: number): number[] {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
   const parents = process.platform === "win32" ? windowsParents() : process.platform === "darwin" ? macParents() : linuxParents();
+  return descendantsIn(rootPid, parents, process.platform === "win32" ? windowsStart : undefined);
+}
+
+export function descendantsIn(rootPid: number, parents: Iterable<Parent>, startedAt?: (pid: number) => bigint | undefined): number[] {
   const children = new Map<number, number[]>();
   for (const [pid, ppid] of parents) {
     const list = children.get(ppid);
@@ -55,6 +71,16 @@ export function descendantPids(rootPid: number): number[] {
     else children.set(ppid, [pid]);
   }
   const tree = new Set([rootPid]);
-  for (const pid of tree) for (const child of children.get(pid) ?? []) tree.add(child);
+  for (const pid of tree) {
+    const list = children.get(pid);
+    if (!list) continue;
+    const parentStart = startedAt?.(pid);
+    for (const child of list) {
+      // Windows retains the original parent PID after exit. Reject an edge only if its timestamps disprove it.
+      const childStart = startedAt?.(child);
+      if (parentStart !== undefined && childStart !== undefined && childStart < parentStart) continue;
+      tree.add(child);
+    }
+  }
   return [...tree];
 }
