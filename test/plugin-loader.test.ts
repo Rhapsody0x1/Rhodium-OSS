@@ -28,7 +28,6 @@ import { pluginFindings } from "../src/doctor";
 import { AT_BOARD, route, type Ctx, type Decision, type State } from "../src/router";
 import type { AgentInput, Slot } from "../src/store";
 import { hasTranscript, listConversations, transcriptFile } from "../src/transcript";
-import { newInstance, until } from "./instance";
 
 const dirs: string[] = [];
 
@@ -835,24 +834,19 @@ describe("commands, router, and transcript guards for plugin agents", () => {
     });
   });
 
-  test("starting a plugin agent slot before PR 3 driver does not crash the daemon and leaves built-in slots functional", async () => {
-    const echoDir = resolve(import.meta.dir, "../examples/plugins/echo-agent");
-    const rhodium = newInstance({
-      toml: `\n[plugins.echo-agent]\npath = "${echoDir}"\n`,
-    });
-    try {
-      await rhodium.start();
-      await rhodium.slots("main");
-      await rhodium.ok("new", "w/plug", "--agent", "echo-agent");
-      await rhodium.ok("send", "w/plug", "test");
-      await until(async () => (await rhodium.state("w/plug")) === "崩溃", 10_000);
-      const ls = await rhodium.ok("ls");
-      expect(ls).toContain("w/plug");
-      expect(ls).toContain("w/main");
-      await rhodium.ok("send", "w/main", "hello builtin");
-      await until(async () => rhodium.claude.runs().length === 1, 10_000);
-    } finally {
-      await rhodium.cleanup();
+  test("a live plugin's negotiated capabilities and fatal exit govern routing", () => {
+    registerAgentPlugin("demo", { name: "demo", statusName: "demo", steer: true, supportedCommands: ["model"] });
+    const ctx = { ...routerCtx(tempDir(), loadPlugins({})), pluginCaps: () => ({ steer: false, commands: [] }) };
+    const state = makeState("demo", { state: "running", turnChat: "ch1" });
+    const im = (text: string) => route(state, { kind: "im", message: { bot: "b1", chat: "u1", sender: "u1", messageId: "m", at: ctx.now, text } }, ctx);
+    expect(im("later").writes).toContainEqual(expect.objectContaining({ table: "agentInput", row: expect.objectContaining({ queueReason: "after_turn" }) }));
+    expect(outboundTexts(im("/model")).join(" ")).toContain("该 agent 不支持此命令");
+    for (const background of [true, false]) {
+      const end = route(state, { kind: "agent", event: { type: "turn_end", proc: 1, conv: "c1", ...(background && { background: true }) } }, ctx);
+      expect(end.writes).toContainEqual({ op: "update", table: "conversation", where: { id: "c1" }, patch: { background: background ? 1 : 0 } });
     }
-  }, 20_000);
+    const died = route(state, { kind: "agent", event: { type: "exit", from: "agent", conv: "c1", proc: 1, code: 1, signal: null, why: "bad config", retryable: false } }, ctx);
+    expect(slotPatch(died).state).toBe("off");
+    expect(died.effects.some((e) => e.kind === "start")).toBe(false);
+  });
 });

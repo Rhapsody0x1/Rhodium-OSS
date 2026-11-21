@@ -29,7 +29,7 @@ import { BOARD, chatName, IN_TUI, menus, route, type Ctx, type Decision, type Ef
 import { createRunner } from "./runner";
 import { B32, MODEL_INFO, namesOf, openStore, setMeta, ulid, untaken, type AgentInput, type EventSource, type Outbound, type Store, type Tx } from "./store";
 import { makeTelegram } from "./telegram";
-import { recentMessages } from "./transcript";
+import { conversationFile, recentInFile } from "./transcript";
 import { ancestors, createTui } from "./tui";
 import { watchMemory } from "./memory";
 
@@ -86,6 +86,7 @@ export function createLoop(opts: {
   stepped?: () => void; // after each batch of inputs has committed and its effects are handed off
   pictures?: (conversation: string) => void; // the rows of the local pictures in what its agent said are written (architecture §8.3)
   plugins?: PluginRegistry;
+  pluginCaps?: Ctx["pluginCaps"];
 }): Loop {
   const { store, config, perform, capabilities = () => undefined, stepped = () => {}, retarget = () => null, dropBot = () => {}, front = () => false, plugins } = opts;
   const queue: Batch[] = [];
@@ -200,7 +201,7 @@ export function createLoop(opts: {
             catch (error) { return (error as Error).message; }
           };
           const inboundOf = (chat: string) => tx.find("inbound", { chat }).map((i) => i.id);
-          const d: Decision = route(state, input, { now: Date.now(), newId: ulid, newPairCode, config, capabilities, keepFile: keep, diskFree, herdr, tuiUnavailable, front, retarget, dropBot, inboundOf, plugins });
+          const d: Decision = route(state, input, { now: Date.now(), newId: ulid, newPairCode, config, capabilities, keepFile: keep, diskFree, herdr, tuiUnavailable, front, retarget, dropBot, inboundOf, plugins, pluginCaps: opts.pluginCaps });
           for (const w of d.writes) apply(tx, w);
           for (const e of d.events) tx.append(e);
           // A message of the agent's is whole: its local pictures are checked and kept now, as rh send's
@@ -681,6 +682,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     config,
     capabilities,
     plugins,
+    pluginCaps: (conversation) => runner.pluginCaps(conversation),
     front: () => inFront(fronts),
     stepped: () => syncMenus(),
     pictures: (conversation) => hearing.forEach((hear) => hear(conversation, { type: "pictures" })),
@@ -742,7 +744,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
         case "trace":
           return answer(e.id, trace(store, e.message, config));
         case "read":
-          return void (e.session ? recentMessages(e.dir, e.agent, e.session, READ_COUNT, READ_MAX) : Promise.resolve([])).then(
+          return void conversationFile(config.stateDir, e.dir, { id: e.conversation, agent: e.agent, sessionId: e.session }).then((file) => recentInFile(file, READ_COUNT, READ_MAX)).then(
             (talk) => {
               const lines = talk.map((m) => `${m.role === "user" ? "收到" : "回复"}：${m.text}`);
               const tail = lines.length ? [`最近的对话（最多 ${READ_COUNT} 条，早的在前）：`, ...lines] : ["还没有对话记录。"];
@@ -953,6 +955,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
     ready: recovered.promise,
     deaf,
     plugins,
+    pluginPids: () => runner.pluginPids(),
     notify(text) {
       log("rh doctor found problems", { report: text }); // also for an instance with no main chat
       loop.enqueue({ kind: "notice", text: `rh doctor 自检：\n${text}` });
@@ -960,6 +963,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
   });
   const tui = createTui({ cfg: config, store, loop, capabilities }, checkPi);
   const runner = createRunner({
+    plugins,
     cfg: config,
     store,
     boot,

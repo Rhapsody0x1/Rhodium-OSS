@@ -51,7 +51,7 @@ export type AgentEvent = { conv: string; proc: number } & (
   // stopped: no agent started, as rh stop (1) or the emergency stop (2) ended that wait.
   // stderr: the last lines the agent process, or its holder, wrote to err.log, if any (runner's errTail).
   // why: why it did not start, in your words, where its driver knows (driver.info.why).
-  | { type: "exit"; code: number | null; signal: string | null; from: "agent" | "holder"; busy?: string; missing?: string; stopped?: 1 | 2; stderr?: string; why?: string }
+  | { type: "exit"; code: number | null; signal: string | null; from: "agent" | "holder"; busy?: string; missing?: string; stopped?: 1 | 2; stderr?: string; why?: string; retryable?: boolean }
   // A common command the driver ran, for the reply to the IM message (inbound) in chat that asked for it.
   // panel: how its reply shows, as the command effect had it.
   | { type: "command_result"; command: CommonCommand; chat: string; inbound: string; result: CommandResult | { error: string }; panel?: PanelUi }
@@ -179,7 +179,7 @@ export interface AgentDriver {
    *  conversation, as another process has it open (Codex's writer lock, architecture §6.4), so its exit
    *  is the exit's busy, no crash. why: why the process did not start, or gave up starting, in words
    *  for you: its exit's why. Both are of the last launch or attach. */
-  readonly info: { readonly session: string | null; readonly selfStarted?: boolean | null; readonly busy?: string; readonly why?: string };
+  readonly info: { readonly session: string | null; readonly selfStarted?: boolean | null; readonly busy?: string; readonly why?: string; readonly retryable?: boolean };
   /** The session a new process was launched with is the agent's once an input is written to it, as
    *  its output never names it (pi, architecture §6.3). */
   readonly sessionOnWrite?: boolean;

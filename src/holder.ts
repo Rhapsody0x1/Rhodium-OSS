@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import type { Config } from "./config";
 import type { AgentLink, SpawnSpec } from "./contracts";
 import { decodeHold, encodeHold, HOLD_PROTO, type HoldMessage } from "./hold";
-import type { Store } from "./store";
+import { ulid, type Store } from "./store";
 
 /** Where a conversation's holder keeps its files (architecture §4.3), and its unit. */
 export function holderPaths(cfg: Config, conversation: string) {
@@ -81,7 +81,7 @@ export async function launchHolder(o: {
   // Recorded before it starts, so there is never a holder rhodium does not know about.
   store.tx((tx) => {
     const [row] = tx.find("holder", { conversation });
-    const set = { unit: p.unit, proto: HOLD_PROTO, stopRequested: 0 as const, exited: 0 as const, outStart: size, errStart };
+    const set = { runId: ulid(), unit: p.unit, proto: HOLD_PROTO, stopRequested: 0 as const, exited: 0 as const, outStart: size, errStart };
     if (!row) tx.insert("holder", { conversation, ...set, outOffset: 0 });
     else tx.update("holder", { conversation }, { ...set, outOffset: row.outOffset > size ? 0 : row.outOffset });
   });
@@ -165,6 +165,7 @@ export type HolderEvents = {
 };
 
 export type HolderLink = AgentLink & {
+  readonly agentPid: number | null;
   readonly hello: Extract<HoldMessage, { type: "hello_ok" }>;
   /** Settles once this connection gets the agent's exit; a dropped connection leaves it pending. */
   exited: Promise<Exit>;
@@ -191,6 +192,7 @@ export async function connectHolder(
     const timer = deadline === undefined ? undefined : setTimeout(() => s.destroy(new Error("holder handshake timed out")), Math.max(1, deadline - Date.now()));
     const acks = new Map<string, Waiter>();
     let started: Waiter | undefined;
+    let pid: number | null = null;
     let link: HolderLink | undefined;
     let agentExited!: (e: Exit) => void;
     const exited = new Promise<Exit>((r) => (agentExited = r));
@@ -204,9 +206,11 @@ export async function connectHolder(
 
     const handle = (m: HoldMessage) => {
       if (m.type === "hello_ok") {
+        pid = m.pid;
         clearTimeout(timer);
         link = {
           hello: m,
+          get agentPid() { return pid; },
           start: (spec) => wait((w) => (started = w), { type: "start", ...spec }),
           write: (id, line) => wait((w) => acks.set(id, w), { type: "write", id, line }),
           eof: () => send({ type: "eof" }),
@@ -216,6 +220,7 @@ export async function connectHolder(
         };
         resolve(link);
       } else if (m.type === "started") {
+        pid = m.pid;
         started?.resolve(m.pid);
       } else if (m.type === "out") {
         on.out(m.pos, Buffer.from(m.data, "base64"));

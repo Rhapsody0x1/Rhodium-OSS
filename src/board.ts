@@ -35,7 +35,7 @@ import { splitSource, withoutSource } from "./prompt";
 import { paneSession } from "./tui";
 import { codeRef } from "./local";
 import { checkLocal, localRefs, NEAR, readPicture, rowFor } from "./reply-images";
-import { conversationsIn, describe, findConversations, fullText, importable, lastSaid, listed, messagePage, meterIn, transcriptFile, yoursSaid, type Block as Read, type Hit, type Listed, type Local } from "./transcript";
+import { conversationFile, conversationsIn, describe, findConversations, fullText, importable, lastSaid, listed, messagePage, meterIn, transcriptFile, yoursSaid, type Block as Read, type Hit, type Listed, type Local } from "./transcript";
 
 /** The page and its files as Vite built them: embedded in the built binary, and in web/dist when
  *  run from source. */
@@ -150,7 +150,7 @@ async function board(store: Store, cfg: Config, now: number): Promise<BoardData>
     await Promise.all(
       slots.map(async (s) => {
         const c = conversations.find((c) => c.id === s.conversation);
-        return [s.id, c?.sessionId ? await lastIn(await transcriptFile(s.dir, c.agent, c.sessionId)) : null] as const;
+        return [s.id, await lastIn(await conversationFile(cfg.stateDir, s.dir, c))] as const;
       }),
     ),
   );
@@ -521,7 +521,7 @@ const count = (v: string | null) => (v !== null && /^\d{1,15}$/.test(v) ? Number
 
 /** The slot's current conversation, or with conversation that one, and its transcript file, if it
  *  has them; undefined for no such slot or conversation. */
-async function current(store: Store, slot: string, conversation?: string): Promise<{ slot: string; conversation: string | null; file: string | null; dir: string } | undefined> {
+async function current(store: Store, cfg: Config, slot: string, conversation?: string): Promise<{ slot: string; conversation: string | null; file: string | null; dir: string } | undefined> {
   const found = store.tx((tx) => {
     if (conversation !== undefined) {
       const c = tx.get("conversation", conversation);
@@ -534,7 +534,7 @@ async function current(store: Store, slot: string, conversation?: string): Promi
   if (!found) return undefined;
   const { slot: s, conv } = found;
   // ponytail: looks in the slot's directory now; a conversation begun before rh set dir moved it is not found there.
-  return { slot: s.id, conversation: conv?.id ?? null, file: conv?.sessionId ? await transcriptFile(s.dir, conv.agent, conv.sessionId) : null, dir: s.dir };
+  return { slot: s.id, conversation: conv?.id ?? null, file: await conversationFile(cfg.stateDir, s.dir, conv), dir: s.dir };
 }
 
 /** Who your message came through (spec web-topology): the platform, the bot's name, the bot's avatar
@@ -716,7 +716,7 @@ async function messages(store: Store, cfg: Config, q: URLSearchParams): Promise<
   const after = q.get("after") === null ? null : count(q.get("after"));
   const before = q.get("before") === null ? Infinity : count(q.get("before"));
   if (Number.isNaN(after) || Number.isNaN(before)) return new Response("before 或 after 不对。\n", { status: 400 });
-  const found = await current(store, q.get("slot") ?? "", q.get("conversation") ?? undefined);
+  const found = await current(store, cfg, q.get("slot") ?? "", q.get("conversation") ?? undefined);
   if (!found) return new Response(q.has("conversation") ? "没有这段对话。\n" : "没有这个槽位。\n", { status: 404 });
   const { slot, conversation, file, dir } = found;
   const media = join(cfg.stateDir, "media");
@@ -730,10 +730,10 @@ export type FullData = { text: string };
 
 /** GET /api/full?conversation=<id>&at=<block's at>: the whole of a block a page gave only the start
  *  of. By conversation, not slot: a page of one the slot has left still has it. */
-async function full(store: Store, q: URLSearchParams): Promise<Response> {
+async function full(store: Store, cfg: Config, q: URLSearchParams): Promise<Response> {
   const at = q.get("at") ?? "";
   if (!/^\d{1,15}\.\d{1,6}$/.test(at)) return new Response("at 不对。\n", { status: 400 });
-  const file = (await current(store, "", q.get("conversation") ?? ""))?.file;
+  const file = (await current(store, cfg, "", q.get("conversation") ?? ""))?.file;
   const text = file && (await fullText(file, at));
   if (typeof text !== "string") return new Response("没有这一块。\n", { status: 404 });
   const data: FullData = { text };
@@ -923,11 +923,11 @@ function heldText(req: Request, store: Store, id: string): Response {
 export type Episode = { id: string; short: string | null; agent: AgentKind; startedAt: number; lastWrite: number | null; title: string | null; current: boolean };
 
 /** The slot's timeline: its conversations, last active (written to, or started) first. */
-async function timeline(slot: Slot, conversations: Conversation[]): Promise<Episode[]> {
+async function timeline(cfg: Config, slot: Slot, conversations: Conversation[]): Promise<Episode[]> {
   const episodes = await Promise.all(
     conversations.map(async (c) => {
-      const file = c.sessionId ? await transcriptFile(slot.dir, c.agent, c.sessionId) : null;
-      const found = file ? await readOnce("title", file, (f) => describe(f, c.agent, c.sessionId!)).catch(() => null) : null;
+      const file = await conversationFile(cfg.stateDir, slot.dir, c);
+      const found = file ? await readOnce("title", file, (f) => describe(f, c.agent, c.sessionId ?? c.id)).catch(() => null) : null;
       return { id: c.id, short: c.sessionId?.slice(0, 8) ?? null, agent: c.agent, startedAt: c.startedAt, lastWrite: found?.mtime ?? null, title: found?.value.title || null, current: c.id === slot.conversation };
     }),
   );
@@ -941,7 +941,7 @@ const HISTORY_FOR = 1000;
 /** GET /api/history?slot=<id>: what you said in the slot, newest first, the same twice in a row once,
  *  for the page's ↑ (architecture §7.10): from its current conversation back along its timeline. The
  *  board's own page alone, as for /api/dirs: it is what you said (architecture §11). */
-async function history(req: Request, store: Store, id: string): Promise<Response> {
+async function history(req: Request, store: Store, cfg: Config, id: string): Promise<Response> {
   if (!ownPage(req)) return new Response("只认看板自己的页面发来的请求。\n", { status: 403 });
   const found = store.tx((tx) => {
     const slot = tx.get("slot", id);
@@ -949,13 +949,13 @@ async function history(req: Request, store: Store, id: string): Promise<Response
   });
   if (!found) return new Response("没有这个槽位。\n", { status: 404 });
   const { slot, conversations } = found;
-  const episodes = (await timeline(slot, conversations)).sort((a, b) => Number(b.current) - Number(a.current));
+  const episodes = (await timeline(cfg, slot, conversations)).sort((a, b) => Number(b.current) - Number(a.current));
   const said: string[] = [];
   const take = (words: string) => (said.at(-1) === words || said.push(words), said.length < HISTORY);
   const deadline = Date.now() + HISTORY_FOR;
   for (const e of episodes) {
     const c = conversations.find((c) => c.id === e.id)!;
-    const file = c.sessionId ? await transcriptFile(slot.dir, c.agent, c.sessionId) : null;
+    const file = await conversationFile(cfg.stateDir, slot.dir, c);
     if (file && !(await yoursSaid(file, take, deadline).catch(() => true))) break;
   }
   return Response.json({ said }, { headers: { "cache-control": "no-store" } });
@@ -968,7 +968,7 @@ const GONE_FOR = 10_000;
 /** GET /api/slot?id=<id>: the slot (product §7) and its timeline; its events are on /api/slot-events.
  *  A headless slot also has its process. */
 async function slotDetail(store: Store, cfg: Config, id: string, alive: BoardMeter["alive"], hearing: Set<Hear>): Promise<Response> {
-  await terminalMeter(store, id, hearing);
+  await terminalMeter(store, cfg, id, hearing);
   const detail = store.tx((tx) => {
     const s = tx.get("slot", id);
     if (!s) return null;
@@ -1010,19 +1010,19 @@ async function slotDetail(store: Store, cfg: Config, id: string, alive: BoardMet
   });
   if (!detail) return new Response("没有这个槽位。\n", { status: 404 });
   const { conversation, slot, conversations, ...view } = detail;
-  const data: SlotData = { ...view, process: view.mode === "headless" ? await processOf(store, cfg, conversation) : null, timeline: await timeline(slot, conversations), commands: commandsFor(view.agent) };
+  const data: SlotData = { ...view, process: view.mode === "headless" ? await processOf(store, cfg, conversation) : null, timeline: await timeline(cfg, slot, conversations), commands: commandsFor(view.agent) };
   return Response.json(data, { headers: { "cache-control": "no-store" } });
 }
 
 /** A slot in the terminal has no driver to ask: what its transcript says of the context, and Codex's of
  *  the quota, is taken in (architecture §7.11), read again only once the file changes; hearing tells
  *  every stream when it records anything. A transcript that cannot be read only leaves what was heard. */
-async function terminalMeter(store: Store, slot: string, hearing: Set<Hear>): Promise<void> {
+async function terminalMeter(store: Store, cfg: Config, slot: string, hearing: Set<Hear>): Promise<void> {
   const conv = store.tx((tx) => {
     const s = tx.get("slot", slot);
     return s?.mode === "tui" && s.conversation ? tx.get("conversation", s.conversation) : null;
   });
-  const file = conv?.sessionId ? await current(store, slot).then((f) => f?.file ?? null) : null;
+  const file = conv?.sessionId ? await current(store, cfg, slot).then((f) => f?.file ?? null) : null;
   const found = file && (await readOnce(`meter ${conv!.agent}`, file, (f) => meterIn(f, conv!.agent)).catch(() => null));
   if (found && store.tx((tx) => fromTranscript(tx, tx.get("conversation", conv!.id)!, found.value))) hearing.forEach((hear) => hear(conv!.id, { type: "meter", agent: conv!.agent }));
 }
@@ -1157,10 +1157,10 @@ async function media(req: Request, dir: string, q: URLSearchParams): Promise<Res
  *  directory (checkLocal), no code reference, or 404. The board's one path that reads a file by a path
  *  the request brings: a regular file in the slot's directory or /tmp, always as a download with no
  *  type guessed, so never a page of the board's, and never kept by the browser. */
-async function file(req: Request, store: Store, q: URLSearchParams): Promise<Response> {
+async function file(req: Request, store: Store, cfg: Config, q: URLSearchParams): Promise<Response> {
   const answer = (body: string | Blob, status: number, headers: Record<string, string> = {}) => new Response(body, { status, headers: { "x-content-type-options": "nosniff", "cache-control": "no-store", ...headers } });
   if (!ownPage(req)) return answer("只认看板自己的页面发来的请求。\n", 403);
-  const [found, path] = [await current(store, "", q.get("conversation") ?? ""), q.get("path") ?? ""];
+  const [found, path] = [await current(store, cfg, "", q.get("conversation") ?? ""), q.get("path") ?? ""];
   const ok = found && path && !codeRef(path) ? checkLocal(found.dir, path, false) : null;
   if (!ok || "why" in ok) return answer("文件不在了，或者不能下载。\n", 404);
   return answer(Bun.file(ok.real), 200, { "content-type": "application/octet-stream", "content-disposition": "attachment" });
@@ -1201,7 +1201,7 @@ export type Hear = (conversation: string, e: Extract<AgentEvent, { type: "text_d
  *  hear tells the streams following the slot what its agent writes: delta, a piece of text, and said,
  *  once the message is whole; exit, its process ended; pictures, the checks of the local pictures in
  *  what it said are in, for the page to read their blocks again. tell takes them as server-sent events. */
-function transcripts(store: Store) {
+function transcripts(store: Store, cfg: Config) {
   const followed = new Map<string, { streams: Set<(event: string) => void>; timer: Timer }>();
   const follow = (slot: string, tell: (event: string) => void): (() => void) => {
     let f = followed.get(slot);
@@ -1209,7 +1209,7 @@ function transcripts(store: Store) {
       const streams = new Set<(event: string) => void>();
       let last: string | undefined;
       const look = async () => {
-        const found = await current(store, slot);
+        const found = await current(store, cfg, slot);
         const now = found?.file ? `${found.file} ${Bun.file(found.file).size}` : "";
         const was = last;
         last = now;
@@ -1655,7 +1655,7 @@ export function serveBoard(
   flows?: BotFlows,
 ): { servers: Server<Term>[]; deaf: Map<string, string> } {
   const startedAt = Date.now();
-  const { follow, hear } = transcripts(store);
+  const { follow, hear } = transcripts(store, cfg);
   // Every event stream open: each hears of a meter recorded, with the agent and conversation, for a page
   // on a slot of that agent to read /api/slot again (architecture §7.11); and of a bot-making flow
   // changed, by its id alone, for a page on it to read it again (architecture §8.5.1).
@@ -1749,13 +1749,13 @@ export function serveBoard(
       case "/api/messages":
         return messages(store, cfg, url.searchParams);
       case "/api/full":
-        return full(store, url.searchParams);
+        return full(store, cfg, url.searchParams);
       case "/api/held":
         return heldText(req, store, url.searchParams.get("id") ?? "");
       case "/api/slot":
         return slotDetail(store, cfg, url.searchParams.get("id") ?? "", meter.alive, hearing);
       case "/api/history":
-        return history(req, store, url.searchParams.get("slot") ?? "");
+        return history(req, store, cfg, url.searchParams.get("slot") ?? "");
       case "/api/slot-events":
         return slotEvents(store, url.searchParams);
       // Names anywhere on the disk: the board's own page alone, as for a write.
@@ -1787,7 +1787,7 @@ export function serveBoard(
       case "/api/media":
         return media(req, join(cfg.stateDir, "media"), url.searchParams);
       case "/api/file":
-        return file(req, store, url.searchParams);
+        return file(req, store, cfg, url.searchParams);
       case "/api/terminal":
         return terminalUpgrade(req, server);
       case "/api/bots/flow":

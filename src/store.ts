@@ -151,6 +151,7 @@ export type Conversation = Row & {
 
 export type Holder = Row & {
   conversation: string;
+  runId: string | null; // one id per holder launch, shared by its reconnects
   unit: string; // systemd unit name
   proto: number; // hold/<proto>
   outOffset: number; // bytes of out.log already processed
@@ -608,6 +609,7 @@ ALTER TABLE slot ADD COLUMN memBlocked TEXT;
   `
 ALTER TABLE conversation ADD COLUMN meter TEXT;
 `,
+  `ALTER TABLE holder ADD COLUMN runId TEXT;`,
 ];
 
 /** Sets the meta row id to value, adding the row the first time. */

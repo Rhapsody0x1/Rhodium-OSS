@@ -10,7 +10,8 @@ import {
   type CommandResult,
 } from "@rhodium-oss/plugin-sdk";
 
-class EchoAgentPlugin implements AgentPlugin {
+export class EchoAgentPlugin implements AgentPlugin {
+  deliveredAnswers = 0;
   private sessionId: string | null = null;
   private delayedSession = false;
   private activeTurn = false;
@@ -36,7 +37,7 @@ class EchoAgentPlugin implements AgentPlugin {
       ctx.taken(msg.id);
       ctx.turnStart(msg.id);
 
-      const trimmed = msg.text.trim();
+      const trimmed = msg.text.replace(/^\[来自 [^\n]*\]\n/, "").trim();
       if (trimmed === "/fail") {
         throw new PluginFatalError("Simulated failure triggered by /fail", { retryable: true });
       }
@@ -44,7 +45,7 @@ class EchoAgentPlugin implements AgentPlugin {
       const toolId = `echo-tool-${msg.id}`;
       ctx.toolStart(toolId, "echo", { text: msg.text });
 
-      if (trimmed.includes("[ask]")) {
+      if (trimmed.includes("[ask]") || trimmed === "列出当前目录并确认是否修改") {
         const requestId = `ask-${msg.id}`;
         ctx.ask({
           requestId,
@@ -95,6 +96,7 @@ class EchoAgentPlugin implements AgentPlugin {
     if (!waiter) throw new Error(`Unknown ask requestId: ${requestId}`);
     this.pendingAsks.delete(requestId);
     waiter(answer);
+    this.deliveredAnswers++;
   }
 
   async interrupt(ctx: AgentContext): Promise<void> {

@@ -18,12 +18,15 @@ import { connectHolder, holderPaths, spawnHolder, unitGone, type HolderEvents, t
 import { forAgent, pictureType } from "./media";
 import { heardAt, record } from "./meter";
 import { moment } from "./panels";
+import { PluginAgentDriver } from "./plugin-agent";
+import { managedFile, PluginTranscript } from "./plugin-transcript";
+import type { PluginRegistry } from "./plugin-loader";
 import { PiDriver } from "./pi";
 import { systemPrompt, withSentAt } from "./prompt";
 import { clip } from "./render";
 import { chatOf, PASSED, sendWord, type Write } from "./router";
 import { madeAt, modelNames, setMeta, setModelNames, untaken, type AgentInput, type Conversation, type Holder, type Slot, type Store } from "./store";
-import { hasTranscript, listConversations, type Conversation as Found } from "./transcript";
+import { conversationFile, describe, hasTranscript, listConversations, type Conversation as Found } from "./transcript";
 
 /**
  * One conversation's agent as this rhodium runs it. proc counts its agent processes. session is
@@ -40,6 +43,7 @@ import { hasTranscript, listConversations, type Conversation as Found } from "./
  */
 type Live = {
   driver: AgentDriver;
+  transcript?: PluginTranscript;
   proc: number;
   link: HolderLink | null;
   delivering: boolean;
@@ -181,6 +185,7 @@ export function createRunner(o: {
   boot: number;
   loop: Loop;
   capabilities: (bot: string) => Capabilities | undefined;
+  plugins?: PluginRegistry;
   onVersion?: (version: string) => void;
   inUse: (session: string) => Promise<string | null>;
   writing?: (conversation: string, e: Extract<AgentEvent, { type: "text_delta" | "item" | "exit" }>) => void;
@@ -202,6 +207,8 @@ export function createRunner(o: {
     codex: (common) => new CodexDriver({ ...common, onModels: (names) => setMeta(store, modelNames("codex"), JSON.stringify(names)) }),
   };
 
+  const installed = (agent: AgentKind) => o.plugins?.loaded.find((p) => p.id === agent && p.manifest.kind === "agent");
+
   function liveFor(conv: Conversation): Live {
     const conversation = conv.id;
     let l = live.get(conversation);
@@ -213,8 +220,11 @@ export function createRunner(o: {
         if (e.type === "pending_asks") void deliver(conversation);
       };
       // The agent kind belongs to the conversation, so its driver never changes.
-      if (!isBuiltinAgent(conv.agent)) throw new Error(`agent plugin driver not available for ${conv.agent}`);
-      const driver = DRIVERS[conv.agent]({ conv: conversation, boot, emit, stopGrace: cfg.durations.stopGrace });
+      const common = { conv: conversation, boot, emit, stopGrace: cfg.durations.stopGrace };
+      const driver = isBuiltinAgent(conv.agent) ? DRIVERS[conv.agent](common) : new PluginAgentDriver({
+        ...common, kind: conv.agent, plugin: installed(conv.agent), config: cfg.plugins[conv.agent]?.config ?? {},
+        handshakeMs: cfg.durations.pluginHandshake, interruptMs: cfg.durations.pluginInterrupt,
+      });
       live.set(conversation, (l = { driver, proc: 0, link: null, delivering: false, session: null, stopping: 0, adopt: false, seen: 0, behind: false, reapply: false, waiting: false, missing: null }));
     }
     return l;
@@ -243,7 +253,7 @@ export function createRunner(o: {
     // one you switched to in the terminal, before its first message: it starts under that id
     // (architecture §6.2). pi's --session-id opens a session or starts it alike (sessionIdOpens).
     const id = conv.sessionId;
-    const session = id && (agentDef(conv.agent).sessionIdOpens || (await hasTranscript(conv.agent, id))) ? { resume: id } : { new: id ?? randomUUID() };
+    const session = id && (!isBuiltinAgent(conv.agent) || agentDef(conv.agent).sessionIdOpens || (await hasTranscript(conv.agent, id))) ? { resume: id } : { new: id ?? randomUUID() };
     me.session = session.new ?? null;
     // After a crash Claude runs the interrupted turn again by itself (architecture §4.8); deliver
     // writes it the resume prompt only if it has none. Only then: rhodium's own environment never
@@ -265,10 +275,13 @@ export function createRunner(o: {
 
   function exited(conversation: string, proc: number, code: number | null, signal: string | null, from: "agent" | "holder") {
     log("agent exited", { conversation, from, code, signal });
-    const stderr = errTail(conversation);
+    const driver = live.get(conversation)?.driver;
+    const tail = errTail(conversation);
+    const stderr = tail && driver instanceof PluginAgentDriver ? driver.redact(tail) : tail;
     // What the driver knows of why it did not start: another process has the conversation, or its own reason.
-    const { busy, why } = live.get(conversation)?.driver.info ?? {};
-    const exit = { type: "exit", code, signal, from, conv: conversation, proc, ...(stderr && { stderr }), ...(busy ? { busy } : why && { why }) } as const;
+    const unavailable = driver instanceof PluginAgentDriver && !installed(driver.kind);
+    const { busy, why, retryable } = unavailable ? { why: `插件 ${driver.kind} 未加载。`, retryable: false } : driver?.info ?? {};
+    const exit = { type: "exit", code, signal, from, conv: conversation, proc, ...(driver instanceof PluginAgentDriver && driver.interruptExpired && { stopped: 1 as const }), ...(retryable === false && { retryable }), ...(stderr && { stderr }), ...(busy ? { busy } : why && { why }) } as const;
     report(exit);
     o.writing?.(conversation, exit);
   }
@@ -303,14 +316,6 @@ export function createRunner(o: {
    */
   async function attach(conv: Conversation, seen: number, open: (me: Live, on: HolderEvents) => Promise<HolderLink | null>, from = seen) {
     const conversation = conv.id;
-    if (!isBuiltinAgent(conv.agent)) {
-      const why = `当前版本尚不支持启动 agent 插件 ${conv.agent}（将在 PR 3 接入驱动）。`;
-      log("plugin agent driver not wired yet", { conversation, agent: conv.agent });
-      const exit = { type: "exit" as const, code: null, signal: null, from: "holder" as const, why, conv: conversation, proc: 0 };
-      report(exit);
-      o.writing?.(conversation, exit);
-      return;
-    }
     const me = liveFor(conv);
     const proc = ++me.proc;
     me.seen = seen;
@@ -364,6 +369,10 @@ export function createRunner(o: {
       const link = await open(me, on);
       if (done || !link) return;
       me.link = link;
+      if (me.driver instanceof PluginAgentDriver) {
+        const holder = store.tx((tx) => tx.find("holder", { conversation })[0]!);
+        me.transcript = new PluginTranscript(managedFile(cfg.stateDir, conv.agent, conversation), holder.runId ?? holder.id);
+      }
       me.driver.attach(link, proc);
       // After a restart, what the agent took meanwhile may be in the output fed next (architecture §4.6).
       me.driver.untaken(store.tx((tx) => untaken(tx, conversation)).map((i) => i.id));
@@ -376,6 +385,10 @@ export function createRunner(o: {
       }
       for (const [pos, data] of early) feed(pos, data);
       early = null;
+      if (!isBuiltinAgent(conv.agent) && !installed(conv.agent)) {
+        await me.driver.close();
+        return;
+      }
       // What is queued stays queued for the next start.
       if (!me.stopping) return void deliver(conversation);
       // A stop that came before the launch put the holder on record found no row, or launchHolder
@@ -399,12 +412,16 @@ export function createRunner(o: {
       const conv = tx.get("conversation", slot.conversation!)!;
       return { slot, conv };
     });
+    if (!isBuiltinAgent(conv.agent) && !installed(conv.agent)) {
+      report({ type: "exit", code: null, signal: null, from: "holder", why: `插件 ${conv.agent} 未加载，无法启动。`, retryable: false, conv: conv.id, proc: 0 });
+      return;
+    }
     await attach(conv, 0, async (me, on) => {
       // Never two processes on one transcript (architecture §10.1): not while, say, you have the
       // conversation open in a terminal.
-      const busy = conv.sessionId ? await o.inUse(conv.sessionId) : null;
+      const busy = isBuiltinAgent(conv.agent) && conv.sessionId ? await o.inUse(conv.sessionId) : null;
       if (busy) return report({ type: "exit", code: null, signal: null, from: "holder", busy, conv: conv.id, proc: me.proc }), null;
-      const program = cfg.programs[conv.agent] ?? agentDef(conv.agent).program;
+      const program = installed(conv.agent)?.command[0] ?? cfg.programs[conv.agent] ?? agentDef(conv.agent).program;
       const gone = (why: { missing: string } | { stopped: 1 | 2 }) => report({ type: "exit", code: null, signal: null, from: "holder", ...why, conv: conv.id, proc: me.proc });
       for (const end = Date.now() + cfg.durations.programWait; ; ) {
         const path = locate(program, cfg.agentPath);
@@ -468,7 +485,18 @@ export function createRunner(o: {
       for (let at = 0, nl = data.indexOf(10); nl >= 0; at = nl + 1, nl = data.indexOf(10, at)) {
         const replay = pos + nl < l.seen; // processed before the restart: state only
         batch = replay ? [] : events;
-        l.driver.feed(data.subarray(at, nl + 1), proc, replay);
+        const line = data.subarray(at, nl + 1);
+        if (l.driver instanceof PluginAgentDriver) {
+          const msg = l.driver.feed(line, proc, replay);
+          if (!replay && msg?.type === "usage" && msg.contextTokens !== undefined) {
+            heard(l.driver.conv, { command: "context", usedTokens: msg.contextTokens, maxTokens: msg.maxContextTokens ?? null });
+          }
+          if (msg) l.transcript?.record(msg, pos + nl + 1, replay, (id) => {
+            const original = store.tx((tx) => tx.get("agentInput", id));
+            return original?.conversation === l.driver.conv && original.body !== null
+              ? { text: original.body, at: madeAt(original.id) } : null;
+          });
+        } else l.driver.feed(line, proc, replay);
       }
     } finally {
       batch = null;
@@ -486,7 +514,10 @@ export function createRunner(o: {
       writes.push({ op: "update", table: "conversation", where: { id: conversation }, patch: { sessionId: session } });
     }
     if (writes.length) loop.batch(events.map((event) => ({ kind: "agent", event })), writes);
-    if (events.some((e) => e.type === "turn_end")) void meter(conversation, "turn");
+    if (events.some((e) => e.type === "turn_end")) {
+      if (l.driver instanceof PluginAgentDriver) void deliver(conversation);
+      void meter(conversation, "turn");
+    }
   }
 
   /** Writes the conversation's queued inputs, oldest first, one at a time: queued, writing, then
@@ -502,7 +533,7 @@ export function createRunner(o: {
     const link = l.link;
     try {
       // Stopping, the agent would never read it: it stays queued for the start after.
-      while (!l.stopping) {
+      while (!l.stopping && (!(l.driver instanceof PluginAgentDriver) || l.driver.canSend)) {
         const input = store.tx((tx) => {
           for (;;) {
             const next = tx.find("agentInput", { conversation, status: "queued" }).find((i) => !PASSED.includes(i.queueReason));
@@ -685,8 +716,11 @@ export function createRunner(o: {
       // A stop on record before the restart, say the reap clock's at startup, is carried out now.
       me.stopping = detached ? store.tx((tx) => tx.find("holder", { conversation: conv.id })[0]?.stopRequested ?? 0) : holder.stopRequested;
       if (link.hello.pid === null) {
-        await link.start(await spawnSpec(me, slot, conv)); // the restart came between launch and start
+        if (isBuiltinAgent(conv.agent) || installed(conv.agent)) await link.start(await spawnSpec(me, slot, conv)); // restart between launch and start
       } else {
+        if (me.driver instanceof PluginAgentDriver && installed(conv.agent) && !link.hello.written.length && !link.hello.writing && link.hello.size === holder.outStart) {
+          await spawnSpec(me, slot, conv); // Restarted between starting the wrapper and writing init.
+        }
         me.adopt = !conv.sessionId;
         me.driver.adopt?.(slot.effort, Boolean(slot.approval ?? cfg.defaults.approval), slot.model);
         settle(conv.id, link.hello);
@@ -710,13 +744,9 @@ export function createRunner(o: {
    *  exit file records. Inputs still writing become unknown. */
   async function ended(conv: Conversation, holder: Holder | undefined, exit: ExitFile | null): Promise<void> {
     const conversation = conv.id;
-    if (!isBuiltinAgent(conv.agent)) {
-      const e = exit ?? { from: "holder" as const, code: null, signal: null };
-      exited(conversation, 0, e.code, e.signal, e.from);
-      return;
-    }
     const me = liveFor(conv);
     if (holder) {
+      if (me.driver instanceof PluginAgentDriver) me.transcript = new PluginTranscript(managedFile(cfg.stateDir, conv.agent, conversation), holder.runId ?? holder.id);
       me.seen = holder.outOffset;
       me.adopt = !conv.sessionId; // its first input may have been acked while no rhodium was there
       me.driver.untaken(store.tx((tx) => untaken(tx, conversation)).map((i) => i.id));
@@ -745,7 +775,13 @@ export function createRunner(o: {
       return { slot, timeline: slot ? tx.find("conversation", { slot: slot.id }) : [] };
     });
     if (!slot) throw new Error("槽位已经换了对话，再发一次 /resume");
-    const all = resumable(timeline, await listConversations(slot.dir), conversation);
+    const found = await listConversations(slot.dir);
+    for (const c of timeline) {
+      if (isBuiltinAgent(c.agent) || !c.sessionId) continue;
+      const file = await conversationFile(cfg.stateDir, slot.dir, c);
+      if (file) found.push(await describe(file, c.agent, c.sessionId));
+    }
+    const all = resumable(timeline, found, conversation);
     const shown = all.slice(0, RESUME_SHOWN);
     if (!arg) {
       const choices = shown.map((c) => ({ id: c.session, label: c.label, ...(c.current && { current: c.current }) }));
@@ -849,5 +885,13 @@ export function createRunner(o: {
     });
   }
 
-  return { start, deliver, stop, interrupt, command, recover, answer, approval, meter, alive };
+  function pluginPids() {
+    return [...live.values()].flatMap(({ driver, link }) =>
+      driver instanceof PluginAgentDriver && link?.agentPid ? [{ id: driver.kind, pid: link.agentPid }] : []);
+  }
+  const pluginCaps = (conversation: string) => {
+    const driver = live.get(conversation)?.driver;
+    return driver instanceof PluginAgentDriver ? driver.info.capabilities : undefined;
+  };
+  return { pluginPids, pluginCaps, start, deliver, stop, interrupt, command, recover, answer, approval, meter, alive };
 }

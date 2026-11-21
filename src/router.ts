@@ -94,7 +94,16 @@ export type Ctx = {
   dropBot: (name: string) => void;
   inboundOf: (chat: string) => string[];
   plugins?: PluginRegistry;
+  pluginCaps?: (conversation: string) => import("@rhodium-oss/plugin-sdk").AgentCapabilities | undefined;
 };
+
+function turnAgent(state: State, ctx: Ctx, slot: Slot) {
+  const def = agentDef(agentOf(state, slot));
+  if (def.builtin || !ctx.pluginCaps || !slot.conversation) return def;
+  const caps = ctx.pluginCaps(slot.conversation);
+  return { ...def, steer: caps?.steer ?? false, liveApproval: caps ? caps.liveApproval : def.liveApproval,
+    supportedCommands: caps?.commands ?? def.supportedCommands };
+}
 
 function pluginProblem(ctx: Ctx, agent: AgentKind): string | undefined {
   if (isBuiltinAgent(agent)) return undefined;
@@ -191,7 +200,7 @@ export type Effect =
   | { kind: "trace"; id: string; message: string }
   // rh read: text, then the recent messages of the agent's session started in dir (if it has one yet),
   // are the reply to the rh call id.
-  | { kind: "read"; id: string; text: string; dir: string; agent: AgentKind; session: string | null }
+  | { kind: "read"; id: string; conversation: string; text: string; dir: string; agent: AgentKind; session: string | null }
   // rh forget: take the chat's avatar and name off the board's cache (spec web-topology "头像").
   | { kind: "forget_avatar"; chat: string };
 
@@ -964,12 +973,11 @@ function toAgent(
   const held = !halting && (slot.state === "running" || slot.state === "waiting") && (("bang" in m && m.bang) || slot.interruptedAt !== null);
   // Out of Claude's quota, the agent would only be refused again: it waits for the reset (product §4.6).
   const quota = !halting && slot.state === "rate_limited";
-  const kind = agentOf(state, slot);
   // From the board, what would join a turn under way waits in the queue above where you type, for the
   // turn to end (spec web-write "待发队列"). IM has nowhere to show a queue: yours there joins the turn
   // when steer is supported; plugins with steer: false wait for AFTER_TURN.
   const queued = "queue" in m && !halting && !held && !quota && (slot.state === "starting" || slot.state === "running" || slot.state === "waiting");
-  const noSteer = !agentDef(kind).steer && !halting && !held && !quota && !queued && (slot.state === "starting" || slot.state === "running" || slot.state === "waiting");
+  const noSteer = !turnAgent(state, ctx, slot).steer && !halting && !held && !quota && !queued && (slot.state === "starting" || slot.state === "running" || slot.state === "waiting");
   const queueReason = held ? AFTER_INTERRUPT : quota ? AFTER_QUOTA : queued ? WEB_QUEUE : noSteer ? AFTER_TURN : null;
   // One queued already goes on from where it waits.
   if ("input" in m) d.writes.push({ op: "update", table: "agentInput", where: { id: m.input.id, status: "queued" }, patch: { queueReason } });
@@ -1317,7 +1325,7 @@ function common(state: State, slot: Slot, cmd: { name: CommonCommand; args: stri
       return `通用命令 /${cmd.name}：${problem}`;
     }
   }
-  const def = agentDef(kind);
+  const def = turnAgent(state, ctx, slot);
   if (cmd.name === "ultracode" && !def.ultracode) {
     refused(`${def.name} 没有 ultracode。`);
     return `通用命令 /ultracode：${def.name} 没有`;
@@ -1997,6 +2005,9 @@ function agentEvent(state: State, e: AgentEvent, ctx: Ctx): Decision {
       break;
     }
     case "turn_end": {
+      if (!isBuiltinAgent(agentOf(state, slot))) {
+        d.writes.push({ op: "update", table: "conversation", where: { id: e.conv }, patch: { background: e.background ? 1 : 0 } });
+      }
       turnOver(d, ctx, slot);
       // Your /compact's turn ends with no reply: the event says so before its idle, which the web's
       // 未读 takes as a final_reply (spec web-maximize "未读和跑完提醒怎么做").
@@ -2017,7 +2028,7 @@ function agentEvent(state: State, e: AgentEvent, ctx: Ctx): Decision {
       if (tui) releaseQueued(d, e.conv, AFTER_TURN, IN_TUI);
       // What waited for this turn to end, with no message held for an interrupt to run first, runs now
       // as a turn of its own (AFTER_TURN): an internal message's, with no chat to reply to.
-      const steer = agentDef(agentOf(state, slot)).steer;
+      const steer = turnAgent(state, ctx, slot).steer;
       const next = () => {
         if (tui || swap || !queuedFor(AFTER_TURN)) return;
         const first = state.queued.find((i) => i.conversation === e.conv && i.queueReason === AFTER_TURN)!;
@@ -2185,7 +2196,7 @@ function agentEvent(state: State, e: AgentEvent, ctx: Ctx): Decision {
       // took in any of the turn's inputs, it has no turn to run again (product §4.5).
       const midTurn = hadTurn(state, slot, e.conv) && slot.interruptedAt === null;
       // Switching to the terminal or to another agent, the switch takes over instead.
-      const on = !asked && !tripped && slot.mode === "headless" && !swap && Boolean(slot.crashResume ?? ctx.config.defaults.crashResume);
+      const on = e.retryable !== false && !asked && !tripped && slot.mode === "headless" && !swap && Boolean(slot.crashResume ?? ctx.config.defaults.crashResume);
       const resume = on && midTurn;
       // Waiting for quota, its refused turn had ended: the agent starts again and the wait goes on.
       // Short of free disk it is not started again (architecture §7.8).
@@ -2246,7 +2257,7 @@ function agentEvent(state: State, e: AgentEvent, ctx: Ctx): Decision {
       if (low) notify(state, ctx, d, slot, slot.turnInbound ?? ctx.newId(), `${low}：${slotView(state, slot).ref} 停下后没有再启动，等着的消息先排队。有了空间，等有槽位停下或 Rhodium 重启时再投给它。`);
       // A resumed turn keeps its chat: its reply still goes to you.
       set({
-        state: asked ? "off" : "crashed",
+        state: asked || e.retryable === false ? "off" : "crashed",
         interruptedAt: null,
         resumeAt: null,
         ...(!resume && { turnSentMe: null }),
@@ -2749,7 +2760,7 @@ function wake(state: State, ctx: Ctx, d: Decision, slot: Slot, input: { source: 
           ? AFTER_ASKS
           : slot.interruptedAt !== null
             ? AFTER_INTERRUPT
-            : (slot.turnChat !== null || (!agentDef(agentOf(state, slot)).steer && (slot.state === "starting" || slot.state === "running" || slot.state === "waiting"))) &&
+            : (slot.turnChat !== null || (!turnAgent(state, ctx, slot).steer && (slot.state === "starting" || slot.state === "running" || slot.state === "waiting"))) &&
                 (input.source === "report" || input.source === "rh" || input.source === "confirm")
               ? AFTER_TURN
               : null;
@@ -4223,7 +4234,7 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
       // A running agent switches now (product §4.8); one not running starts in the new mode.
       const kind = s.conversation ? state.conversations.find((c) => c.id === s.conversation)?.agent : undefined;
       if (patch.approval !== undefined && s.conversation && s.state !== "off" && s.state !== "crashed") {
-        if (kind && !agentDef(kind).liveApproval) {
+        if (kind && !turnAgent(state, ctx, s).liveApproval) {
           // pi can't switch while it runs: it goes once idle, now if it is (architecture §6.3).
           if (s.state === "idle") stop(s, d);
           else d.writes.push({ op: "update", table: "slot", where: { id: s.id }, patch: { approvalStale: 1 } });
@@ -4593,7 +4604,7 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
       if (pos.length !== 1) usage();
       const s = findSlot(state, pos[0]!);
       const conv = state.conversations.find((c) => c.id === s.conversation)!;
-      d.effects.push({ kind: "read", id: input.id, text: slotDetail(state, s, ctx), dir: s.dir, agent: conv.agent, session: conv.sessionId });
+      d.effects.push({ kind: "read", id: input.id, conversation: conv.id, text: slotDetail(state, s, ctx), dir: s.dir, agent: conv.agent, session: conv.sessionId });
       return null;
     }
 
