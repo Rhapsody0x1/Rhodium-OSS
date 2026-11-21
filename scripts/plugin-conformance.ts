@@ -87,6 +87,40 @@ function writeLine(stdin: { write(chunk: string | Uint8Array): unknown }, msg: u
   stdin.write(`${JSON.stringify(msg)}\n`);
 }
 
+async function forceCleanupProcess(
+  proc: ReturnType<typeof Bun.spawn>,
+  graceMs: number,
+): Promise<void> {
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill("SIGTERM");
+  } catch {
+    return;
+  }
+  const waitExit = async (ms: number): Promise<boolean> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        proc.exited.then(() => true).catch(() => true),
+        new Promise<boolean>((resolveTimeout) => {
+          timer = setTimeout(() => resolveTimeout(false), ms);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+  const termWaitMs = Math.max(50, Math.min(graceMs, 500));
+  if (await waitExit(termWaitMs)) return;
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill("SIGKILL");
+  } catch {
+    return;
+  }
+  await waitExit(1_000);
+}
+
 async function testAgentPlugin(
   manifest: AgentPluginManifest,
   pluginDir: string,
@@ -146,6 +180,9 @@ async function testAgentPlugin(
 
   const readerDone = readJsonLines<Record<string, unknown>>(proc.stdout, {
     onMessage(msg) {
+      if (trackingTurn) {
+        inspectTurnEvent(msg);
+      }
       for (let i = 0; i < waiters.length; i++) {
         if (waiters[i]!.check(msg)) {
           waiters.splice(i, 1);
@@ -161,6 +198,34 @@ async function testAgentPlugin(
       w.fail(new Error("Plugin closed stdout unexpectedly"));
     }
   });
+
+  let trackingTurn = false;
+  let sawTaken = false;
+  let sawTurnStart = false;
+  let hasReplyContent = false;
+
+  const inspectTurnEvent = (msg: Record<string, unknown>): void => {
+    if (msg.type === "taken" && msg.inputId === "conf-in-1") {
+      sawTaken = true;
+    } else if (msg.type === "turn_start") {
+      if (msg.input === undefined || msg.input === "conf-in-1") {
+        sawTurnStart = true;
+      }
+    } else if (msg.type === "text_delta") {
+      if (typeof msg.text === "string" && msg.text.trim().length > 0) {
+        hasReplyContent = true;
+      }
+    } else if (msg.type === "item" && typeof msg.item === "object" && msg.item !== null) {
+      const item = msg.item as { kind?: unknown; text?: unknown };
+      if (item.kind === "message" && typeof item.text === "string" && item.text.trim().length > 0) {
+        hasReplyContent = true;
+      }
+    } else if (msg.type === "turn_end") {
+      if (typeof msg.reply === "string" && msg.reply.trim().length > 0) {
+        hasReplyContent = true;
+      }
+    }
+  };
 
   try {
     writeLine(proc.stdin, {
@@ -189,6 +254,7 @@ async function testAgentPlugin(
       throw new Error(`Expected ready.proto === 1, got ${String(readyOrFatal.proto)}`);
     }
 
+    trackingTurn = true;
     writeLine(proc.stdin, {
       type: "send",
       id: "conf-in-1",
@@ -204,6 +270,13 @@ async function testAgentPlugin(
     if (turnDone.type !== "turn_end") {
       throw new Error(`Agent turn failed: ${JSON.stringify(turnDone)}`);
     }
+    const missing: string[] = [];
+    if (!sawTaken) missing.push('taken (inputId: "conf-in-1")');
+    if (!sawTurnStart) missing.push("turn_start");
+    if (!hasReplyContent) missing.push("non-empty reply content (turn_end.reply, text_delta, or message item)");
+    if (missing.length > 0) {
+      throw new Error(`Agent turn round-trip incomplete; missing: ${missing.join(", ")}`);
+    }
 
     writeLine(proc.stdin, { type: "close" });
     proc.stdin.end();
@@ -215,12 +288,7 @@ async function testAgentPlugin(
       throw new Error(`Agent exited with code ${code}: ${stderrText}`);
     }
   } finally {
-    try {
-      proc.kill();
-    } catch {
-      // Process may already have exited
-    }
-    await proc.exited.catch(() => {});
+    await forceCleanupProcess(proc, timeoutMs);
   }
 }
 
@@ -344,12 +412,7 @@ async function testImPlugin(
       throw new Error(`IM exited with code ${code}: ${stderrText}`);
     }
   } finally {
-    try {
-      proc.kill();
-    } catch {
-      // Process may already have exited
-    }
-    await proc.exited.catch(() => {});
+    await forceCleanupProcess(proc, timeoutMs);
   }
 }
 

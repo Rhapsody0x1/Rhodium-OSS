@@ -192,7 +192,6 @@ export async function runImPlugin(
   let finished = false;
   let finalExitCode: number | null = null;
   let nextReqSeq = 1;
-  let initPromise: Promise<void> | null = null;
   let shutdownHookPromise: Promise<void> | null = null;
   let terminatePromise: Promise<number> | null = null;
 
@@ -244,7 +243,10 @@ export async function runImPlugin(
       });
     },
     async inbound(msg) {
-      await callCore<{ ok: true }>("inbound", msg);
+      const res = await callCore<{ ok?: unknown }>("inbound", msg);
+      if (res?.ok !== true) {
+        throw new Error("Core did not confirm inbound persistence (expected { ok: true })");
+      }
     },
     async keptGet(key) {
       const res = await callCore<{ value: string | null }>("kept_get", { key });
@@ -313,6 +315,7 @@ export async function runImPlugin(
         }
         try {
           const caps = await plugin.init(params as unknown as ImInitParams, ctx);
+          if (stopController.signal.aborted || finished) return;
           const checked = validateImCapabilities(caps);
           if (!checked.ok) {
             logStderr(`Invalid IM capabilities from init(): ${checked.error}`, stderr);
@@ -322,6 +325,7 @@ export async function runImPlugin(
           }
           respondResult(req.id, { proto: 1, capabilities: checked.capabilities });
         } catch (err) {
+          if (stopController.signal.aborted || finished) return;
           logStderr(`plugin.init() failed: ${formatError(err)}`, stderr);
           respondError(req.id, -32000, errorMessage(err));
           await terminate(1, false);
@@ -483,11 +487,7 @@ export async function runImPlugin(
     const msg = raw as Record<string, unknown>;
     if (typeof msg.method === "string") {
       if (msg.id !== undefined) {
-        const req = msg as unknown as JsonRpcRequest;
-        const p = handleRequest(req);
-        if (req.method === "init") {
-          initPromise = p;
-        }
+        void handleRequest(msg as unknown as JsonRpcRequest);
       }
       return;
     }
@@ -532,9 +532,6 @@ export async function runImPlugin(
         respondError(null, -32700, err.message);
       },
     });
-    if (initPromise && !terminatePromise) {
-      await initPromise;
-    }
     if (!terminatePromise) {
       await terminate(0, true);
     } else {

@@ -227,7 +227,6 @@ export async function runAgentPlugin(
   const stopController = new AbortController();
   let initialized = false;
   let initializing = false;
-  let initPromise: Promise<void> | null = null;
   let finished = false;
   let finalExitCode: number | null = null;
   let closePromise: Promise<void> | null = null;
@@ -480,7 +479,7 @@ export async function runAgentPlugin(
     }
 
     initializing = true;
-    initPromise = (async () => {
+    void (async () => {
       try {
         const ready = await plugin.init(msg, ctx);
         if (stopController.signal.aborted || finished) return;
@@ -567,9 +566,6 @@ export async function runAgentPlugin(
         emit({ type: "error", detail: err.message, recoverable: true });
       },
     });
-    if (initPromise && !shutdownPromise) {
-      await initPromise;
-    }
     if (!shutdownPromise) {
       await terminate(0, true);
     } else {

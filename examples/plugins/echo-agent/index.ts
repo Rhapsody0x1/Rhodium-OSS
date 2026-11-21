@@ -13,7 +13,8 @@ import {
 class EchoAgentPlugin implements AgentPlugin {
   private sessionId: string | null = null;
   private delayedSession = false;
-  private pendingAsks = new Map<string, (answer: AskAnswer) => void>();
+  private activeTurn = false;
+  private pendingAsks = new Map<string, (answer: AskAnswer | null) => void>();
 
   async init(params: AgentInitParams, _ctx: AgentContext): Promise<AgentReadyInfo> {
     this.sessionId = "new" in params.session ? params.session.new : params.session.resume;
@@ -30,56 +31,63 @@ class EchoAgentPlugin implements AgentPlugin {
   }
 
   async send(msg: AgentSendParams, ctx: AgentContext): Promise<void> {
-    ctx.taken(msg.id);
-    ctx.turnStart(msg.id);
+    this.activeTurn = true;
+    try {
+      ctx.taken(msg.id);
+      ctx.turnStart(msg.id);
 
-    const trimmed = msg.text.trim();
-    if (trimmed === "/fail") {
-      throw new PluginFatalError("Simulated failure triggered by /fail", { retryable: true });
+      const trimmed = msg.text.trim();
+      if (trimmed === "/fail") {
+        throw new PluginFatalError("Simulated failure triggered by /fail", { retryable: true });
+      }
+
+      const toolId = `echo-tool-${msg.id}`;
+      ctx.toolStart(toolId, "echo", { text: msg.text });
+
+      if (trimmed.includes("[ask]")) {
+        const requestId = `ask-${msg.id}`;
+        ctx.ask({
+          requestId,
+          kind: "permission",
+          tool: "echo",
+          input: { text: msg.text },
+          toolUse: toolId,
+        });
+        const ans = await new Promise<AskAnswer | null>((resolveAnswer) => {
+          this.pendingAsks.set(requestId, resolveAnswer);
+        });
+        if (ans === null) return;
+        const allowed = ans.kind === "permission" && ans.allow;
+        ctx.item({
+          kind: "tool",
+          id: toolId,
+          name: "echo",
+          input: { text: msg.text },
+          result: { text: allowed ? "allowed" : "denied", error: !allowed },
+        });
+      } else {
+        ctx.item({
+          kind: "tool",
+          id: toolId,
+          name: "echo",
+          input: { text: msg.text },
+          result: { text: msg.text },
+        });
+      }
+
+      if (this.delayedSession && this.sessionId) {
+        ctx.session(this.sessionId);
+        this.delayedSession = false;
+      }
+
+      const reply = `Echo: ${msg.text}`;
+      ctx.textDelta(reply);
+      ctx.item({ kind: "message", text: reply });
+      this.activeTurn = false;
+      ctx.turnEnd({ reply, ...(this.sessionId ? { session: this.sessionId } : {}) });
+    } finally {
+      this.activeTurn = false;
     }
-
-    const toolId = `echo-tool-${msg.id}`;
-    ctx.toolStart(toolId, "echo", { text: msg.text });
-
-    if (trimmed.includes("[ask]")) {
-      const requestId = `ask-${msg.id}`;
-      ctx.ask({
-        requestId,
-        kind: "permission",
-        tool: "echo",
-        input: { text: msg.text },
-        toolUse: toolId,
-      });
-      const ans = await new Promise<AskAnswer>((resolveAnswer) => {
-        this.pendingAsks.set(requestId, resolveAnswer);
-      });
-      const allowed = ans.kind === "permission" && ans.allow;
-      ctx.item({
-        kind: "tool",
-        id: toolId,
-        name: "echo",
-        input: { text: msg.text },
-        result: { text: allowed ? "allowed" : "denied", error: !allowed },
-      });
-    } else {
-      ctx.item({
-        kind: "tool",
-        id: toolId,
-        name: "echo",
-        input: { text: msg.text },
-        result: { text: msg.text },
-      });
-    }
-
-    if (this.delayedSession && this.sessionId) {
-      ctx.session(this.sessionId);
-      this.delayedSession = false;
-    }
-
-    const reply = `Echo: ${msg.text}`;
-    ctx.textDelta(reply);
-    ctx.item({ kind: "message", text: reply });
-    ctx.turnEnd({ reply, ...(this.sessionId ? { session: this.sessionId } : {}) });
   }
 
   async answer(requestId: string, answer: AskAnswer): Promise<void> {
@@ -90,12 +98,16 @@ class EchoAgentPlugin implements AgentPlugin {
   }
 
   async interrupt(ctx: AgentContext): Promise<void> {
+    const hadPending = this.pendingAsks.size > 0;
     for (const [reqId, resolveWaiter] of this.pendingAsks) {
       this.pendingAsks.delete(reqId);
       ctx.askCancel(reqId);
-      resolveWaiter({ kind: "permission", allow: false, message: "interrupted" });
+      resolveWaiter(null);
     }
-    ctx.turnEnd();
+    if (this.activeTurn || hadPending) {
+      this.activeTurn = false;
+      ctx.turnEnd();
+    }
   }
 
   async command(name: string): Promise<CommandResult> {
@@ -109,9 +121,10 @@ class EchoAgentPlugin implements AgentPlugin {
   }
 
   async close(): Promise<void> {
+    this.activeTurn = false;
     for (const [reqId, resolveWaiter] of this.pendingAsks) {
       this.pendingAsks.delete(reqId);
-      resolveWaiter({ kind: "permission", allow: false, message: "closed" });
+      resolveWaiter(null);
     }
   }
 }

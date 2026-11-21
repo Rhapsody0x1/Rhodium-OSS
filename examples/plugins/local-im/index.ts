@@ -5,6 +5,7 @@ import {
   type ImContext,
   type ImInitParams,
   type ImPlugin,
+  type MenuItem,
   type OutboundMessageWire,
   type SendResult,
 } from "@rhodium-oss/plugin-sdk";
@@ -12,6 +13,7 @@ import {
 class LocalImPlugin implements ImPlugin {
   private seq = 1;
   private readonly channels = new Map<string, string>();
+  private menu: MenuItem[] = [];
 
   async init(_params: ImInitParams, ctx: ImContext): Promise<Capabilities> {
     ctx.connected(true);
@@ -53,6 +55,12 @@ class LocalImPlugin implements ImPlugin {
 
   async dropButtons(_chat: string, messageId: string): Promise<SendResult> {
     return { status: "sent", messageId };
+  }
+
+  async answerPress(_chat: string, _press: string, _text: string): Promise<void> {}
+
+  async setMenu(items: MenuItem[], _chat: string | undefined): Promise<void> {
+    this.menu = [...items];
   }
 
   async shutdown(): Promise<void> {}

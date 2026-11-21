@@ -776,6 +776,61 @@ describe("agent.ts (runAgentPlugin)", () => {
     expect(unsubscribed).toBe(true);
     expect(exitCode).toBe(0);
   });
+
+  test("EOF during hung init() runs single bounded close() immediately and resolves cleanly", async () => {
+    const stdin = new PassThrough();
+    const stdout = createLineCapture();
+    const stderr = createLineCapture();
+    let initStarted = false;
+    let closeCalls = 0;
+    let exitCode: number | undefined;
+
+    const plugin: AgentPlugin = {
+      async init(): Promise<AgentReadyInfo> {
+        initStarted = true;
+        return await new Promise<AgentReadyInfo>(() => {});
+      },
+      async send() {},
+      async interrupt() {},
+      async close() {
+        closeCalls += 1;
+        await new Promise(() => {});
+      },
+    };
+
+    const startedAt = Date.now();
+    const runPromise = runAgentPlugin(plugin, {
+      stdin,
+      stdout: stdout.sink,
+      stderr: stderr.sink,
+      closeTimeoutMs: 50,
+      exit(code) {
+        exitCode = code;
+      },
+      registerSignals: false,
+    });
+
+    stdin.write(
+      JSON.stringify({
+        type: "init",
+        proto: 1,
+        conv: "c-eof-init",
+        session: { new: "s-eof-init" },
+        cwd: "/tmp",
+        systemPromptFile: "/tmp/p.md",
+        approval: false,
+        config: {},
+      }) + "\n",
+    );
+    await waitFor(() => initStarted);
+    stdin.end();
+
+    const code = await runPromise;
+    expect(Date.now() - startedAt).toBeLessThan(1500);
+    expect(code).toBe(0);
+    expect(exitCode).toBe(0);
+    expect(closeCalls).toBe(1);
+  }, 2000);
 });
 
 describe("im.ts (runImPlugin)", () => {
@@ -1042,14 +1097,117 @@ describe("im.ts (runImPlugin)", () => {
     expect(shutdownCalls).toBe(1);
     expect(exitCode).toBe(0);
   });
+
+  test("EOF during pending init() awaiting keptGet rejects pending RPC and runs single bounded shutdown()", async () => {
+    const stdin = new PassThrough();
+    const stdout = createLineCapture();
+    const stderr = createLineCapture();
+    let keptRejected = false;
+    let shutdownCalls = 0;
+    let exitCode: number | undefined;
+
+    const plugin: ImPlugin = {
+      async init(_params, ctx): Promise<Capabilities> {
+        try {
+          await ctx.keptGet("sync_buf");
+        } catch {
+          keptRejected = true;
+        }
+        return validImCaps;
+      },
+      async send(): Promise<SendResult> {
+        return { status: "sent" };
+      },
+      async shutdown() {
+        shutdownCalls += 1;
+        await new Promise(() => {});
+      },
+    };
+
+    const startedAt = Date.now();
+    const runPromise = runImPlugin(plugin, {
+      stdin,
+      stdout: stdout.sink,
+      stderr: stderr.sink,
+      shutdownTimeoutMs: 50,
+      exit(code) {
+        exitCode = code;
+      },
+      registerSignals: false,
+    });
+
+    stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "init",
+        params: { proto: 1, botId: "b", botName: "b", config: {} },
+      }) + "\n",
+    );
+    await waitFor(() => stdout.lines().some((m) => (m as { method?: string }).method === "kept_get"));
+    stdin.end();
+
+    const code = await runPromise;
+    expect(Date.now() - startedAt).toBeLessThan(1500);
+    expect(keptRejected).toBe(true);
+    expect(shutdownCalls).toBe(1);
+    expect(code).toBe(0);
+    expect(exitCode).toBe(0);
+  }, 2000);
+
+  test("ctx.inbound() rejects when core responds with { ok: false }", async () => {
+    const stdin = new PassThrough();
+    const stdout = createLineCapture();
+    const stderr = createLineCapture();
+    let ctxRef!: ImContext;
+
+    const plugin: ImPlugin = {
+      async init(_p, ctx): Promise<Capabilities> {
+        ctxRef = ctx;
+        return validImCaps;
+      },
+      async send(): Promise<SendResult> {
+        return { status: "sent" };
+      },
+    };
+
+    const runPromise = runImPlugin(plugin, {
+      stdin,
+      stdout: stdout.sink,
+      stderr: stderr.sink,
+      exit() {},
+      registerSignals: false,
+    });
+
+    stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "init", params: { proto: 1, botId: "b", botName: "b", config: {} } }) + "\n");
+    await waitFor(() => stdout.lines().some((m) => (m as { id?: unknown }).id === 1));
+
+    const inboundPromise = ctxRef.inbound({
+      chat: "u-1",
+      messageId: "m-bad",
+      sender: "u-1",
+      text: "hello",
+      at: 1763690000000,
+    });
+    await waitFor(() => stdout.lines().some((m) => (m as { method?: string }).method === "inbound"));
+    const inboundReq = stdout.lines().find((m) => (m as { method?: string }).method === "inbound") as { id: string | number };
+    stdin.write(JSON.stringify({ jsonrpc: "2.0", id: inboundReq.id, result: { ok: false } }) + "\n");
+
+    await expect(inboundPromise).rejects.toThrow(/ok:\s*true/i);
+
+    stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "shutdown", params: {} }) + "\n");
+    stdin.end();
+    await runPromise;
+  });
 });
 
 describe("scripts/plugin-conformance.ts and examples/plugins", () => {
   async function runConformance(
     manifestPath: string,
     extraEnv?: Record<string, string>,
+    timeoutArg = "10000",
   ): Promise<{ code: number; stdout: string; stderr: string }> {
-    const proc = Bun.spawn(["bun", "scripts/plugin-conformance.ts", "--manifest", manifestPath, "--timeout", "10000"], {
+    const proc = Bun.spawn(["bun", "scripts/plugin-conformance.ts", "--manifest", manifestPath, "--timeout", timeoutArg], {
       cwd: REPO_ROOT,
       env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
       stdin: "ignore",
@@ -1063,6 +1221,217 @@ describe("scripts/plugin-conformance.ts and examples/plugins", () => {
     ]);
     return { code, stdout, stderr };
   }
+
+  test("echo-agent interrupt stops cancelled [ask] turn cleanly with single turn_end and no trailing reply", async () => {
+    const proc = Bun.spawn(["bun", "run", join(REPO_ROOT, "examples", "plugins", "echo-agent", "index.ts")], {
+      cwd: REPO_ROOT,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out: Array<Record<string, unknown>> = [];
+    const readerDone = readJsonLines<Record<string, unknown>>(proc.stdout, {
+      onMessage(msg) {
+        out.push(msg);
+      },
+    });
+    try {
+      proc.stdin.write(
+        JSON.stringify({
+          type: "init",
+          proto: 1,
+          conv: "c-echo-int",
+          session: { new: "s-echo-int" },
+          cwd: REPO_ROOT,
+          systemPromptFile: join(REPO_ROOT, "README.md"),
+          program: "echo-agent",
+          approval: false,
+          config: {},
+        }) + "\n",
+      );
+      await waitFor(() => out.some((m) => m.type === "ready"));
+
+      proc.stdin.write(JSON.stringify({ type: "send", id: "in-ask", text: "[ask] hello", human: true, mode: "turn" }) + "\n");
+      await waitFor(() => out.some((m) => m.type === "ask"));
+
+      proc.stdin.write(JSON.stringify({ type: "interrupt" }) + "\n");
+      await waitFor(() => out.some((m) => m.type === "turn_end"));
+      await Bun.sleep(30);
+
+      proc.stdin.write(JSON.stringify({ type: "close" }) + "\n");
+      proc.stdin.end();
+      const code = await proc.exited;
+      await readerDone;
+      expect(code).toBe(0);
+
+      expect(out.filter((m) => m.type === "ask_cancel")).toHaveLength(1);
+      const turnEnds = out.filter((m) => m.type === "turn_end");
+      expect(turnEnds).toHaveLength(1);
+      expect(turnEnds[0]!.reply).toBeUndefined();
+      expect(out.filter((m) => m.type === "text_delta")).toHaveLength(0);
+      const assistantItems = out.filter(
+        (m) => m.type === "item" && typeof m.item === "object" && m.item !== null && (m.item as { kind?: string }).kind === "message",
+      );
+      expect(assistantItems).toHaveLength(0);
+    } finally {
+      try {
+        proc.kill();
+      } catch {
+        // already exited
+      }
+      await proc.exited.catch(() => {});
+    }
+  }, 10_000);
+
+  test("local-im runtime capabilities match plugin.json and support all declared RPC methods without -32601", async () => {
+    const manifestJson = JSON.parse(readFileSync(join(REPO_ROOT, "examples", "plugins", "local-im", "plugin.json"), "utf8")) as {
+      capabilities: Capabilities;
+    };
+    const proc = Bun.spawn(["bun", "run", join(REPO_ROOT, "examples", "plugins", "local-im", "index.ts")], {
+      cwd: REPO_ROOT,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out: Array<Record<string, unknown>> = [];
+    const kept = new Map<string, string>();
+    const readerDone = readJsonLines<Record<string, unknown>>(proc.stdout, {
+      onMessage(msg) {
+        if (typeof msg.method === "string" && msg.id !== undefined) {
+          const params = (msg.params ?? {}) as Record<string, unknown>;
+          if (msg.method === "kept_get") {
+            proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { value: kept.get(String(params.key)) ?? null } }) + "\n");
+          } else if (msg.method === "kept_set") {
+            kept.set(String(params.key), String(params.value));
+            proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { ok: true } }) + "\n");
+          }
+          return;
+        }
+        out.push(msg);
+      },
+    });
+    const byId = (id: number) => out.find((m) => m.id === id);
+
+    try {
+      proc.stdin.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "init",
+          params: { proto: 1, botId: "b-local", botName: "local-im", config: {} },
+        }) + "\n",
+      );
+      await waitFor(() => byId(1) !== undefined);
+      const initResp = byId(1)! as { result?: { capabilities: Capabilities } };
+      expect(initResp.result?.capabilities).toEqual(manifestJson.capabilities);
+
+      const requests: Array<{ id: number; method: string; params: unknown }> = [
+        { id: 2, method: "send", params: { chat: "u1", message: { text: "hi" } } },
+        { id: 3, method: "edit", params: { chat: "u1", messageId: "local-1", message: { text: "edited" } } },
+        { id: 4, method: "drop_buttons", params: { chat: "u1", messageId: "local-1" } },
+        { id: 5, method: "answer_press", params: { chat: "u1", press: "p1", text: "ok" } },
+        { id: 6, method: "set_menu", params: { items: [{ command: "status", description: "Show status" }] } },
+        { id: 7, method: "profile", params: { you: "u1" } },
+      ];
+      for (const req of requests) {
+        proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...req }) + "\n");
+      }
+      await waitFor(() => byId(7) !== undefined);
+
+      for (const req of requests) {
+        const resp = byId(req.id)!;
+        expect(resp.error).toBeUndefined();
+      }
+      expect((byId(2)! as { result: SendResult }).result.status).toBe("sent");
+      expect((byId(3)! as { result: SendResult }).result.status).toBe("sent");
+      expect((byId(4)! as { result: SendResult }).result.status).toBe("sent");
+      expect((byId(5)! as { result: unknown }).result).toEqual({ ok: true });
+      expect((byId(6)! as { result: unknown }).result).toEqual({ ok: true });
+      expect((byId(7)! as { result: unknown }).result).toEqual({});
+
+      proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 8, method: "shutdown", params: {} }) + "\n");
+      await waitFor(() => byId(8) !== undefined);
+      expect((byId(8)! as { result: unknown }).result).toEqual({ ok: true });
+      proc.stdin.end();
+      const code = await proc.exited;
+      await readerDone;
+      expect(code).toBe(0);
+    } finally {
+      try {
+        proc.kill();
+      } catch {
+        // already exited
+      }
+      await proc.exited.catch(() => {});
+    }
+  }, 10_000);
+
+  test("conformance rejects agent plugin that emits only empty turn_end without taken/turn_start/reply", async () => {
+    const pluginDir = makeTempDir("rhodium empty turn ");
+    writeFileSync(
+      join(pluginDir, "plugin.json"),
+      JSON.stringify({
+        manifestVersion: 1,
+        kind: "agent",
+        id: "empty-turn",
+        name: "Empty Turn",
+        statusName: "Empty Turn",
+        version: "0.1.0",
+        protocol: "rh-agent/1",
+        minRhodium: "1.5.0",
+        program: "empty-turn",
+        command: ["bun", "run", "${PLUGIN_DIR}/index.ts"],
+        capabilities: { liveApproval: false, steer: false, commands: [] },
+      }),
+    );
+    writeFileSync(
+      join(pluginDir, "index.ts"),
+      `import { runAgentPlugin } from ${JSON.stringify(join(REPO_ROOT, "packages", "plugin-sdk", "index.ts"))};
+runAgentPlugin({
+  async init() {
+    return { session: "s-empty", capabilities: {} };
+  },
+  async send(_msg, ctx) {
+    ctx.turnEnd();
+  },
+  async interrupt() {},
+});
+`,
+    );
+    const res = await runConformance(join(pluginDir, "plugin.json"));
+    expect(res.code).not.toBe(0);
+  }, 10_000);
+
+  test("conformance bounds cleanup with SIGKILL when a timed-out plugin ignores close and traps SIGTERM", async () => {
+    const pluginDir = makeTempDir("rhodium trap sigterm ");
+    writeFileSync(
+      join(pluginDir, "plugin.json"),
+      JSON.stringify({
+        manifestVersion: 1,
+        kind: "agent",
+        id: "trap-sigterm",
+        name: "Trap SIGTERM",
+        statusName: "Trap SIGTERM",
+        version: "0.1.0",
+        protocol: "rh-agent/1",
+        minRhodium: "1.5.0",
+        program: "trap-sigterm",
+        command: ["bun", "run", "${PLUGIN_DIR}/index.ts"],
+        capabilities: { liveApproval: false, steer: false, commands: [] },
+      }),
+    );
+    writeFileSync(
+      join(pluginDir, "index.ts"),
+      `process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+process.stdin.resume();
+`,
+    );
+    const startedAt = Date.now();
+    const res = await runConformance(join(pluginDir, "plugin.json"), undefined, "200");
+    expect(res.code).not.toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(3000);
+  }, 6000);
 
   test("passes minimal conformance checks for echo-agent and local-im examples", async () => {
     const agentRes = await runConformance(join(REPO_ROOT, "examples", "plugins", "echo-agent", "plugin.json"));
