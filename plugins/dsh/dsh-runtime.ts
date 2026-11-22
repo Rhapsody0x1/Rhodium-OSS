@@ -223,6 +223,9 @@ export class DshProcessTransport implements DshTransport {
     await this.terminateTree(2000);
     await Promise.race([this.proc.exited, Bun.sleep(2000)]);
     // POSIX 没有整树终止:启动器没转发到的后代进程(dsh 崩溃/不转发时)一并清理。
+    // 两轮 SIGKILL,中间留 100ms:第一轮命中后 /proc 条目消失有延迟,第二轮兜底漏网的。
+    for (const pid of descendants) { try { process.kill(pid, "SIGKILL"); } catch { /* 已退出 */ } }
+    await Bun.sleep(100);
     for (const pid of descendants) { try { process.kill(pid, "SIGKILL"); } catch { /* 已退出 */ } }
     this.stopped = true;
     this.rejectPending("dsh 进程已被终止");
