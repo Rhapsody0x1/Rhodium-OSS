@@ -41,6 +41,7 @@ const transient = (error: unknown) => error instanceof HttpTimeout || error inst
 
 // The core gives fetch_attachment durations.pluginRpc (30 s by default), then deletes the temp dir,
 // so both attempts share one deadline just under that and each uses only the time left.
+// ponytail: fixed to the default pluginRpc, since the core does not tell plugins its value; read it if the core ever sends it.
 export async function download(root: string, attachment: Attachment, dest: string, signal: AbortSignal, budget = 28_000) {
   const end = Date.now() + budget;
   try {

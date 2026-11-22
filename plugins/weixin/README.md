@@ -32,3 +32,8 @@ bun plugins/weixin/demo.ts
 脚本以全新配置启动隔离实例，从 `rh pair` 取码，经模拟微信注入配对码，检查主窗口、编号选择、允许与拒绝、重启后恢复游标和主动回推。临时工作区和进程由脚本清理。
 
 也可在隔离环境中用 `bun plugins/weixin/mock-weixin-server.ts 18080` 启动模拟服务。将 Bot 的 `token` 设为 `mock-weixin-token`，`baseUrl` 设为 `http://127.0.0.1:18080`，`cdnBaseUrl` 设为 `http://127.0.0.1:18080/c2c`。向 `POST /mock/inbound` 提交 JSON 数组，例如 `[{"id":1,"text":"<配对码>"}]`，每条消息使用不同 ID。默认模拟发送者为 `conf-user-1`。通过 `GET /mock/sent` 查看 Bot 发出的消息。用向导时，将服务地址写进 `[plugins.weixin.config]`，模拟验证码为 `123456`。
+
+## 已知限制
+
+- 下载附件的两次尝试共用 28 秒期限。这个值按默认 30 秒的 `durations.pluginRpc` 写死，因为核心不把该值告诉插件。调大 `pluginRpc` 不会让下载多等；调小到 28 秒以下时，核心先放弃，插件会继续下载到期限为止，结果被丢弃。
+- 核心的 RPC 上限决定了慢网下能下完多大的附件：25 MB 文件约需 0.9 MB/s。插件这边改不了这个上限。
