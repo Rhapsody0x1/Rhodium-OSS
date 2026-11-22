@@ -405,15 +405,19 @@ function AgentPick({ agent, pick, importing = false }: { agent: AgentKind; pick:
   const agents = useAgents().filter(a => !importing || a.importable);
   return (
     <div role="radiogroup" aria-label="agent" className="flex max-w-full shrink-0 flex-wrap overflow-hidden rounded-lg border">
-      {agents.map(({ id: a, name }) => (
-        <button key={a} type="button" role="radio" aria-label={isBuiltinAgent(a) ? undefined : name} title={name} aria-checked={agent === a} onClick={() => pick(a)} className={cn("focus-child flex h-11 min-w-11 max-w-full items-center justify-center transition focus-visible:opacity-100", agent === a ? "bg-secondary" : "opacity-40 grayscale hover:opacity-70")}>
-          <span className="grid size-9 place-items-center rounded-md">
-            <AgentLogo agent={a} className="size-5" />
-          </span>
-          {/* In the import dialog a plugin is its logo alone, as the built-in ones are: its name would squeeze the slot name on a phone. */}
-          {!importing && !isBuiltinAgent(a) && <span className="truncate pr-2 text-sm">{name}</span>}
-        </button>
-      ))}
+      {agents.map((option) => {
+        const { id, name } = option;
+        const plugin = !isBuiltinAgent(id);
+        const showName = plugin && !importing && !("icon" in option && option.icon);
+        return (
+          <button key={id} type="button" role="radio" aria-label={plugin ? name : undefined} title={name} aria-checked={agent === id} onClick={() => pick(id)} className={cn("focus-child flex h-11 min-w-11 max-w-full items-center justify-center transition focus-visible:opacity-100", agent === id ? "bg-secondary" : "opacity-40 grayscale hover:opacity-70")}>
+            <span className="grid size-9 place-items-center rounded-md">
+              <AgentLogo agent={id} className="size-5" />
+            </span>
+            {showName && <span className="truncate pr-2 text-sm">{name}</span>}
+          </button>
+        );
+      })}
     </div>
   );
 }
