@@ -1,0 +1,49 @@
+{"v":1,"dshVersion":"0.2.2-rc.5","note":"按真实 dsh 0.2.2-rc.5(npm @deepseek-ai/dsh)实测帧整理:事件载荷在 event.data,assistant 文本在 data.message.content 的 text 块(reasoning/tool-call 块跳过),tool 参数是 data.arguments JSON 字符串。已脱敏,不含任何 Key、真实路径或私人内容。"}
+{"dir":"out","method":"initialize","params":{"cwd":"<slot-cwd>","provider":"deepseek-official","model":"deepseek-chat","approvalRequests":true,"capabilities":{"userQuestions":true}}}
+{"dir":"in","method":"initialize","result":{"serverInfo":{"name":"deepseek-harness-sdk-runtime","version":"0.0.1"}}}
+{"dir":"out","method":"session/prompt","match":"hello dsh","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"你是运行在 Rhodium 看板里的助手。\n\n"},{"type":"text","text":"hello dsh"}]}}
+{"dir":"in","method":"session/prompt","result":{"messageId":"msg-101"}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"running"}}
+{"dir":"in","method":"session.event","params":{"sessionId":"sub-agent-9","event":{"type":"tool/call","data":{"callId":"call-sub-1","name":"list_dir","arguments":"{\"path\":\".\"}"}}}}
+{"dir":"in","method":"session.status","params":{"sessionId":"sub-agent-9","status":"running"}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"user/message","data":{"content":[{"type":"text","text":"hello dsh"}],"role":"user"}}}}
+{"dir":"in","method":"session.status","params":{"sessionId":"sub-agent-9","status":"idle"}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"tool/call","data":{"callId":"call-11","name":"list_dir","arguments":"{\"path\":\".\"}"}}}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"tool/result","data":{"message":{"role":"tool","toolCallId":"call-11","content":[{"type":"text","text":"README.md\nsrc/\nplugins/\n"}],"isError":false}}}}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"reasoning","text":""},{"type":"text","text":"当前目录包含 README.md、src/ 和 plugins/。"}]}}}}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"idle"}}
+{"dir":"out","method":"session/prompt","match":"/fail","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"/fail"}]}}
+{"dir":"in","method":"session/prompt","error":{"code":-32000,"message":"provider deepseek-official: model unavailable (offline sample)"}}
+{"dir":"out","method":"session/prompt","match":"investigate the flaky test slowly","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"investigate the flaky test slowly"}]}}
+{"dir":"in","method":"session/prompt","result":{"messageId":"msg-103"}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"running"}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"reasoning","text":"I should read the flaky test file first."},{"type":"tool-call","id":"call_00_flaky","name":"read_file","arguments":"{\"path\": \"test/flaky.spec.ts\"}"}]}}}}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"tool/call","data":{"callId":"call-71","name":"read_file","arguments":"{\"path\": \"test/flaky.spec.ts\"}"}}}}
+{"dir":"out","method":"initialize","params":{"cwd":"<slot-cwd>","provider":"deepseek-official","model":"deepseek-chat","approvalRequests":true,"capabilities":{"userQuestions":true}}}
+{"dir":"in","method":"initialize","result":{"serverInfo":{"name":"deepseek-harness-sdk-runtime","version":"0.0.1"}}}
+{"dir":"out","method":"session/resume","params":{"sessionId":"conf-session-1"}}
+{"dir":"in","method":"session/resume","result":{"restored":true}}
+{"dir":"out","method":"session/prompt","match":"继续修那个 flaky 测试","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"继续修那个 flaky 测试"}]}}
+{"dir":"in","method":"session/prompt","result":{"messageId":"msg-104"}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"running"}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"tool/result","data":{"message":{"role":"tool","source":{"kind":"tool","callId":"call-71"},"toolCallId":"call-71","content":[{"type":"text","text":"结果未知:上一个回合被中断,dsh 在恢复时补记的合成结果"}],"isError":true}}}}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"reasoning","text":""},{"type":"text","text":"我重读了测试文件,问题出在竞态的 sleep 上,我来修。"}]}}}}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"idle"}}
+{"dir":"out","method":"session/prompt","match":"帮我删除 plugins 下的临时文件","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"帮我删除 plugins 下的临时文件"}]}}
+{"dir":"in","method":"session/prompt","result":{"messageId":"msg-105"}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"running"}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"tool/call","data":{"callId":"call-81","name":"delete_file","arguments":"{\"path\": \"plugins/tmp-cache\"}"}}}}
+{"dir":"in","id":"srv-1","method":"approval/request","params":{"sessionId":"conf-session-1","toolName":"delete_file","callId":"call-81","reason":"删除 plugins/tmp-cache 下 3 个临时文件"}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"tool/result","data":{"message":{"role":"tool","toolCallId":"call-81","content":[{"type":"text","text":"已删除 3 个临时文件"}],"isError":false}}}}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"reasoning","text":""},{"type":"text","text":"临时文件已清理。"}]}}}}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"idle"}}
+{"dir":"out","method":"session/prompt","match":"确认两件事再动手","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"确认两件事再动手"}]}}
+{"dir":"in","method":"session/prompt","result":{"messageId":"msg-106"}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"running"}}
+{"dir":"in","id":"srv-2","method":"user-question/ask","params":{"requestId":"q-9","sessionId":"conf-session-1","questions":[{"id":"q1","header":"选择语言","question":"用哪种语言重写这个脚本?","options":[{"label":"TypeScript","description":"使用 TypeScript 重写脚本。"},{"label":"Python","description":"使用 Python 重写脚本。"}],"multiSelect":false},{"id":"q2","header":"测试","question":"要写测试吗?"}]}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"reasoning","text":""},{"type":"text","text":"好的,按你的选择来。"}]}}}}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"idle"}}
+{"dir":"out","method":"session/query","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"/compact"}]}}
+{"dir":"in","method":"session/query","result":{"kind":"command","execution":{"beforeTokens":9600,"afterTokens":2100}}}
+{"dir":"out","method":"shutdown"}
+{"dir":"in","method":"shutdown","result":{}}
