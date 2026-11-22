@@ -1108,7 +1108,7 @@ target = "work/main"
   - 向导用例（用 `local-im`，终端用假的输入）：二维码、链接、等待依次出现在 `rh bot` 输出里；`secret` 输入不回显；完成后 `config.toml` 里有新 `[bots.<名字>]` 且只含声明过的键，随后显示配对码，发码后流程 `done`；
   - 首步就是 `wizard_input` 的向导：用户超过 `pluginHandshake` 才输入，流程照常走完；
   - 失败用例：首步超时、`wizard` 报错、中途退出、未声明的键、带 `owner`、缺 `requiredConfig`，都失败且配置不变；Ctrl-C 后插件进程退出、配置不变；
-  - 没声明 `wizard` 的插件平台，`rh bot` 照旧拒绝并提示手写配置；网页建 Bot 向导不列插件平台；
+  - 没声明 `wizard` 的插件平台，`rh bot` 照旧拒绝并提示手写配置；网页建 Bot 向导只列声明了 `wizard` 的插件平台；
   - 契约测试器对 `local-im` 的向导检查通过，对未声明 `wizard` 的插件跳过；
   - 组员的 `weixin` 插件随后按 §9.3 实现向导，并用 `mock-weixin-server` 跑通同一套契约检查。
 
