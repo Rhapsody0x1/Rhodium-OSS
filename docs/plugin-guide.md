@@ -53,7 +53,7 @@ Copy-Item -Recurse examples\plugins\local-im plugins\my-im
 |---|---|---|
 | `manifestVersion` | 是 | 固定整数 `1`。 |
 | `kind` | 是 | `"agent"` 或 `"im"`。 |
-| `id` | 是 | 匹配 `^[a-z][a-z0-9_-]{0,31}$`，须与插件子目录名一致，不能使用保留名。 |
+| `id` | 是 | 匹配 `^[a-z][a-z0-9_-]{0,31}$`，不能使用保留名。自动扫描时须与插件子目录名一致；用 `[plugins.<id>].path` 显式登记时须与配置键 `<id>` 一致（目录名可以不同）。 |
 | `name` | 是 | 给用户看的展示名，例如 `"DeepSeek Harness"`、`"微信官方 Bot"`。 |
 | `version` | 是 | SemVer 版本号，例如 `"0.1.0"`。 |
 | `minRhodium` | 是 | 最低核心版本（SemVer），当前核心为 `"1.5.0"`。 |
@@ -95,7 +95,7 @@ Copy-Item -Recurse examples\plugins\local-im plugins\my-im
 
 ### 保留内置名称
 
-以下 ID 留给内置组件，插件不能使用：
+以下 10 个 ID 留给内置组件，核心加载时会同时避开 agent 与 IM 两组保留名的并集，**任何插件**都不能使用：
 
 - Agent 保留名：`claude`、`pi`、`codex`、`herdr`
 - IM 保留名：`qq`、`telegram`、`feishu`、`fake`、`me`、`web`
@@ -108,7 +108,7 @@ TypeScript / JavaScript 插件直接导入仓库内置的 `@rhodium-oss/plugin-s
 
 ### 3.1 Agent 插件：`AgentPlugin` 与 `runAgentPlugin`
 
-下面摘自 `examples/plugins/echo-agent/index.ts`，展示一次完整回合、提问审批、打断、命令、对话导入和关闭的写法：
+下面只摘录关键方法展示接口用法（省略部分用 `// ...` 标出）。完整可运行实现请直接以 `examples/plugins/echo-agent/index.ts` 为准；从示例目录整份复制后保留原文件再增量修改，即可通过全部 8 组契约检查：
 
 ```ts
 import {
@@ -133,6 +133,7 @@ export class EchoAgentPlugin implements AgentPlugin {
 
   async init(params: AgentInitParams, _ctx: AgentContext): Promise<AgentReadyInfo> {
     this.sessionId = "new" in params.session ? params.session.new : params.session.resume;
+    // ... 若需延迟上报会话 ID，可先返回 session: null
     return {
       session: this.sessionId,
       capabilities: { liveApproval: false, steer: false, commands: ["status", "model"] },
@@ -146,10 +147,11 @@ export class EchoAgentPlugin implements AgentPlugin {
       ctx.taken(msg.id);
       ctx.turnStart(msg.id);
 
+      // ... 离线失败样例（如示例中收到 "/fail" 时抛 PluginFatalError）
+
       const toolId = `echo-tool-${msg.id}`;
       ctx.toolStart(toolId, "echo", { text: msg.text });
 
-      // 需要用户审批时发 ask 并挂起等待 answer()
       if (msg.text.includes("[ask]")) {
         const requestId = `ask-${msg.id}`;
         ctx.ask({ requestId, kind: "permission", tool: "echo", input: { text: msg.text }, toolUse: toolId });
@@ -165,6 +167,8 @@ export class EchoAgentPlugin implements AgentPlugin {
           input: { text: msg.text },
           result: { text: allowed ? "allowed" : "denied", error: !allowed },
         });
+      } else {
+        // ... 普通工具调用完成，发 ctx.item({ kind: "tool", ... })
       }
 
       const reply = `Echo: ${msg.text}`;
@@ -198,20 +202,17 @@ export class EchoAgentPlugin implements AgentPlugin {
   }
 
   async command(name: string): Promise<CommandResult> {
+    // ... 按 capabilities.commands 实现对应命令（示例实现了 "status" 与 "model"）
     if (name === "status") return { command: "status", model: "echo-model", context: { usedTokens: 0, maxTokens: 4096 } };
     throw new Error(`Unsupported command: ${name}`);
   }
 
-  // 清单声明 "import": true 时实现这两个方法（规格 §3.5）
-  async listConversations(_params: AgentQueryParams): Promise<ImportConversation[]> { return []; }
-  async readConversation(_session: string, _params: AgentQueryParams): Promise<ImportBlock[]> { return []; }
+  // 清单声明 "import": true 时实现这两个方法（完整样本读取见 examples/plugins/echo-agent/index.ts）
+  async listConversations(_params: AgentQueryParams): Promise<ImportConversation[]> { /* ... */ return []; }
+  async readConversation(_session: string, _params: AgentQueryParams): Promise<ImportBlock[]> { /* ... */ return []; }
 
   async close(): Promise<void> {
-    this.activeTurn = false;
-    for (const [reqId, resolveWaiter] of this.pendingAsks) {
-      this.pendingAsks.delete(reqId);
-      resolveWaiter(null);
-    }
+    // ... 清理 pendingAsks 并终止下游子进程
   }
 }
 
@@ -223,13 +224,17 @@ if (import.meta.main) {
 写 Agent 插件时注意：
 
 - **不要往 `stdout` 打日志**：`stdout` 只能走协议 JSON 行，调试日志一律调用 `ctx.log(...)` 或写 `process.stderr`。
-- **SDK 已替你处理的事项**：按行读写 JSONL、校验 `proto === 1`、非阻塞分派控制消息（`send()` 等待期间照常收到 `answer`/`interrupt`/`close`）、按 `requestId` 去重并在 `answer()` 成功后发出 `ask_resolved`、把 `PluginFatalError` 转成 `fatal`、首帧是 `query` 时直接路由到 `listConversations`/`readConversation` 而不调 `init`、以及 `close`/EOF/`SIGTERM` 下只调一次 `close()`。
+- **SDK 已替你处理的事项**：按行读写 JSONL、校验 `proto === 1`、非阻塞分派控制消息（`send()` 等待期间照常收到 `answer`/`interrupt`/`close`）、按 `requestId` 去重并在 `answer()` 成功后发出 `ask_resolved`、首帧是 `query` 时直接路由到 `listConversations`/`readConversation` 而不调 `init`、以及 `close`/EOF/`SIGTERM` 下只调一次 `close()`。
+- **`PluginFatalError` 按阶段分流**：
+  - `init()` 阶段抛出 `PluginFatalError`（或未捕获异常）：SDK 发出 `fatal`（`retryable` 取错误字段，默认 `false`）并以非零码退出。
+  - 运行期 `send()` / `interrupt()` / `approval()` 抛出 `PluginFatalError`：SDK 发出 `error`（`recoverable: false`），调用一次 `close()` 后以非零码退出。
+  - 运行期 `send()` 抛出普通 `Error`：SDK 发出 `error`（`recoverable: true`），若当前是 `mode: "turn"` 且尚未发 `turn_end`，SDK 会补发 `turn_end` 让槽位回到空闲。
 - **迟到会话 ID**：如果下游在启动时还没有会话 ID，`init()` 先返回 `session: null`，拿到 ID 后在 `turn_start`、`ctx.session(id)` 或 `ctx.turnEnd({ reply, session: id })` 里补报。
 - **清理下游子进程**：在 `close()` 里关停你拉起的外部 CLI，避免测试和 macOS 上残留子进程。
 
 ### 3.2 IM 插件：`ImPlugin` 与 `runImPlugin`
 
-下面摘自 `examples/plugins/local-im/index.ts`，展示初始化、后台轮询与游标推进、私聊归一、发送结局区分、建 Bot 向导和关闭的写法：
+下面同样只摘录关键方法（省略部分用 `// ...` 标出，例如按能力声明实现的 `edit`、`dropButtons`、`answerPress`、`fetchAttachment`、`setMenu`）。完整可运行实现以 `examples/plugins/local-im/index.ts` 为准：
 
 ```ts
 import {
@@ -262,20 +267,29 @@ class LocalImPlugin implements ImPlugin {
   }
 
   private async poll(ctx: ImContext): Promise<void> {
+    let online = false;
     while (!this.stop.signal.aborted) {
-      const cursor = (await ctx.keptGet("sync_buf")) ?? "";
-      const batch = await (await fetch(new URL("/updates?cursor=" + encodeURIComponent(cursor), this.endpoint), {
-        signal: this.stop.signal,
-      })).json();
-      ctx.connected(true);
-      for (const { channel, ...message } of batch.messages) {
-        await ctx.keptSet("dm:" + message.sender, channel);
-        // 必须 await 等核心落库回执，私聊固定 chat === sender
-        await ctx.inbound({ ...message, chat: message.sender });
+      try {
+        const cursor = (await ctx.keptGet("sync_buf")) ?? "";
+        const batch = await (await fetch(new URL("/updates?cursor=" + encodeURIComponent(cursor), this.endpoint), {
+          signal: this.stop.signal,
+        })).json();
+        if (!online) ctx.connected(true);
+        online = true;
+        for (const { channel, ...message } of batch.messages) {
+          await ctx.keptSet("dm:" + message.sender, channel);
+          // 必须 await 等核心落库回执，私聊固定 chat === sender
+          await ctx.inbound({ ...message, chat: message.sender });
+        }
+        // 整批 inbound 全部拿到回执后，再推进批次游标
+        if (batch.nextCursor !== cursor) await ctx.keptSet("sync_buf", batch.nextCursor);
+        if (!batch.messages.length) await Bun.sleep(100);
+      } catch (err) {
+        if (this.stop.signal.aborted) return;
+        online = false;
+        ctx.connected(false, (err as Error).message);
+        await Bun.sleep(1000);
       }
-      // 整批 inbound 全部拿到回执后，再推进批次游标
-      if (batch.nextCursor !== cursor) await ctx.keptSet("sync_buf", batch.nextCursor);
-      if (!batch.messages.length) await Bun.sleep(100);
     }
   }
 
@@ -284,21 +298,16 @@ class LocalImPlugin implements ImPlugin {
     if (message.text.includes("[simulate-fail]")) {
       throw new PluginSendFailedError("Simulated platform refusal", { refused: true });
     }
-    const channel = await ctx.keptGet("dm:" + chat);
-    if (!channel) return { status: "failed", error: "missing channel mapping" };
-    // 网络超时或未捕获异常时，SDK 会自动映射为 { status: "unknown", error }，核心绝不重发
-    const res = await fetch(new URL("/send", this.endpoint), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channel, message }),
-      signal: this.stop.signal,
-    });
-    return (await res.json()) as SendResult;
+    // ... 按 ctx.keptGet("dm:" + chat) 还原通道，网络异常交由 SDK 映射为 unknown
+    return { status: "sent", messageId: "local-1" };
   }
+
+  // ... 若 capabilities 声明了 edit / buttons / menu 等能力，须实现对应的 edit / dropButtons / answerPress / setMenu 方法
 
   // 清单声明 "wizard": true 时实现该方法（规格 §3.6）
   async wizard(params: ImWizardParams, ctx: ImWizardContext): Promise<ImWizardDone> {
     ctx.qr("local-im://bind/" + params.botName, "用本地平台扫码");
+    ctx.link("http://localhost/bind/" + params.botName, "或打开链接");
     ctx.waiting("等待本地平台确认");
     const token = await ctx.input("本地平台的 token", { secret: true });
     return { config: { token }, text: "Local IM Bot 已绑定" };
@@ -378,17 +387,45 @@ bun build plugins/<id>/index.ts --outfile plugins/<id>/dist/index.js --target bu
 ```
 
 - 打包后把 `plugin.json` 的 `command` 改成 `["bun", "run", "${PLUGIN_DIR}/dist/index.js"]`（Windows 如需指定可执行名，可在 `commandByPlatform.win32` 写 `["bun.exe", "run", "${PLUGIN_DIR}/dist/index.js"]`）。
-- 打包进 `dist/` 后 `import.meta.dir` 会指向 `dist/`，读取插件目录内的离线样例或资源时，优先用 `process.env.RHODIUM_PLUGIN_DIR`。
+- **打包后用 `RHODIUM_PLUGIN_DIR` 找随包资源**：`examples/plugins/echo-agent/index.ts` 原版用 `import.meta.dir` 定位 `conversations/`，直接打包到 `dist/index.js` 后 `import.meta.dir` 会变成 `<插件目录>/dist`，导致第 8 组导入检查找不到 `conv_a1`。打包前把源码里的基准目录改成 `RHODIUM_PLUGIN_DIR`（复制出独立目录时一并带上 `conversations/`、`fixtures/`、`icon.svg`、`conformance.json`）：
+
+```ts
+const pluginDir = process.env.RHODIUM_PLUGIN_DIR || import.meta.dir;
+const folder = params.config.conversations || join(pluginDir, "conversations");
+// 相对目录同样按 pluginDir 解析：
+// dir: isAbsolute(s.dir) ? s.dir : resolve(pluginDir, s.dir)
+```
+
+- 打包并改完 `plugin.json` 后，立刻对**打包后的清单**跑一遍契约检查器，确认包含导入/向导在内的全部检查都通过：
+
+```sh
+bun scripts/plugin-conformance.ts --manifest plugins/<id>/plugin.json
+```
 
 ### 4.3 用 `rh dev --fake` 和看板本地调试
 
-为避免碰正式配置，建议建一个独立临时目录放调试用的 `config.toml`。下面是一份可直接启动的最小调试配置（把 `<临时目录>` 和 `<仓库目录>` 换成你本机的绝对路径；Windows 绝对路径建议用 TOML 单引号 `'C:\...'` 避免反斜杠转义）：
+为避免碰正式配置和本机已登录的真实 CLI（`claude`、`codex`、`pi`、`herdr`），按 `demo/run.ts` 的做法把 `[programs]`、Herdr 会话和用户目录全部隔离到临时目录。
+
+#### 第 1 步：准备隔离配置
+
+先记下两个绝对路径：`<临时目录>`（全新空目录，例如 Linux `/tmp/rhodium-test-dev`、Windows `C:\Users\<你>\AppData\Local\Temp\rhodium-test-dev`）和 `<仓库目录>`。下面配置把 `[bots.dev].target` 设成 `dev/try`，与后面新建的插件槽位同名，这样从终端假 IM 发出的消息会直接进入刚建的插件槽位。
+
+**Linux / macOS（`<临时目录>/config.toml`）：**
 
 ```toml
 stateDir = "<临时目录>/state"
 socketDir = "<临时目录>/run"
 holdBin = "<仓库目录>/dist/rh-hold"
 unitPrefix = "rhodium-test-dev-"
+
+[programs]
+claude = "<临时目录>/unavailable"
+codex = "<临时目录>/unavailable"
+pi = "<临时目录>/unavailable"
+herdr = "<临时目录>/unavailable"
+
+[herdr]
+session = "rhodium-test"
 
 [board]
 bind = "127.0.0.1"
@@ -400,51 +437,134 @@ platform = "fake"
 like = "qq"
 socket = "127.0.0.1:17801"
 owner = "dev-owner"
-target = "dev/main"
+target = "dev/try"
+```
+
+**Windows（`<临时目录>\config.toml`，绝对路径用 TOML 单引号避免反斜杠转义）：**
+
+```toml
+stateDir = '<临时目录>\state'
+socketDir = '<临时目录>\run'
+holdBin = '<仓库目录>\dist\rh-hold.exe'
+unitPrefix = "rhodium-test-dev-"
+
+[programs]
+claude = '<临时目录>\unavailable.exe'
+codex = '<临时目录>\unavailable.exe'
+pi = '<临时目录>\unavailable.exe'
+herdr = '<临时目录>\unavailable.exe'
+
+[herdr]
+session = "rhodium-test"
+
+[board]
+bind = "127.0.0.1"
+port = 7800
+auth = "none"
+
+[bots.dev]
+platform = "fake"
+like = "qq"
+socket = "127.0.0.1:17801"
+owner = "dev-owner"
+target = "dev/try"
 ```
 
 接入正在开发的插件有两种方式：
 
-- **直接调试仓库里的源码**：在上面这份 `config.toml` 末尾加 `[plugins.<id>]` 和 `path = "<仓库目录>/plugins/<id>"`，改完代码重启 `rh dev` 即可生效。
-- **验证自动扫描与独立产物**：按 4.2 节打包插件后，把整个插件目录放进 `<临时目录>/plugins/<id>/`，`config.toml` 里不写 `[plugins.<id>]`，重启后直接被自动扫到。
+- **直接调试仓库里的源码**：在上面这份 `config.toml` 末尾加 `[plugins.<id>]` 和 `path = "<仓库目录>/plugins/<id>"`（Windows 用单引号），改完代码重启 `rh dev` 即可生效。
+- **验证自动扫描与独立产物**：按 4.2 节打包插件（改用 `RHODIUM_PLUGIN_DIR` 定位资源）后，把整个插件目录放进 `<临时目录>/plugins/<id>/`，`config.toml` 里不写 `[plugins.<id>]`，重启后直接被自动扫到。
 
-启动调试实例：
+#### 第 2 步：设好文件权限并启动隔离实例
 
-Linux / macOS（加 `RHODIUM_TEST_DETACHED=1` 可直接脱离 systemd 跑托管进程；Windows 原本就是独立进程模式，无需该变量）：
+**路线 A：Linux（detached 模式，免 systemd，适合所有无 systemd 环境与 CI 复现）**
 
-```sh
-mkdir -p <临时目录>/run && chmod 700 <临时目录>/run
-chmod 600 <临时目录>/config.toml
-RHODIUM_TEST_DETACHED=1 ./dist/rhodium rh dev --fake --config <临时目录>/config.toml
-```
-
-Windows（PowerShell）：
-
-```powershell
-.\dist\rhodium.exe rh dev --fake --config <临时目录>\config.toml
-```
-
-启动后可以同时从三个入口调试：
-
-1. **网页看板**（Linux 与 Windows 通用）：浏览器打开 `http://127.0.0.1:7800`。检查插件加载状态、插件图标，直接在看板上建工作区、新建该 agent 的槽位、发消息、看工具折叠和审批交互；声明了 `import` 的 agent 插件可以在导入弹窗里验证列表和导入。
-2. **终端假 IM**：在 `rh dev --fake` 终端里直接敲文字并回车，消息会以主人身份进入默认槽位并打印回复。Linux/macOS 按 `Ctrl-D`、Windows 按 `Ctrl-Z` 再回车退出。
-3. **`rh` 命令行**：另开一个交互终端，指向同一个 socket 检查诊断或跑建 Bot 向导（Linux 交互终端也可以直接用 `rh ws`、`rh new`；Windows 本地 CLI 放行 `rh doctor`、`rh ls` 与 `rh bot`，建工作区和建槽位请走网页看板或已配对 IM）：
+Linux 必须**同时**设置 `NODE_ENV=test` 和 `RHODIUM_TEST_DETACHED=1` 才走 detached 托管模式；同时把 `HOME` 和 `XDG_RUNTIME_DIR` 指向临时目录，防止 `rh doctor` 探测本机已登录账号：
 
 ```sh
-# Linux / macOS（交互终端）
-RHODIUM_SOCKET=<临时目录>/run/rh.sock ./dist/rhodium rh doctor
-RHODIUM_SOCKET=<临时目录>/run/rh.sock ./dist/rhodium rh ws dev <临时目录>
-RHODIUM_SOCKET=<临时目录>/run/rh.sock ./dist/rhodium rh new dev/try --agent <你的agent插件ID>
-# 声明了 wizard: true 的 IM 插件：
-RHODIUM_SOCKET=<临时目录>/run/rh.sock ./dist/rhodium rh bot my-bot <你的IM插件ID>
+ROOT=/tmp/rhodium-test-dev
+mkdir -p "$ROOT/run" && chmod 700 "$ROOT/run"
+chmod 600 "$ROOT/config.toml"
+HOME="$ROOT" XDG_RUNTIME_DIR="$ROOT/run" NODE_ENV=test RHODIUM_TEST_DETACHED=1 \
+  ./dist/rhodium rh dev --fake --config "$ROOT/config.toml"
 ```
 
+**路线 B：Windows（PowerShell）**
+
+Windows 启动时会强制校验 `config.toml` 的 NTFS 权限（普通新建文件若继承了其他账号的访问权会被直接拒绝），先设成仅本人可访问，再在单独开的调试 PowerShell 窗口里把用户目录环境变量指向临时目录后启动：
+
 ```powershell
-# Windows (PowerShell)
-$env:RHODIUM_SOCKET = "<临时目录>\run\rh.sock"
-.\dist\rhodium.exe rh doctor
-# 声明了 wizard: true 的 IM 插件：
-.\dist\rhodium.exe rh bot my-bot <你的IM插件ID>
+$root = Join-Path $env:TEMP "rhodium-test-dev"
+New-Item -ItemType Directory -Force "$root\run" | Out-Null
+# 把刚写好的 config.toml 设成本人私有 ACL（去掉继承，只保留当前用户完全控制）
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls "$root\config.toml" /inheritance:r /grant:r "*${me}:(F)" | Out-Null
+
+# 仅在当前调试窗口隔离用户目录，避免探测本机登录态
+$env:HOME = $root
+$env:USERPROFILE = $root
+$env:APPDATA = $root
+$env:LOCALAPPDATA = $root
+.\dist\rhodium.exe rh dev --fake --config "$root\config.toml"
+```
+
+**路线 C：macOS**
+
+macOS 与 Windows 同为独立托管进程模式，只需设权限并隔离 `HOME`：
+
+```sh
+ROOT=/tmp/rhodium-test-dev
+mkdir -p "$ROOT/run" && chmod 700 "$ROOT/run"
+chmod 600 "$ROOT/config.toml"
+HOME="$ROOT" ./dist/rhodium rh dev --fake --config "$ROOT/config.toml"
+```
+
+**路线 D：普通 Linux（有 systemd 用户会话，需要实测交互终端 `rh bot` 向导时用）**
+
+不设 `NODE_ENV=test` 和 `RHODIUM_TEST_DETACHED=1`，保留当前用户的 `XDG_RUNTIME_DIR` 以便 `systemd-run --user` 工作，但仍把 `HOME` 指向临时目录并用 `unitPrefix = "rhodium-test-dev-"` 隔离单元：
+
+```sh
+ROOT=/tmp/rhodium-test-dev
+mkdir -p "$ROOT/run" && chmod 700 "$ROOT/run"
+chmod 600 "$ROOT/config.toml"
+HOME="$ROOT" ./dist/rhodium rh dev --fake --config "$ROOT/config.toml"
+```
+
+调试结束后如果启过插件槽位，清掉测试托管单元：`systemctl --user stop 'rhodium-test-dev-*'; systemctl --user reset-failed 'rhodium-test-dev-*'`。
+
+#### 第 3 步：按平台使用调试入口
+
+各平台下能用的入口不同——Windows、macOS 以及 Linux detached 模式（`NODE_ENV=test RHODIUM_TEST_DETACHED=1`）里，守护进程会把所有本地 CLI 请求的 `tty` 置为 `false`，所以本地 `rh` 只放行 `rh doctor`、`rh ls` 等只读命令，**`rh bot` 会报“只有用户本人能用”**（且 `rh bot` 的不回显密码输入依赖 `stty`，原生 PowerShell 不具备），新配置未设 `mainChat` 时 `rh ws` / `rh new` 也无法直接执行。请按平台选择对应入口：
+
+1. **Windows / macOS / Linux detached 模式（推荐通用路径）**：
+   - **建工作区、建插件槽位、试导入和对话**：打开浏览器访问看板 `http://127.0.0.1:7800`，先建工作区 `dev`（目录填 `<临时目录>`），再建槽位 `dev/try` 并选中你的 agent 插件，查看插件图标与加载状态，直接在对话页发消息或打开导入弹窗验证。
+   - **终端假 IM 联调**：建好 `dev/try` 后，回到 `rh dev --fake` 终端输入文字并回车，消息会按 `[bots.dev].target = "dev/try"` 直达刚建的插件槽位并打印回复。Linux/macOS 按 `Ctrl-D`、Windows 按 `Ctrl-Z` 再回车退出。
+   - **只读诊断（另开终端）**：
+     ```sh
+     # Linux / macOS
+     ROOT=/tmp/rhodium-test-dev
+     HOME="$ROOT" RHODIUM_SOCKET="$ROOT/run/rh.sock" ./dist/rhodium rh doctor
+     HOME="$ROOT" RHODIUM_SOCKET="$ROOT/run/rh.sock" ./dist/rhodium rh ls
+     ```
+     ```powershell
+     # Windows (PowerShell)
+     $root = Join-Path $env:TEMP "rhodium-test-dev"
+     $env:HOME = $root; $env:USERPROFILE = $root; $env:APPDATA = $root; $env:LOCALAPPDATA = $root
+     $env:RHODIUM_SOCKET = "$root\run\rh.sock"
+     .\dist\rhodium.exe rh doctor
+     .\dist\rhodium.exe rh ls
+     ```
+   - **验证 IM 插件建 Bot 向导**：在这三种模式下不通过本地 `rh bot` 跑向导，直接用第 5 节的契约检查器（第 8 组）和插件集成测试验证向导流程。
+2. **普通 Linux（路线 D，带 systemd 用户会话，在真实交互终端运行）**：
+   - 除看板与假 IM 外，还可以在另一个真实交互终端里直接建工作区、建槽位并运行 `rh bot` 向导。注意新配置没有 `mainChat`，首次跑 `rh bot` 必须把已有目标槽位写在最后：
+
+```sh
+ROOT=/tmp/rhodium-test-dev
+HOME="$ROOT" RHODIUM_SOCKET="$ROOT/run/rh.sock" ./dist/rhodium rh doctor
+HOME="$ROOT" RHODIUM_SOCKET="$ROOT/run/rh.sock" ./dist/rhodium rh ws dev "$ROOT"
+HOME="$ROOT" RHODIUM_SOCKET="$ROOT/run/rh.sock" ./dist/rhodium rh new dev/try --agent my-agent
+# 声明了 wizard: true 的 IM 插件（须写明已有目标槽位 dev/try）：
+HOME="$ROOT" RHODIUM_SOCKET="$ROOT/run/rh.sock" ./dist/rhodium rh bot my-bot my-im dev/try
 ```
 
 也可以先跑仓库自带的零 Key 演示脚本看一遍完整流程：
@@ -455,10 +575,11 @@ bun demo/run.ts --pause
 bun demo/run.ts --port 0
 ```
 
-调试出错时，看两处日志：
+调试出错时，看下面三处：
 
-- 守护进程与 IM 插件 stderr：`<临时目录>/state/dev.log`
-- Agent 插件 stderr：`<临时目录>/state/hold/<对话ID>/err.log`
+- **守护进程与脱敏错误**：`<临时目录>/state/dev.log` 记录守护进程日志，以及核心对 IM 插件记录的脱敏连接/协议错误。
+- **Agent 插件 `stderr`**：`<临时目录>/state/hold/<对话ID>/err.log`。
+- **IM 插件 `stderr`**：为防平台凭据进日志，核心的 IM 适配器会直接消费并丢弃插件的 `stderr`，不会写入 `dev.log`。需要看 IM 插件自己的 `stderr` 调试输出时，请直接独立运行离线插件（例如 `bun run plugins/<id>/index.ts` 并喂测试 JSON-RPC 帧），或在插件单元测试里给 `runImPlugin(plugin, { stderr })` 传入内存流收集。
 
 ---
 
@@ -523,21 +644,28 @@ Agent 示例（参考 `examples/plugins/echo-agent/conformance.json`）：
 - `interruptText`：必须触发一个不会立刻结束的回合，以便检查器发送 `interrupt`。
 - `importSession`：声明 `import: true` 时提供一段存在的样例对话 ID。
 
-IM 示例（参考 `examples/plugins/local-im/conformance.json`）：
+IM 示例（与 `examples/plugins/local-im/conformance.json` 一致）：
 
 ```json
 {
-  "chat": "conf-user-1",
+  "localPlatform": true,
   "kept": { "dm:conf-user-1": "dm-99", "sync_buf": "1" },
   "failureText": "[simulate-fail]",
   "wizardInputs": { "本地平台的 token": "conf-token" }
 }
 ```
 
+- `localPlatform: true`：仅用于内置 `local-im` 示例协议。未通过 `--config` 指定 `endpoint` 时，检查器会自起一个本地回环平台并投递样例入站消息，触发示例写入 `dm:conf-user-1` 与 `sync_buf`。
+- 写你自己的 IM 插件（例如 `weixin`）时，去掉 `localPlatform`，先拉起插件自带的本地模拟服务（如 `mock-weixin-server`），再通过 `--config` 传入地址和占位凭据（或在插件自己的测试脚本里自动起停它）：
+
+```sh
+bun scripts/plugin-conformance.ts --manifest plugins/weixin/plugin.json \
+  --config '{"baseUrl":"http://127.0.0.1:18080","token":"mock-weixin-token"}'
+```
+
 - `kept`：要求插件写入并在重启后读回的持久化键值对（纯无状态平台才填 `"stateless": true`）。
-- `failureChat` / `failureText`：让插件明确返回 `{ status: "failed", error }` 的输入。
+- `chat` / `failureChat` / `failureText`：指定测试用户 ID 及触发明确 `{ status: "failed", error }` 拒收的输入。
 - `wizardInputs`：按 `wizard_input` 的 `label` 映射测试输入值，供 `"wizard": true` 的插件跑第 8 项。
-- 如果 IM 插件需要本地模拟服务（如 `mock-weixin-server`），可以在跑检查器前拉起它并通过 `--config '{"baseUrl":"http://127.0.0.1:..."}'` 传入，或在插件自己的测试脚本里自动起停。
 
 ---
 
@@ -647,7 +775,7 @@ PR 正文里附上以下证据：
 3. **不得使用 Claude 订阅凭据**：插件和 `pi` 不得读取或复用 `~/.claude` 下的登录态或 Anthropic 凭据。核心拉起插件前会清洗 `ANTHROPIC_*`、`CLAUDE*`（Windows 按大小写不敏感匹配），`rh doctor` 也会巡检插件进程子树。
 4. **只有用户本人能触发 agent**：IM 插件只管平台身份认证并原样上报发送者 ID，配对和主人校验（`owners.includes(sender)`）由核心集中执行，绝不绕过核心触发 agent。
 5. **仓库里不放任何密钥或隐私**：真实 API Key、Bot Token、cookie、微信号、个人路径和私人聊天记录一律不进源码、样例、配置或提交历史。
-6. **不改核心源码，不碰用户正在运行的实例**：插件只写在 `plugins/<id>/`；调试用独立临时目录和 `rhodium-test-*` 前缀，不碰 `~/.claude`、`~/.codex`、`~/.pi`、`~/.config`、正式 Rhodium 实例和用户的 Herdr 会话。
+6. **不改核心源码，不碰用户正在运行的实例**：插件只写在 `plugins/<id>/`；调试必须按 4.3 节覆盖 `[programs]`、`[herdr] session = "rhodium-test"` 和 `HOME`/`USERPROFILE`（并加 `rhodium-test-*` 前缀），防止 `rh doctor` 或内置槽位探测本机 `~/.claude`、`~/.codex`、`~/.pi`、`~/.config`、正式 Rhodium 实例或用户的 Herdr 会话。
 
 ---
 
