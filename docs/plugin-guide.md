@@ -91,7 +91,7 @@ Copy-Item -Recurse examples\plugins\local-im plugins\my-im
 |---|---|---|
 | `label` | 是 | 来源行与看板使用的平台名称（不能写 `statusName`）。 |
 | `capabilities` | 是 | 静态能力表（运行时以 `init` 返回值为准）：必填 `progress`（`"append"` 或 `"edit"`）、`buttons`（`boolean \| "markdown"`）、`sendLimit`（`{ kind: "rate", perChatPerSecond: 正数 }`，禁止 `"qq_quota"`）、`menu`（`{ scope: "global" \| "per_chat", maxItems: 非负整数, row?: ... }`）、`maxTextLength`（正整数）、`maxFileBytes`（`{ image, file }`）、`markdown`（必须显式填对象或 `null`，不能省略）。 |
-| `wizard` | 否 | 设为 `true` 时，插件支持终端 `rh bot <名字> <插件ID>` 建 Bot 向导（[规格 §3.6](spec/plugins.md#36-im-插件建-bot-向导rh-bot-名字-插件平台)）。缺省为 `false`。 |
+| `wizard` | 否 | 设为 `true` 时，插件支持网页看板「新建 Bot」和终端 `rh bot <名字> <插件ID>`（[规格 §3.6](spec/plugins.md#36-im-插件建-bot-向导rh-bot-名字-插件平台)）。缺省为 `false`。 |
 
 ### 保留内置名称
 

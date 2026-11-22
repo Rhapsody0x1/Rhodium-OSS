@@ -23,7 +23,7 @@ test("the board, slot and service report the selectable plugins and load failure
       expect(metadata?.agents.map(a => a.id)).toEqual(["claude", "pi", "codex", "echo-agent"]);
       expect(metadata?.agents.at(-1)).toMatchObject({ name: "Echo Agent", tui: false, importable: true, icon: "api/plugin-icon?id=echo-agent&v=0.1.0" });
       expect(metadata?.agents[0]).not.toHaveProperty("icon");
-      expect(metadata?.platforms).toContainEqual({ id: "local-im", label: "Local IM", icon: "api/plugin-icon?id=local-im&v=0.1.0" });
+      expect(metadata?.platforms).toContainEqual({ id: "local-im", label: "Local IM", icon: "api/plugin-icon?id=local-im&v=0.1.0", wizard: true });
       expect(metadata?.platforms.find(p => p.id === "qq")).not.toHaveProperty("icon");
       expect(metadata?.plugins).toContainEqual({ id: "offline", status: "disabled" });
       expect(metadata?.plugins).toContainEqual({ id: "broken", status: "failed", error: expect.stringContaining("missing-dir") });

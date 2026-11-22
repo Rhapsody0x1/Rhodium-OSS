@@ -4495,12 +4495,11 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
       if (!BOT_NAME.test(name)) refuse(`Bot 名字只能由英文字母、数字和 _ - 组成，不超过 64 个字符：${name}`);
       if (name === "me") refuse("Bot 不能叫 me：rh send me 另有用处。");
       if (name === "web") refuse("Bot 不能叫 web：还在跑的 agent 可能照旧写 rh send web。");
-      // A loaded IM plugin that declares the wizard makes its bots too (spec plugins §3.6), at the terminal only.
+      // A loaded IM plugin that declares the wizard makes its bots too (spec plugins §3.6).
       const rec = ctx.plugins?.plugins[platform];
       const im = rec?.status === "loaded" && rec.manifest.kind === "im" ? rec.manifest : undefined;
       if (!Object.hasOwn(MADE, platform) && !im) refuse(`平台只能是 ${series(Object.keys(MADE), "或")}：${platform}`);
       if (im && !im.wizard) refuse(`插件 ${platform} 没有建 Bot 向导：在配置文件里手写 [bots.${name}]，再用 rh pair ${name} 配对。`);
-      if (im && who.kind === "you" && who.board === true) refuse(`插件 ${platform} 的 Bot 只能在终端用 rh bot 建。`);
       if (im && (values["api-root"] !== undefined || values.paste)) refuse(`插件平台不收 --api-root 和 --paste：要指向本地模拟服务，写在 [plugins.${platform}.config] 里。`);
       const how: BotDef = im ? { needed: im.requiredConfig ?? [], optional: im.optionalConfig ?? [], how: "", another: "再走一次向导，换一个账号" } : MADE[platform as Made];
       // Not the row of one rh bot rm took out, which a bot of its name takes over (architecture §14.8).

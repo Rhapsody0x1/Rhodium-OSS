@@ -24,7 +24,7 @@
 - 不做插件市场、远程在线下载、热加载或运行时免重启动态插拔插件代码（启用、禁用或升级插件需要重启 `rhodium`）。
 - 不做插件 agent 的 Herdr TUI 模式切换与网页终端嵌入（插件槽位的 `tui` 能力为 `false`）。
 - 不做插件 agent 的 Herdr pane 导入。插件对话只能按对话 ID 导入（§3.5）。
-- 不做插件 IM 的网页和 IM 里的建 Bot 向导。插件向导第一版只在终端 `rh bot` 里跑（§3.6）；不声明向导的插件 IM，Bot 仍在 `config.toml` 中手写 `[bots.<name>]` 后配合 `rh pair` 配对主人。
+- 不做插件 IM 在 IM 里的建 Bot 向导（§3.6）。不声明向导的插件 IM，Bot 可在 `config.toml` 中手写 `[bots.<name>]` 后用 `rh pair` 配对主人。
 - 不扫描家目录或全局目录里的插件，扫描 `plugins/` 时不跟随符号链接（§4.5）。
 - 不做插件 IM 的 QQ 专属被动回复窗口与额度重投模型（仅保留内置 `qq` 自己用 `qq_quota`）。
 - 不做跨插件版本热兼容或操作系统级容器沙箱。
@@ -134,7 +134,7 @@ sequenceDiagram
 | 槽位生命周期 | 空闲回收（`idleReap`）、崩溃自动续跑、连续崩溃熔断、并发上限（`maxRunning`）、定时任务、`interrupt` 超时回收 | 在 `close` 时正常清理下游进程并退出 | — |
 | 对话记录与展示 | 按幂等键写入[托管对话记录](../../GLOSSARY.md)，驱动网页对话页、`rh read`、槽位时间线 `/resume`；导入时把插件转好的标准块写在托管对话记录开头 | 通过 `turn_start` / `item` / `tool_start` / `turn_end` 报出标准事件；声明 `import` 的插件回答一次性查询，列出本机对话并把已有内容转成标准块（§3.5） | 不支持 Herdr pane 导入；不接管已有外部进程 |
 | 合规与安全 | 保留内置名称（含 `herdr`）、清洗环境变量（含 Windows 混合大小写过滤）、集中执行配对、主人校验（`owners.includes(m.sender)`）与投递决定、`rh doctor` 巡检插件进程子树 | IM 插件承担平台账号身份认证并原样上报发送者 ID（私聊归一为用户 ID）；Agent 插件读取 `init.systemPromptFile`，遵守三条红线（不得拉起 `claude` 或包装 Claude Code、不得用 Claude 订阅、仅本人触发） | 插件属于用户显式信任代码；不允许任何非内置 `claude` 驱动获取 Claude 订阅凭据 |
-| 路由与渲染降级 | 消息排队、分段截断、Markdown 降级纯文本、工具折叠、`/rh_*` 命令、按钮分页、发送限流与超时记 `unknown` | 如实声明 `Capabilities`（agent 能力或 IM 平台能力） | 插件 IM 不支持 `qq_quota`；建 Bot 向导只在终端 `rh bot` 里跑，且只对声明 `wizard` 的插件（§3.6） |
+| 路由与渲染降级 | 消息排队、分段截断、Markdown 降级纯文本、工具折叠、`/rh_*` 命令、按钮分页、发送限流与超时记 `unknown` | 如实声明 `Capabilities`（agent 能力或 IM 平台能力） | 插件 IM 不支持 `qq_quota`；建 Bot 向导可在网页看板和终端 `rh bot` 里跑，且只对声明 `wizard` 的插件（§3.6） |
 | 终端与专属特性 | 统一拒绝提示（切 TUI、`/ultracode` 等） | — | 不支持切 Herdr TUI；不支持 Claude 订阅额度窗口自动续跑 |
 
 ### 3.2 Agent 插件协议：`rh-agent/1`
@@ -482,7 +482,7 @@ runImPlugin(new WeixinImPlugin());
 
 ### 3.6 IM 插件建 Bot 向导：`rh bot <名字> <插件平台>`
 
-声明支持向导的 IM 插件，可以像内置 QQ、飞书那样，在终端里由 `rh bot` 走完建 Bot 的流程（[建 Bot 向导](../../GLOSSARY.md)）。插件报出一步步要做什么，核心负责显示、读输入、写配置和配对。第一版只在终端 `rh bot` 里跑，网页和 IM 里的建 Bot 向导不列插件平台。
+声明支持向导的 IM 插件可从网页看板「新建 Bot」或终端 `rh bot` 走完建 Bot 的流程（[建 Bot 向导](../../GLOSSARY.md)）。两处复用相同的插件协议。网页列出已加载且声明 `wizard: true` 的插件，显示二维码、链接、等待状态和输入提示。核心校验凭据、写配置和配对主人。
 
 #### 清单字段
 
@@ -614,7 +614,7 @@ runImPlugin(new WeixinImPlugin());
 | `requiredConfig` / `optionalConfig` | 通用 | 声明插件期望在 `[plugins.<id>.config]` 或 `[bots.<name>]` 中提供的键名列表；核心用于启动前检查与脱敏提示；建 Bot 向导的完成字段也只能用这些键（§3.6） |
 | `icon` | 通用，可选 | 插件目录里一个 SVG 或 PNG 的相对路径；检查不过只丢图标（§4.6） |
 | `import` | 仅 `agent`，可选 | 为 `true` 时插件回答一次性查询，支持导入本机对话（§3.5） |
-| `wizard` | 仅 `im`，可选 | 为 `true` 时插件支持 `rh bot` 建 Bot 向导（§3.6） |
+| `wizard` | 仅 `im`，可选 | 为 `true` 时插件支持网页和 `rh bot` 建 Bot 向导（§3.6） |
 
 #### 保留内置名称与合规禁止项
 
@@ -1108,7 +1108,7 @@ target = "work/main"
   - 向导用例（用 `local-im`，终端用假的输入）：二维码、链接、等待依次出现在 `rh bot` 输出里；`secret` 输入不回显；完成后 `config.toml` 里有新 `[bots.<名字>]` 且只含声明过的键，随后显示配对码，发码后流程 `done`；
   - 首步就是 `wizard_input` 的向导：用户超过 `pluginHandshake` 才输入，流程照常走完；
   - 失败用例：首步超时、`wizard` 报错、中途退出、未声明的键、带 `owner`、缺 `requiredConfig`，都失败且配置不变；Ctrl-C 后插件进程退出、配置不变；
-  - 没声明 `wizard` 的插件平台，`rh bot` 照旧拒绝并提示手写配置；网页建 Bot 向导不列插件平台；
+  - 没声明 `wizard` 的插件平台，`rh bot` 照旧拒绝并提示手写配置；网页建 Bot 向导只列声明了 `wizard` 的插件平台；
   - 契约测试器对 `local-im` 的向导检查通过，对未声明 `wizard` 的插件跳过；
   - 组员的 `weixin` 插件随后按 §9.3 实现向导，并用 `mock-weixin-server` 跑通同一套契约检查。
 
