@@ -52,6 +52,9 @@ jobs:
       - run: bun scripts/plugin-conformance.ts --manifest examples/plugins/local-im/plugin.json
       - run: bun --config=bunfig.ci.toml test ./plugins/weixin/weixin.test.ts
       - run: bun plugins/weixin/conformance.ts
+      - run: bun --config=bunfig.ci.toml test ./plugins/agy/agy.test.ts
+      - run: >-
+          bun scripts/plugin-conformance.ts --manifest plugins/agy/plugin.json --config '{"fixture":"builtin"}'
   macos-check:
     if: ${{ inputs.macos_check }}
     runs-on: macos-15
@@ -126,6 +129,10 @@ jobs:
           bun --config=bunfig.ci.toml test ./plugins/weixin/weixin.test.ts
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           bun plugins/weixin/conformance.ts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          bun --config=bunfig.ci.toml test ./plugins/agy/agy.test.ts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          bun scripts/plugin-conformance.ts --manifest plugins/agy/plugin.json --config '{"fixture":"builtin"}'
       - name: Register real tasks and verify automatic daemon restart
         if: github.event_name == 'workflow_dispatch'
         shell: powershell

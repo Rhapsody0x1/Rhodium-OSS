@@ -1,0 +1,21 @@
+{
+  "sessionId": "agy-fixture-session",
+  "updates": [
+    {"sessionUpdate":"tool_call","toolCallId":"list-1","title":"List files","rawInput":{"path":"."},"status":"in_progress"},
+    {"sessionUpdate":"tool_call_update","toolCallId":"list-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"README.md"}}]}
+  ],
+  "permissionOptions": [
+    {"optionId":"always","name":"Always allow","kind":"allow_always"},
+    {"optionId":"once","name":"Allow once","kind":"allow_once"},
+    {"optionId":"deny","name":"Deny once","kind":"reject_once"}
+  ],
+  "question": {
+    "mode":"form",
+    "message":"Choose a color",
+    "requestedSchema": {
+      "type":"object",
+      "properties":{"color":{"type":"string","title":"Choose a color","oneOf":[{"title":"Violet","const":"violet"},{"title":"Orange","const":"orange"}]}},
+      "required":["color"]
+    }
+  }
+}
