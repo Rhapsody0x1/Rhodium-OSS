@@ -275,4 +275,31 @@ describe("dsh 真实传输层(假 dsh)", () => {
     await cleanup(io);
     rmSync(dir, { recursive: true, force: true });
   }, 25000);
+
+  test("发消息前重新拉起 dsh 期间 /stop:立刻 turn_end,不发 prompt,下一条照常", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dsh-rt-"));
+    const program = writeFakeProgram(dir, { FAKE_DSH_INIT_DELAY_MS: "800" });
+    const io = new Harness(new DshAgentPlugin());
+    io.write(runtimeInit(program, true));
+    await io.waitFor((f) => f.type === "ready", "ready", 15000);
+    io.write({ type: "send", id: "in-1", text: "need approval first", human: true, mode: "turn" });
+    await io.waitFor((f) => f.type === "ask", "ask", 15000);
+    io.write({ type: "interrupt" });
+    await io.waitFor((f) => f.type === "turn_end", "interrupted turn_end", 15000);
+    const ends = (): Frame[] => io.outgoing.filter((f) => f.type === "turn_end");
+
+    io.write({ type: "send", id: "in-2", text: "second", human: true, mode: "turn" }); // dsh 已停,先重新拉起(initialize 慢 800ms)
+    await Bun.sleep(300);
+    io.write({ type: "interrupt" });
+    await io.waitFor(() => ends().length === 2, "second turn_end", 3000);
+    expect(ends()[1]!.reply).toBeUndefined();
+
+    io.write({ type: "send", id: "in-3", text: "third", human: true, mode: "turn" });
+    await io.waitFor(() => ends().length === 3, "third turn_end", 15000);
+    expect(String(ends()[2]!.reply)).toContain("Echo: third");
+    expect(io.outgoing.some((f) => f.type === "taken" && f.inputId === "in-2")).toBe(false);
+    expect(io.outgoing.some((f) => String(f.reply ?? "").includes("Echo: second"))).toBe(false);
+    await cleanup(io);
+    rmSync(dir, { recursive: true, force: true });
+  }, 30000);
 });

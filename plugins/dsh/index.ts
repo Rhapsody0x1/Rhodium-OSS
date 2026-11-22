@@ -116,6 +116,8 @@ export class DshAgentPlugin implements AgentPlugin {
   private pendingAsks = new Map<string, PendingAsk>();
   /** /compact 进行中:此时 /stop 也要停掉 dsh 并发 turn_end,否则只能等核心的中断超时。 */
   private compacting = false;
+  /** send 从拉起 dsh 到 dsh 报 running 之前:此时的 /stop 也要发 turn_end,同 compacting。 */
+  private sending = false;
 
   async init(params: AgentInitParams, ctx: AgentContext): Promise<AgentReadyInfo> {
     this.ctxRef = ctx;
@@ -252,9 +254,20 @@ export class DshAgentPlugin implements AgentPlugin {
   // ---------------------------------------------------------------------------
 
   async send(msg: AgentSendParams, ctx: AgentContext): Promise<void> {
+    // 拉起前就置位:中断后的首条消息要先重新拉起 dsh,这期间的 /stop 也要发 turn_end(同 /compact)。
     this.turnAborted = false;
-    await this.ensureLaunched();
-    if (this.closing || !this.transport) return;
+    this.sending = true;
+    try {
+      await this.ensureLaunched();
+    } catch (err) {
+      this.sending = false;
+      if (this.turnAborted) return; // 拉起中被 /stop 杀掉:回合已由 interrupt() 收尾
+      throw err;
+    }
+    if (this.closing || !this.transport || this.turnAborted) {
+      this.sending = false; // 被 /stop 时不发 prompt,也不发 taken
+      return;
+    }
 
     const blocks: DshContentBlock[] = [];
     if (!this.sessionWritten && this.systemPrompt) blocks.push({ type: "text", text: this.systemPrompt });
@@ -263,7 +276,6 @@ export class DshAgentPlugin implements AgentPlugin {
     this.currentInputId = msg.id;
     this.lastAssistantText = null;
     this.turnError = null;
-    this.turnAborted = false;
     const done = Promise.withResolvers<void>();
     this.turnDone = done;
     const aborted = (): boolean => this.turnAborted || this.turnDone !== done;
@@ -286,6 +298,7 @@ export class DshAgentPlugin implements AgentPlugin {
       throw new PluginFatalError(msg, { retryable: true });
     } finally {
       if (this.turnDone === done) this.turnDone = null;
+      this.sending = false;
       this.activeTurn = false;
       this.currentInputId = null;
     }
@@ -567,9 +580,10 @@ export class DshAgentPlugin implements AgentPlugin {
       pending.answer.resolve(null);
       pending.delivered.resolve();
     }
-    if (!this.activeTurn && !hadPending && !this.compacting) return;
+    if (!this.activeTurn && !hadPending && !this.compacting && !this.sending) return;
     this.turnAborted = true;
     this.activeTurn = false; // 先置位:旧进程在退出前推来的 idle 不再产生第二个 turn_end(审查意见 9)
+    this.sending = false; // 杀旧进程期间再来的 /stop 不再发第二个 turn_end
     this.currentInputId = null;
     const transport = this.transport;
     this.transport = null;
