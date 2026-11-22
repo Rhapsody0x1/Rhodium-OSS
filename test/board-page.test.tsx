@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { Router } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
 import { BoardView, cutOrNone, endRoom, facesRoom, keepOf, nextSlot, shrunk, SideList, squeeze, steady, type Row } from "../web/src/board";
-import { boardKey, chatAt, clock, dotOf, Max, slotHash, THEME, type KeyLike } from "../web/src/common";
+import { AgentLogo, boardKey, chatAt, clock, dotOf, Max, slotHash, THEME, type KeyLike } from "../web/src/common";
 import { Jump, jumpList } from "../web/src/jump";
 import { moment } from "../src/panels";
 import { builds, Events, follow, heard, json, mayPrefetch, Messages, queryClient, refresh, reloadNow, unread, unsent, type Block, type BoardData, type Card, type MessagesData, type Sent, type SlotData, type SlotEvent } from "../web/src/data";
@@ -28,7 +28,8 @@ import { answerText } from "../web/src/asks";
 import { cut, pathsPasted } from "../web/src/terminal";
 import { Answer, matching } from "../web/src/palette";
 import { greyOf, MeterBody, Ring, Strips } from "../web/src/meter";
-import { Face } from "../web/src/faces";
+import { Face, Mark } from "../web/src/faces";
+import { Metadata } from "../web/src/metadata";
 
 /** The event streams the page opens. A stream the browser gives up on, as the HTML spec has it for
  *  any reply but 200, is CLOSED when its error fires; a dropped one is CONNECTING and retried by the
@@ -2891,4 +2892,19 @@ test("plugin information cards show known context without offering unsupported a
   const context = renderToStaticMarkup(<InfoCard anchor={{ current: null }} card={{ command: "context", ...card.context! }} close={() => {}} run={async () => {}} supports={() => false} />);
   expect(context).toContain("10%");
   expect(context).not.toContain("压缩");
+});
+
+test("spec §4.6: a plugin's icon shows by <img>, never inline; with none, the generic badge; a built-in keeps its own mark", () => {
+  const plugin = { name: "Echo Agent", statusName: "Echo", tui: false, importable: false };
+  const metadata = {
+    agents: [{ id: "claude", ...plugin, name: "Claude" }, { id: "echo-agent", ...plugin, icon: "api/plugin-icon?id=echo-agent&v=0.1.0" }, { id: "bare-agent", ...plugin, name: "Bare" }],
+    platforms: [{ id: "qq", label: "QQ" }, { id: "local-im", label: "Local IM", icon: "api/plugin-icon?id=local-im&v=0.1.0" }, { id: "bare-im", label: "Bare IM" }],
+    plugins: [],
+    configErrors: [],
+  };
+  const html = (node: ReactNode) => renderToStaticMarkup(<Metadata.Provider value={metadata}>{node}</Metadata.Provider>);
+  expect(html(<AgentLogo agent="echo-agent" />)).toMatch(/<img src="api\/plugin-icon\?id=echo-agent&amp;v=0\.1\.0" alt="Echo Agent"/);
+  expect(html(<Mark p="local-im" size={16} />)).toMatch(/<img src="api\/plugin-icon\?id=local-im&amp;v=0\.1\.0" alt="Local IM"/);
+  expect(html(<><AgentLogo agent="echo-agent" /><Mark p="local-im" size={16} /></>)).not.toContain("<svg");
+  for (const node of [<AgentLogo agent="bare-agent" />, <AgentLogo agent="claude" />, <Mark p="bare-im" size={16} />, <Mark p="qq" size={16} />]) expect(html(node)).not.toContain("<img");
 });

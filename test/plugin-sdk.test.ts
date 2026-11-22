@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -1571,7 +1571,7 @@ process.stdin.resume();
     const manifest = JSON.parse(readFileSync(join(example, "plugin.json"), "utf8"));
     manifest.commandByPlatform = { win32: ["cmd.exe", "/d", "/c", "call", "${PLUGIN_DIR}/offline fixture.cmd"] };
     writeFileSync(file, JSON.stringify(manifest));
-    writeFileSync(join(dir, "conformance.json"), readFileSync(join(example, "conformance.json")));
+    writeFileSync(join(dir, "conformance.json"), readFileSync(join(example, "conformance.json"))); writeFileSync(join(dir, "icon.svg"), readFileSync(join(example, "icon.svg")));
     writeFileSync(join(dir, "offline fixture.cmd"), `@"${process.execPath}" "${join(example, "index.ts")}"\r\n@exit /b %errorlevel%\r\n`);
     const checked = await runConformance(file);
     expect(checked.stderr).toBe("");
@@ -1583,7 +1583,7 @@ process.stdin.resume();
     const example = join(REPO_ROOT, "examples/plugins/echo-agent");
     const file = join(dir, "plugin.json");
     writeFileSync(file, readFileSync(join(example, "plugin.json")));
-    writeFileSync(join(dir, "conformance.json"), readFileSync(join(example, "conformance.json")));
+    writeFileSync(join(dir, "conformance.json"), readFileSync(join(example, "conformance.json"))); writeFileSync(join(dir, "icon.svg"), readFileSync(join(example, "icon.svg")));
     const sdk = JSON.stringify(join(REPO_ROOT, "packages/plugin-sdk/index.ts"));
     const echo = JSON.stringify(pathToFileURL(join(example, "index.ts")).href);
     const script = join(dir, "index.ts");
@@ -1652,7 +1652,7 @@ process.stdin.resume();
     const example = JSON.parse(readFileSync(join(REPO_ROOT, "examples/plugins/local-im/plugin.json"), "utf8"));
     const caps = { ...example.capabilities, buttons: "markdown", maxTextLength: 8,
       sendLimit: {kind:"rate",perChatPerSecond:100}, menu: {scope:"per_chat", maxItems:1, row:"reply_keyboard"} };
-    writeFileSync(file, JSON.stringify({ ...example, capabilities: caps }));
+    writeFileSync(file, JSON.stringify({ ...example, icon: undefined, capabilities: caps }));
     writeFileSync(join(dir, "conformance.json"), JSON.stringify({ stateless:true, failureChat:"refused" }));
     writeFileSync(join(dir, "index.ts"), `
       import { appendFileSync } from "node:fs";
@@ -1712,7 +1712,7 @@ process.stdin.resume();
       markdown: null, sendLimit: {kind:"rate", perChatPerSecond:10}, maxFileBytes:{file:100,image:100} };
     const keys = { "dm:conf-user-1": "channel-99", sync_buf: "cursor-1", "ctx:conf-user-1": "context-123" };
     const file = join(dir, "plugin.json");
-    writeFileSync(file, JSON.stringify({ ...example, id: "plain-im", capabilities: caps }));
+    writeFileSync(file, JSON.stringify({ ...example, icon: undefined, id: "plain-im", capabilities: caps }));
     writeFileSync(join(dir, "conformance.json"), JSON.stringify({ kept: keys, normalText: "hi", failureChat: "missing" }));
     writeFileSync(join(dir, "index.ts"), `
       import { runImPlugin } from ${JSON.stringify(join(REPO_ROOT, "packages/plugin-sdk/index.ts"))};
@@ -1829,5 +1829,17 @@ runAgentPlugin({
     );
     const res = await runConformance(manifestPath);
     expect(res.code).not.toBe(0);
+  });
+
+  test("the manifest check covers the icon: one outside the plugin directory fails before any process starts", async () => {
+    const dir = makeTempDir("rhodium-bad-icon ");
+    mkdirSync(join(dir, "plugin"));
+    writeFileSync(join(dir, "icon.svg"), "<svg/>");
+    const manifestPath = join(dir, "plugin", "plugin.json");
+    const echo = JSON.parse(readFileSync(join(REPO_ROOT, "examples/plugins/echo-agent/plugin.json"), "utf8"));
+    writeFileSync(manifestPath, JSON.stringify({ ...echo, icon: "../icon.svg", command: ["definitely-not-started"] }));
+    const res = await runConformance(manifestPath);
+    expect(res.code).not.toBe(0);
+    expect(res.stderr).toContain("icon is outside the plugin directory");
   });
 });

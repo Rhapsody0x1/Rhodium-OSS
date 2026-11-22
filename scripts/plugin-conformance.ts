@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { MAX_LINE_BYTES, compareSemver, isAgentReady, validateImCapabilities, validateManifest, type Capabilities } from "@rhodium-oss/plugin-sdk";
+import { MAX_LINE_BYTES, checkPluginIcon, compareSemver, isAgentReady, validateImCapabilities, validateManifest, type Capabilities } from "@rhodium-oss/plugin-sdk";
 import { Peer, bounded, check, childEnv, nonempty, object, sensitiveKey, type Frame, type Options } from "./lib/conformance-peer";
 
 const ok = (n: number, description: string) => console.log("ok " + n + " - " + description);
@@ -389,6 +389,10 @@ async function main() {
   const validated = validateManifest(json(path));
   check(validated.ok, "Manifest validation failed" + (validated.ok ? "" : ": " + validated.error));
   const manifest = validated.manifest;
+  if (manifest.icon !== undefined) {
+    const icon = checkPluginIcon(dir, manifest.icon);
+    check(icon.ok, "Unusable icon" + (icon.ok ? "" : ": " + icon.error));
+  }
   const { version } = JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8"));
   check(compareSemver(version, manifest.minRhodium) >= 0, "Manifest needs a newer Rhodium version");
   const cfg: unknown = JSON.parse(values.config);
@@ -398,7 +402,7 @@ async function main() {
   const ms = Number(values.timeout);
   check(Number.isFinite(ms) && ms > 0, "Invalid --timeout");
   const fixture = fixtureAt(dir);
-  ok(1, "manifest, static compliance and required configuration");
+  ok(1, "manifest, icon, static compliance and required configuration");
   const cwd = mkdtempSync(join(tmpdir(), "rhodium conformance "));
   try {
     const o = { manifest, config, dir, cwd, ms };

@@ -239,6 +239,7 @@ describe("plugin process subtree compliance audit and doctor findings", () => {
             id: "dsh",
             status: "loaded",
             dir: "/tmp/dsh",
+            source: "config",
             command: ["bun", "run", "/tmp/dsh/index.js"],
             manifest: {
               manifestVersion: 1,
@@ -254,8 +255,8 @@ describe("plugin process subtree compliance audit and doctor findings", () => {
               capabilities: {},
             },
           },
-          offp: { id: "offp", status: "disabled", dir: "/tmp/offp" },
-          badp: { id: "badp", status: "failed", dir: "/tmp/badp", error: "bad manifest" },
+          offp: { id: "offp", status: "disabled", dir: "/tmp/offp", source: "config" },
+          badp: { id: "badp", status: "failed", dir: "/tmp/badp", error: "bad manifest", source: "config" },
         },
         loaded: [],
         failed: [{ id: "badp", error: "bad manifest" }],
@@ -267,7 +268,7 @@ describe("plugin process subtree compliance audit and doctor findings", () => {
 
     expect(doc.info.some((l) => l.includes("dsh"))).toBe(true);
     expect(doc.info.some((l) => l.includes("offp") && l.includes("已禁用"))).toBe(true);
-    expect(doc.findings).toContainEqual({ level: "错误", text: "插件 badp 加载失败：bad manifest" });
+    expect(doc.findings).toContainEqual({ level: "错误", text: "插件 badp（配置登记）加载失败：bad manifest" });
     expect(doc.findings.some((f) => f.level === "错误" && f.text.includes("dsh") && f.text.includes(String(childPid)))).toBe(true);
   });
 });

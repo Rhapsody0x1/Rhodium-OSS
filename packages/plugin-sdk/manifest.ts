@@ -1,4 +1,5 @@
-import { posix, resolve as pathResolve, win32 } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { extname, isAbsolute, posix, relative, resolve as pathResolve, sep, win32 } from "node:path";
 
 export const AGENT_RESERVED_IDS = ["claude", "pi", "codex", "herdr"] as const;
 export const IM_RESERVED_IDS = ["qq", "telegram", "feishu", "fake", "me", "web"] as const;
@@ -51,6 +52,8 @@ type ManifestBase = {
   commandByPlatform?: Record<string, string[]>;
   requiredConfig?: string[];
   optionalConfig?: string[];
+  /** An SVG or PNG inside the plugin directory; checkPluginIcon decides whether it is usable. */
+  icon?: string;
 };
 
 export type AgentPluginManifest = ManifestBase & {
@@ -366,6 +369,30 @@ function validateAgentCapabilitiesStatic(raw: unknown, errors: string[]): void {
       }
     }
   }
+}
+
+export const MAX_ICON_BYTES = 256 * 1024;
+
+/** Where a manifest's icon is (its real path), or why it is unusable (spec §4.6): a relative .svg or
+ *  .png path that stays inside the plugin directory after resolving symlinks, a regular file of at most
+ *  256KB. An unusable icon never fails the manifest; the plugin just has none. */
+export function checkPluginIcon(dir: string, icon: unknown): { ok: true; path: string } | { ok: false; error: string } {
+  if (typeof icon !== "string" || !icon) return { ok: false, error: "icon must be a non-empty string" };
+  if (isAbsolute(icon) || isWindowsStylePath(icon)) return { ok: false, error: "icon must be a relative path" };
+  if (![".svg", ".png"].includes(extname(icon).toLowerCase())) return { ok: false, error: "icon must be an .svg or .png file" };
+  let root: string, path: string;
+  try {
+    root = realpathSync(dir);
+    path = realpathSync(pathResolve(dir, icon));
+  } catch {
+    return { ok: false, error: `icon not found: ${icon}` };
+  }
+  const rel = relative(root, path);
+  if (!rel || rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) return { ok: false, error: "icon is outside the plugin directory" };
+  const st = statSync(path);
+  if (!st.isFile()) return { ok: false, error: "icon is not a regular file" };
+  if (st.size > MAX_ICON_BYTES) return { ok: false, error: "icon is larger than 256KB" };
+  return { ok: true, path };
 }
 
 /** Validate a parsed plugin.json manifest object. */

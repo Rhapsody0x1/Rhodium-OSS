@@ -1,6 +1,6 @@
 // The config file (docs/spec/v1.md "配置"): TOML, mode 0600 because it holds bot tokens.
 // Read once at startup; changes need a restart, but for a bot rh bot adds.
-import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { checkWindowsPermissions, createPrivateWindows, windows, windowsRoot } from "./windows";
 import { isAbsolute, dirname, join, resolve } from "node:path";
@@ -175,6 +175,8 @@ export type PluginConfigEntry = {
   enabled: boolean;
   config: Record<string, string>;
   configError?: string;
+  // Found in plugins/ beside config.toml, or given by [plugins.<id>].path (spec §4.5). Unset: "config".
+  source?: "scan" | "config";
 };
 
 export type Config = {
@@ -199,6 +201,8 @@ export type Config = {
   bots: Record<string, BotConfig>;
   programs: typeof programs & Record<string, string>;
   plugins: Record<string, PluginConfigEntry>;
+  // The symlinks in plugins/ the scan skipped, for the daemon to log.
+  pluginScanSkipped?: string[];
   // closed: what is wrong in [board], which closes the board alone; it then listens on 127.0.0.1, on
   // the port given, or the default if that is what is wrong.
   // extra: the [[board.extra]] entries (ADR-0014), none while closed.
@@ -252,14 +256,36 @@ function overlay<T extends Record<string, unknown>>(where: string, base: T, give
   return out as T;
 }
 
-function parsePlugins(raw: unknown, configPath: string): Record<string, PluginConfigEntry> {
-  if (raw === undefined) return {};
-  if (!isTable(raw)) throw new Error("config: plugins must be a table");
+/** The plugin folders in <dir>/plugins/ (spec §4.5), by name: one level, no dot folders, none without a
+ *  plugin.json, no symlinks (or junctions), nor a plugins/ that is one; skipped: the symlinks passed over. */
+function scanPlugins(dir: string): { found: Record<string, string>; skipped: string[] } {
+  const root = join(dir, "plugins");
+  const found: Record<string, string> = {};
+  const skipped: string[] = [];
+  let st;
+  try {
+    st = lstatSync(root);
+  } catch {
+    return { found, skipped };
+  }
+  if (!st.isDirectory()) return { found, skipped };
+  for (const d of readdirSync(root, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (d.name.startsWith(".")) continue;
+    const path = join(root, d.name);
+    if (d.isSymbolicLink()) skipped.push(path);
+    else if (d.isDirectory() && existsSync(join(path, "plugin.json"))) found[d.name] = path;
+  }
+  return { found, skipped };
+}
+
+function parsePlugins(raw: unknown, configPath: string): { plugins: Record<string, PluginConfigEntry>; skipped: string[] } {
+  if (raw !== undefined && !isTable(raw)) throw new Error("config: plugins must be a table");
   const baseDir = dirname(resolve(configPath));
+  const { found, skipped } = scanPlugins(baseDir);
   const out: [string, PluginConfigEntry][] = [];
-  for (const [id, entry] of Object.entries(raw)) {
+  for (const [id, entry] of Object.entries(raw ?? {})) {
     if (!isTable(entry)) {
-      out.push([id, { path: "", enabled: true, config: {}, configError: `config: plugins.${id} must be a table` }]);
+      out.push([id, { path: found[id] ?? "", enabled: true, config: {}, configError: `config: plugins.${id} must be a table`, source: found[id] ? "scan" : "config" }]);
       continue;
     }
     const errors: string[] = [];
@@ -276,7 +302,13 @@ function parsePlugins(raw: unknown, configPath: string): Record<string, PluginCo
     }
     const rawPath = entry.path;
     let resolvedPath = "";
-    if (typeof rawPath !== "string" || !rawPath.trim()) {
+    let source: "scan" | "config" = "config";
+    if (rawPath === undefined && found[id]) {
+      resolvedPath = found[id];
+      source = "scan";
+    } else if (rawPath === undefined) {
+      if (enabled) errors.push(`config: plugins.${id} 没有 path，plugins/ 里也没有 ${id}`);
+    } else if (typeof rawPath !== "string" || !rawPath.trim()) {
       if (enabled) errors.push(`config: plugins.${id}.path must be a non-empty string`);
     } else {
       resolvedPath = resolve(baseDir, rawPath);
@@ -301,10 +333,14 @@ function parsePlugins(raw: unknown, configPath: string): Record<string, PluginCo
         enabled,
         config: Object.fromEntries(cfgEntries),
         ...(errors.length ? { configError: errors.join("; ") } : {}),
+        source,
       },
     ]);
   }
-  return Object.fromEntries(out);
+  for (const [id, path] of Object.entries(found)) {
+    if (!out.some(([k]) => k === id)) out.push([id, { path, enabled: true, config: {}, source: "scan" }]);
+  }
+  return { plugins: Object.fromEntries(out), skipped };
 }
 
 /** Where the socket directory is when the config does not say; `rh` looks there too. */
@@ -324,7 +360,7 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
     readFileSync(path, "utf8"),
   ) as Record<string, unknown>;
 
-  const plugins = parsePlugins(pl, path);
+  const { plugins, skipped: pluginScanSkipped } = parsePlugins(pl, path);
 
   const paths = overlay(
     "",
@@ -433,6 +469,7 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
     bots,
     programs: progs,
     plugins,
+    pluginScanSkipped,
     board: closed
       ? { ...board, port: isPort(web.port) ? web.port : board.port, closed, extra: [] }
       : { ...(web as BoardEntry), closed, extra: entries.slice(1) as BoardEntry[] },

@@ -1,6 +1,8 @@
 export {
   AGENT_RESERVED_IDS,
   IM_RESERVED_IDS,
+  MAX_ICON_BYTES,
+  checkPluginIcon,
   PLUGIN_ID_RE,
   compareSemver,
   expandPluginCommand,

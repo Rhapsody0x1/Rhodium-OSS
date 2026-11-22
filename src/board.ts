@@ -70,19 +70,24 @@ export type Card = {
 };
 /** Public board metadata never includes plugin commands, credentials or bot configuration. */
 export type BoardMetadata = {
-  agents: { id: string; name: string; statusName: string; tui: boolean; importable: boolean }[];
-  platforms: { id: string; label: string }[];
+  agents: { id: string; name: string; statusName: string; tui: boolean; importable: boolean; icon?: string }[];
+  platforms: { id: string; label: string; icon?: string }[];
   plugins: { id: string; status: "loaded" | "disabled" | "failed"; kind?: "agent" | "im"; error?: string }[];
   configErrors: string[];
 };
 
 function boardMetadata(registry?: PluginRegistry): BoardMetadata {
+  // A loaded plugin's usable icon, by an address that changes with its version (spec §4.6).
+  const icon = (id: string) => {
+    const p = registry?.plugins[id];
+    return p?.status === "loaded" && p.icon ? { icon: `api/plugin-icon?id=${id}&v=${encodeURIComponent(p.manifest.version)}` } : {};
+  };
   return {
     agents: allAgentKinds().map(id => {
       const { name, statusName, tui, importable } = agentDef(id);
-      return { id, name, statusName, tui, importable };
+      return { id, name, statusName, tui, importable, ...icon(id) };
     }),
-    platforms: allPlatformLabels(),
+    platforms: allPlatformLabels().map(p => ({ ...p, ...icon(p.id) })),
     plugins: Object.values(registry?.plugins ?? {}).map(p => ({
       id: p.id, status: p.status, ...(p.status === "loaded" && { kind: p.manifest.kind }), ...(p.status === "failed" && { error: p.error }),
     })),
@@ -1144,6 +1149,23 @@ async function avatar(store: Store, cfg: Config, id: string): Promise<Response> 
   return new Response(bytes, { headers: { "content-type": type, "cache-control": "private, max-age=31536000, immutable" } });
 }
 
+/** GET /api/plugin-icon?id=<id> (spec §4.6): a loaded plugin's usable icon from its directory; 404 for
+ *  any other. The page shows it only by <img>, and the sandbox keeps an SVG opened alone from running. */
+async function pluginIcon(registry: PluginRegistry | undefined, id: string): Promise<Response> {
+  const p = Object.hasOwn(registry?.plugins ?? {}, id) ? registry!.plugins[id] : undefined;
+  const icon = p?.status === "loaded" ? p.icon : undefined;
+  const bytes = icon ? await Bun.file(icon).bytes().catch(() => null) : null;
+  if (!icon || !bytes) return new Response("没有图标。\n", { status: 404 });
+  return new Response(bytes, {
+    headers: {
+      "content-type": icon.toLowerCase().endsWith(".svg") ? "image/svg+xml" : "image/png",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox",
+      "cache-control": "private, max-age=31536000, immutable",
+    },
+  });
+}
+
 /** What GET /api/media's v makes of a picture (spec web-images "媒体接口"): its long side at most, its
  *  type, and whether it is worth making, by the picture's long side and bytes; else the picture will do. */
 const MADE = {
@@ -1781,6 +1803,8 @@ export function serveBoard(
         return topology(store, cfg, Date.now()).then((t) => Response.json(t, { headers: { "cache-control": "no-store" } }));
       case "/api/avatar":
         return avatar(store, cfg, url.searchParams.get("id") ?? "");
+      case "/api/plugin-icon":
+        return pluginIcon(plugins, url.searchParams.get("id") ?? "");
       case "/api/events":
         return events(store, req, server, follow, web, fronts, all, meter);
       case "/api/messages":
