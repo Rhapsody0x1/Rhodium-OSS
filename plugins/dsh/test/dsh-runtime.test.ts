@@ -232,4 +232,47 @@ describe("dsh 真实传输层(假 dsh)", () => {
     await cleanup(io);
     rmSync(dir, { recursive: true, force: true });
   }, 25000);
+
+  test("中断与关停撞车:close 等中断的整树清理做完再退出", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dsh-rt-"));
+    const pidFile = join(dir, "child.pid");
+    const program = writeFakeProgram(dir, { FAKE_DSH_MODE: "hang", FAKE_DSH_PID_FILE: pidFile });
+    const io = new Harness(new DshAgentPlugin());
+    io.write(runtimeInit(program));
+    await io.waitFor((f) => f.type === "ready", "ready", 15000);
+    io.write({ type: "send", id: "in-1", text: "hang please", human: true, mode: "turn" });
+    await io.waitFor((f) => f.type === "turn_start", "turn_start", 15000);
+    const deadline = Date.now() + 5000;
+    while (!existsSync(pidFile) && Date.now() < deadline) await Bun.sleep(20);
+    const childPid = Number(readFileSync(pidFile, "utf8").trim());
+
+    io.write({ type: "interrupt" });
+    io.write({ type: "close" });
+    await io.expectCleanExit();
+    expect(processAlive(childPid)).toBe(false); // 插件退出时子孙进程已被清理
+    rmSync(dir, { recursive: true, force: true });
+  }, 25000);
+
+  test("压缩前重新拉起 dsh 期间 /stop:命令报已中断并发 turn_end", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dsh-rt-"));
+    const program = writeFakeProgram(dir, { FAKE_DSH_MODE: "hang", FAKE_DSH_INIT_DELAY_MS: "800" });
+    const io = new Harness(new DshAgentPlugin());
+    io.write(runtimeInit(program));
+    await io.waitFor((f) => f.type === "ready", "ready", 15000);
+    io.write({ type: "send", id: "in-1", text: "hang please", human: true, mode: "turn" });
+    await io.waitFor((f) => f.type === "turn_start", "turn_start", 15000);
+    io.write({ type: "interrupt" });
+    await io.waitFor((f) => f.type === "turn_end", "interrupted turn_end", 15000);
+    const ends = (): number => io.outgoing.filter((f) => f.type === "turn_end").length;
+
+    io.write({ type: "command", id: "cmd-1", name: "compact", args: "" }); // dsh 已停,先重新拉起(initialize 慢 800ms)
+    await Bun.sleep(300);
+    io.write({ type: "interrupt" });
+    const result = await io.waitFor((f) => f.type === "command_result" && f.id === "cmd-1", "command_result", 8000);
+    expect(result.ok).toBe(false);
+    expect(String(result.error)).toContain("压缩已中断");
+    await io.waitFor(() => ends() === 2, "second turn_end", 8000);
+    await cleanup(io);
+    rmSync(dir, { recursive: true, force: true });
+  }, 25000);
 });

@@ -6,6 +6,7 @@
 //   FAKE_DSH_LOCK_FILE 模拟会话锁:prompt/resume 时占锁(写入自己的 PID),锁主进程还活着就拒绝;
 //                      收到 SIGTERM 后 400ms 才退出(模拟刷持久化),退出时释放锁
 //   FAKE_DSH_ASK_ON_TERM 配合 LOCK_FILE:收到 SIGTERM 后、退出前再发一个 approval/request(迟到的旧帧)
+//   FAKE_DSH_INIT_DELAY_MS initialize 晚这么多毫秒才回复(模拟拉起慢,测拉起期间的 /stop)
 // hang 模式下 session/query(/compact)也永不回复。
 // prompt 文本含 "need approval" 时先发 approval/request,等插件应答后再回复。
 
@@ -80,6 +81,7 @@ async function handle(frame: { id?: string | number; method?: string; params?: a
     return;
   }
   if (frame.method === "initialize") {
+    await Bun.sleep(Number(process.env.FAKE_DSH_INIT_DELAY_MS ?? 0));
     send({ jsonrpc: "2.0", id: frame.id, result: { serverInfo: { name: "deepseek-harness-sdk-runtime", version: "0.0.1" } } });
     return;
   }

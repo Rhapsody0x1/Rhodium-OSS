@@ -528,18 +528,22 @@ export class DshAgentPlugin implements AgentPlugin {
   /** 只声明 compact:model/effort 在 initialize 时定死,换模型要重启 dsh(§9.1)。 */
   async command(name: string, _args: string, _ctx: AgentContext): Promise<CommandResult> {
     if (name !== "compact") throw new Error(`Unsupported command: ${name}`);
-    await this.ensureLaunched();
-    const transport = this.transport!;
     let result: unknown;
+    // 拉起前就置位:中断后的首个 /compact 要先重新拉起 dsh,这期间的 /stop 也要发 turn_end(审查意见 2)。
+    this.turnAborted = false;
     this.compacting = true;
     try {
+      await this.ensureLaunched();
+      if (this.turnAborted || !this.transport) throw new Error("dsh 压缩已中断");
+      const transport = this.transport;
       // 压缩要等摘要模型跑完,长对话经常超过默认 20 秒;给足 10 分钟,期间用户可 /stop(审查意见 2)。
       result = await transport.request("session/query", {
         sessionId: this.sessionId,
         contentBlocks: [{ type: "text", text: "/compact" } satisfies DshContentBlock],
       }, 600_000);
     } catch (err) {
-      if (this.transport !== transport) throw new Error("dsh 压缩已中断");
+      if (this.turnAborted) throw new Error("dsh 压缩已中断");
+      if (err instanceof PluginFatalError) throw err; // 重新拉起失败照旧 fatal
       // dsh 在 agent 忙时拒绝压缩等:由 SDK 回 ok:false 带原因。
       throw new Error(`dsh 压缩失败:${(err as Error).message}`);
     } finally {
@@ -586,6 +590,7 @@ export class DshAgentPlugin implements AgentPlugin {
 
   async close(): Promise<void> {
     this.closing = true;
+    await this.dying; // 与中断撞车时先等它杀完整棵进程树,免得插件先退出、子孙进程漏杀
     this.turnAborted = true;
     for (const [, pending] of this.pendingAsks) {
       pending.answer.resolve(null);
