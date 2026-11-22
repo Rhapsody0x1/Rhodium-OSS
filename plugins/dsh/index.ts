@@ -116,6 +116,10 @@ export class DshAgentPlugin implements AgentPlugin {
   private pendingAsks = new Map<string, PendingAsk>();
   /** /compact 进行中:此时 /stop 也要停掉 dsh 并发 turn_end,否则只能等核心的中断超时。 */
   private compacting = false;
+  /** send 进行中(从拉起 dsh 到 send 结束):此时的 /stop 也要发 turn_end,同 compacting。 */
+  private sending = false;
+  /** interrupt() 每次真正收尾就加一:send/compact 拉起 dsh 后比对它,不看会被下一条消息清掉的 turnAborted。 */
+  private stops = 0;
 
   async init(params: AgentInitParams, ctx: AgentContext): Promise<AgentReadyInfo> {
     this.ctxRef = ctx;
@@ -252,9 +256,21 @@ export class DshAgentPlugin implements AgentPlugin {
   // ---------------------------------------------------------------------------
 
   async send(msg: AgentSendParams, ctx: AgentContext): Promise<void> {
+    // 拉起前就置位:中断后的首条消息要先重新拉起 dsh,这期间的 /stop 也要发 turn_end(同 /compact)。
     this.turnAborted = false;
-    await this.ensureLaunched();
-    if (this.closing || !this.transport) return;
+    this.sending = true;
+    const stops = this.stops;
+    try {
+      await this.ensureLaunched();
+    } catch (err) {
+      if (this.stops === stops) this.sending = false; // 被 /stop 时别清掉搭上同一次拉起的下一条消息的标记
+      if (this.closing || this.stops !== stops) return; // 拉起中被 /stop 杀掉或关停:回合已由 interrupt() 收尾
+      throw err;
+    }
+    if (this.closing || !this.transport || this.stops !== stops) {
+      if (this.stops === stops) this.sending = false; // 被 /stop 时不发 prompt,也不发 taken
+      return;
+    }
 
     const blocks: DshContentBlock[] = [];
     if (!this.sessionWritten && this.systemPrompt) blocks.push({ type: "text", text: this.systemPrompt });
@@ -263,7 +279,6 @@ export class DshAgentPlugin implements AgentPlugin {
     this.currentInputId = msg.id;
     this.lastAssistantText = null;
     this.turnError = null;
-    this.turnAborted = false;
     const done = Promise.withResolvers<void>();
     this.turnDone = done;
     const aborted = (): boolean => this.turnAborted || this.turnDone !== done;
@@ -286,6 +301,7 @@ export class DshAgentPlugin implements AgentPlugin {
       throw new PluginFatalError(msg, { retryable: true });
     } finally {
       if (this.turnDone === done) this.turnDone = null;
+      if (this.stops === stops) this.sending = false;
       this.activeTurn = false;
       this.currentInputId = null;
     }
@@ -532,9 +548,10 @@ export class DshAgentPlugin implements AgentPlugin {
     // 拉起前就置位:中断后的首个 /compact 要先重新拉起 dsh,这期间的 /stop 也要发 turn_end(审查意见 2)。
     this.turnAborted = false;
     this.compacting = true;
+    const stops = this.stops;
     try {
       await this.ensureLaunched();
-      if (this.turnAborted || !this.transport) throw new Error("dsh 压缩已中断");
+      if (this.stops !== stops || !this.transport) throw new Error("dsh 压缩已中断");
       const transport = this.transport;
       // 压缩要等摘要模型跑完,长对话经常超过默认 20 秒;给足 10 分钟,期间用户可 /stop(审查意见 2)。
       result = await transport.request("session/query", {
@@ -542,12 +559,12 @@ export class DshAgentPlugin implements AgentPlugin {
         contentBlocks: [{ type: "text", text: "/compact" } satisfies DshContentBlock],
       }, 600_000);
     } catch (err) {
-      if (this.turnAborted) throw new Error("dsh 压缩已中断");
+      if (this.closing || this.stops !== stops) throw new Error("dsh 压缩已中断");
       if (err instanceof PluginFatalError) throw err; // 重新拉起失败照旧 fatal
       // dsh 在 agent 忙时拒绝压缩等:由 SDK 回 ok:false 带原因。
       throw new Error(`dsh 压缩失败:${(err as Error).message}`);
     } finally {
-      this.compacting = false;
+      if (this.stops === stops) this.compacting = false; // 被 /stop 时已由 interrupt() 清掉,别清掉紧接着的下一个 /compact 的标记
     }
     const execution = (result as { execution?: { beforeTokens?: unknown; afterTokens?: unknown } } | null)?.execution;
     const tokens = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
@@ -567,9 +584,12 @@ export class DshAgentPlugin implements AgentPlugin {
       pending.answer.resolve(null);
       pending.delivered.resolve();
     }
-    if (!this.activeTurn && !hadPending && !this.compacting) return;
+    if (!this.activeTurn && !hadPending && !this.compacting && !this.sending) return;
     this.turnAborted = true;
+    this.stops++;
     this.activeTurn = false; // 先置位:旧进程在退出前推来的 idle 不再产生第二个 turn_end(审查意见 9)
+    this.sending = false; // 杀旧进程期间再来的 /stop 不再发第二个 turn_end
+    this.compacting = false;
     this.currentInputId = null;
     const transport = this.transport;
     this.transport = null;

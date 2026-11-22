@@ -6,7 +6,9 @@
 //   FAKE_DSH_LOCK_FILE 模拟会话锁:prompt/resume 时占锁(写入自己的 PID),锁主进程还活着就拒绝;
 //                      收到 SIGTERM 后 400ms 才退出(模拟刷持久化),退出时释放锁
 //   FAKE_DSH_ASK_ON_TERM 配合 LOCK_FILE:收到 SIGTERM 后、退出前再发一个 approval/request(迟到的旧帧)
+//   FAKE_DSH_VERSION_DELAY_MS --version 晚这么多毫秒才输出(测版本探测期间的 /stop)
 //   FAKE_DSH_INIT_DELAY_MS initialize 晚这么多毫秒才回复(模拟拉起慢,测拉起期间的 /stop)
+//   FAKE_DSH_PROMPT_DELAY_MS 文本含 "slow" 的 session/prompt 晚这么多毫秒才回复(测 prompt 等待期间的 /stop)
 // hang 模式下 session/query(/compact)也永不回复。
 // prompt 文本含 "need approval" 时先发 approval/request,等插件应答后再回复。
 
@@ -15,6 +17,7 @@ const mode = process.env.FAKE_DSH_MODE ?? "normal";
 let sessionId: string | null = null; // 从 prompt/resume 请求里动态取,与插件选择的会话 ID 一致
 
 if (process.argv[2] === "--version") {
+  await Bun.sleep(Number(process.env.FAKE_DSH_VERSION_DELAY_MS ?? 0));
   console.log("dsh " + version);
   process.exit(0);
 }
@@ -87,6 +90,7 @@ async function handle(frame: { id?: string | number; method?: string; params?: a
   }
   if (frame.method === "session/resume") {
     sessionId = String(frame.params?.sessionId ?? sessionId);
+    if (lastText(frame).includes("slow")) await Bun.sleep(Number(process.env.FAKE_DSH_PROMPT_DELAY_MS ?? 0));
     if (!(await takeLock())) {
       send({ jsonrpc: "2.0", id: frame.id, error: { code: -32000, message: "session is locked by another process (fake)" } });
       return;
@@ -105,6 +109,7 @@ async function handle(frame: { id?: string | number; method?: string; params?: a
   }
   if (frame.method === "session/prompt") {
     sessionId = String(frame.params?.sessionId ?? sessionId);
+    if (lastText(frame).includes("slow")) await Bun.sleep(Number(process.env.FAKE_DSH_PROMPT_DELAY_MS ?? 0));
     if (!(await takeLock())) {
       send({ jsonrpc: "2.0", id: frame.id, error: { code: -32000, message: "session is locked by another process (fake)" } });
       return;
