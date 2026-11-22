@@ -415,6 +415,7 @@ bun scripts/plugin-conformance.ts --manifest plugins/<id>/plugin.json
 ```toml
 stateDir = "<临时目录>/state"
 socketDir = "<临时目录>/run"
+# 普通 Linux 走路线 D（systemd）且仓库路径含空格或中文时，改为 "<临时目录>/rh-hold"
 holdBin = "<仓库目录>/dist/rh-hold"
 unitPrefix = "rhodium-test-dev-"
 
@@ -472,35 +473,40 @@ target = "dev/try"
 
 接入正在开发的插件有两种方式：
 
-- **直接调试仓库里的源码**：在上面这份 `config.toml` 末尾加 `[plugins.<id>]` 和 `path = "<仓库目录>/plugins/<id>"`（Windows 用单引号），改完代码重启 `rh dev` 即可生效。
-- **验证自动扫描与独立产物**：按 4.2 节打包插件（改用 `RHODIUM_PLUGIN_DIR` 定位资源）后，把整个插件目录放进 `<临时目录>/plugins/<id>/`，`config.toml` 里不写 `[plugins.<id>]`，重启后直接被自动扫到。
+- **直接调试仓库里的源码**：在上面这份 `config.toml` 末尾加 `[plugins.<id>]` 和 `path = "<仓库目录>/plugins/<id>"`（Windows 用单引号）。
+  - 改完 **IM 插件**代码后，重启 `rh dev` 即可加载新版。
+  - 改完 **agent 插件**代码后，如果测试槽位已经跑过一轮，`rh dev` 退出不会停掉托管进程，只重启 `rh dev` 会重新接上旧进程；先在看板里**停掉**这个测试槽位的进程（普通 Linux 交互终端也可用 `rh stop dev/try`），再向同一槽位发消息拉起新版。
+- **验证自动扫描与独立产物**：按 4.2 节打包插件（改用 `RHODIUM_PLUGIN_DIR` 定位资源）后，把整个插件目录放进 `<临时目录>/plugins/<id>/`，`config.toml` 里不写 `[plugins.<id>]`，重启后直接被自动扫到。之后每次改代码，都要先重新 `bun build` 并更新 `<临时目录>/plugins/<id>/` 里的产物，再按上面同样的方法停掉测试槽位（agent）或重启 `rh dev`（IM）。
 
 #### 第 2 步：设好文件权限并启动隔离实例
 
+下面四条启动命令都会清掉 `CODEX_HOME` 和 `CLAUDE_CONFIG_DIR`（避免平时设过这两个环境变量时，看板浏览目录或导入弹窗读到正式会话记录）。
+
 **路线 A：Linux（detached 模式，免 systemd，适合所有无 systemd 环境与 CI 复现）**
 
-Linux 必须**同时**设置 `NODE_ENV=test` 和 `RHODIUM_TEST_DETACHED=1` 才走 detached 托管模式；同时把 `HOME` 和 `XDG_RUNTIME_DIR` 指向临时目录，防止 `rh doctor` 探测本机已登录账号：
+Linux 必须**同时**设置 `NODE_ENV=test` 和 `RHODIUM_TEST_DETACHED=1` 才走 detached 托管模式；同时把 `HOME` 和 `XDG_RUNTIME_DIR` 指向临时目录并清掉 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`：
 
 ```sh
 ROOT=/tmp/rhodium-test-dev
 mkdir -p "$ROOT/run" && chmod 700 "$ROOT/run"
 chmod 600 "$ROOT/config.toml"
-HOME="$ROOT" XDG_RUNTIME_DIR="$ROOT/run" NODE_ENV=test RHODIUM_TEST_DETACHED=1 \
+env -u CODEX_HOME -u CLAUDE_CONFIG_DIR \
+  HOME="$ROOT" XDG_RUNTIME_DIR="$ROOT/run" NODE_ENV=test RHODIUM_TEST_DETACHED=1 \
   ./dist/rhodium rh dev --fake --config "$ROOT/config.toml"
 ```
 
 **路线 B：Windows（PowerShell）**
 
-Windows 启动时会强制校验 `config.toml` 的 NTFS 权限（普通新建文件若继承了其他账号的访问权会被直接拒绝），先设成仅本人可访问，再在单独开的调试 PowerShell 窗口里把用户目录环境变量指向临时目录后启动：
+Windows 启动时会强制校验 `config.toml` 的 NTFS 权限（普通新建文件若继承了其他账号的访问权会被直接拒绝），先设成仅本人可访问；**不要**提前手动建 `run` 目录，留给守护进程启动时自动按本人私有 ACL 创建。然后在单独开的调试 PowerShell 窗口里把用户目录环境变量指向临时目录、清掉 `CODEX_HOME` 和 `CLAUDE_CONFIG_DIR` 后启动：
 
 ```powershell
 $root = Join-Path $env:TEMP "rhodium-test-dev"
-New-Item -ItemType Directory -Force "$root\run" | Out-Null
 # 把刚写好的 config.toml 设成本人私有 ACL（去掉继承，只保留当前用户完全控制）
 $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 icacls "$root\config.toml" /inheritance:r /grant:r "*${me}:(F)" | Out-Null
 
-# 仅在当前调试窗口隔离用户目录，避免探测本机登录态
+# 仅在当前调试窗口隔离用户目录与对话目录，避免探测本机登录态和正式会话
+Remove-Item Env:CODEX_HOME, Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
 $env:HOME = $root
 $env:USERPROFILE = $root
 $env:APPDATA = $root
@@ -510,24 +516,29 @@ $env:LOCALAPPDATA = $root
 
 **路线 C：macOS**
 
-macOS 与 Windows 同为独立托管进程模式，只需设权限并隔离 `HOME`：
+macOS 与 Windows 同为独立托管进程模式，只需设权限、隔离 `HOME` 并清掉覆盖变量：
 
 ```sh
 ROOT=/tmp/rhodium-test-dev
 mkdir -p "$ROOT/run" && chmod 700 "$ROOT/run"
 chmod 600 "$ROOT/config.toml"
-HOME="$ROOT" ./dist/rhodium rh dev --fake --config "$ROOT/config.toml"
+env -u CODEX_HOME -u CLAUDE_CONFIG_DIR HOME="$ROOT" \
+  ./dist/rhodium rh dev --fake --config "$ROOT/config.toml"
 ```
 
 **路线 D：普通 Linux（有 systemd 用户会话，需要实测交互终端 `rh bot` 向导时用）**
 
-不设 `NODE_ENV=test` 和 `RHODIUM_TEST_DETACHED=1`，保留当前用户的 `XDG_RUNTIME_DIR` 以便 `systemd-run --user` 工作，但仍把 `HOME` 指向临时目录并用 `unitPrefix = "rhodium-test-dev-"` 隔离单元：
+systemd 模式下，托管程序 `holdBin` 以及 `stateDir`、`socketDir`、`lockDir` 的路径都不能带空格、中文或其他会被 systemd 展开的字符（只允许 `/[\w/.,+:@-]*`）。如果仓库本身在带空格或中文的目录里，先把 `dist/rh-hold` 复制到 `/tmp/rhodium-test-dev/rh-hold`，并把 `config.toml` 里的 `holdBin` 改为 `"/tmp/rhodium-test-dev/rh-hold"`。
+
+不设 `NODE_ENV=test` 和 `RHODIUM_TEST_DETACHED=1`，保留当前用户的 `XDG_RUNTIME_DIR` 以便 `systemd-run --user` 工作，同时隔离 `HOME`、清掉 `CODEX_HOME` 与 `CLAUDE_CONFIG_DIR`，并用 `unitPrefix = "rhodium-test-dev-"` 隔离单元：
 
 ```sh
 ROOT=/tmp/rhodium-test-dev
 mkdir -p "$ROOT/run" && chmod 700 "$ROOT/run"
+cp ./dist/rh-hold "$ROOT/rh-hold"
 chmod 600 "$ROOT/config.toml"
-HOME="$ROOT" ./dist/rhodium rh dev --fake --config "$ROOT/config.toml"
+env -u CODEX_HOME -u CLAUDE_CONFIG_DIR HOME="$ROOT" \
+  ./dist/rhodium rh dev --fake --config "$ROOT/config.toml"
 ```
 
 调试结束后如果启过插件槽位，清掉测试托管单元：`systemctl --user stop 'rhodium-test-dev-*'; systemctl --user reset-failed 'rhodium-test-dev-*'`。
@@ -775,7 +786,7 @@ PR 正文里附上以下证据：
 3. **不得使用 Claude 订阅凭据**：插件和 `pi` 不得读取或复用 `~/.claude` 下的登录态或 Anthropic 凭据。核心拉起插件前会清洗 `ANTHROPIC_*`、`CLAUDE*`（Windows 按大小写不敏感匹配），`rh doctor` 也会巡检插件进程子树。
 4. **只有用户本人能触发 agent**：IM 插件只管平台身份认证并原样上报发送者 ID，配对和主人校验（`owners.includes(sender)`）由核心集中执行，绝不绕过核心触发 agent。
 5. **仓库里不放任何密钥或隐私**：真实 API Key、Bot Token、cookie、微信号、个人路径和私人聊天记录一律不进源码、样例、配置或提交历史。
-6. **不改核心源码，不碰用户正在运行的实例**：插件只写在 `plugins/<id>/`；调试必须按 4.3 节覆盖 `[programs]`、`[herdr] session = "rhodium-test"` 和 `HOME`/`USERPROFILE`（并加 `rhodium-test-*` 前缀），防止 `rh doctor` 或内置槽位探测本机 `~/.claude`、`~/.codex`、`~/.pi`、`~/.config`、正式 Rhodium 实例或用户的 Herdr 会话。
+6. **不改核心源码，不碰用户正在运行的实例**：插件只写在 `plugins/<id>/`；调试必须按 4.3 节覆盖 `[programs]`、`[herdr] session = "rhodium-test"` 和 `HOME`/`USERPROFILE`（并清掉 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`，加上 `rhodium-test-*` 前缀），防止 `rh doctor`、看板或内置槽位探测本机 `~/.claude`、`~/.codex`、`~/.pi`、`~/.config`、正式会话记录、正式 Rhodium 实例或用户的 Herdr 会话。
 
 ---
 
