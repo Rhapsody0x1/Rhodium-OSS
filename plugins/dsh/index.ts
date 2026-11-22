@@ -118,6 +118,8 @@ export class DshAgentPlugin implements AgentPlugin {
   private compacting = false;
   /** send 从拉起 dsh 到 dsh 报 running 之前:此时的 /stop 也要发 turn_end,同 compacting。 */
   private sending = false;
+  /** interrupt() 每次真正收尾就加一:send/compact 拉起 dsh 后比对它,不看会被下一条消息清掉的 turnAborted。 */
+  private stops = 0;
 
   async init(params: AgentInitParams, ctx: AgentContext): Promise<AgentReadyInfo> {
     this.ctxRef = ctx;
@@ -257,14 +259,15 @@ export class DshAgentPlugin implements AgentPlugin {
     // 拉起前就置位:中断后的首条消息要先重新拉起 dsh,这期间的 /stop 也要发 turn_end(同 /compact)。
     this.turnAborted = false;
     this.sending = true;
+    const stops = this.stops;
     try {
       await this.ensureLaunched();
     } catch (err) {
       this.sending = false;
-      if (this.turnAborted) return; // 拉起中被 /stop 杀掉:回合已由 interrupt() 收尾
+      if (this.closing || this.stops !== stops) return; // 拉起中被 /stop 杀掉或关停:回合已由 interrupt() 收尾
       throw err;
     }
-    if (this.closing || !this.transport || this.turnAborted) {
+    if (this.closing || !this.transport || this.stops !== stops) {
       this.sending = false; // 被 /stop 时不发 prompt,也不发 taken
       return;
     }
@@ -545,9 +548,10 @@ export class DshAgentPlugin implements AgentPlugin {
     // 拉起前就置位:中断后的首个 /compact 要先重新拉起 dsh,这期间的 /stop 也要发 turn_end(审查意见 2)。
     this.turnAborted = false;
     this.compacting = true;
+    const stops = this.stops;
     try {
       await this.ensureLaunched();
-      if (this.turnAborted || !this.transport) throw new Error("dsh 压缩已中断");
+      if (this.stops !== stops || !this.transport) throw new Error("dsh 压缩已中断");
       const transport = this.transport;
       // 压缩要等摘要模型跑完,长对话经常超过默认 20 秒;给足 10 分钟,期间用户可 /stop(审查意见 2)。
       result = await transport.request("session/query", {
@@ -555,7 +559,7 @@ export class DshAgentPlugin implements AgentPlugin {
         contentBlocks: [{ type: "text", text: "/compact" } satisfies DshContentBlock],
       }, 600_000);
     } catch (err) {
-      if (this.turnAborted) throw new Error("dsh 压缩已中断");
+      if (this.closing || this.stops !== stops) throw new Error("dsh 压缩已中断");
       if (err instanceof PluginFatalError) throw err; // 重新拉起失败照旧 fatal
       // dsh 在 agent 忙时拒绝压缩等:由 SDK 回 ok:false 带原因。
       throw new Error(`dsh 压缩失败:${(err as Error).message}`);
@@ -582,6 +586,7 @@ export class DshAgentPlugin implements AgentPlugin {
     }
     if (!this.activeTurn && !hadPending && !this.compacting && !this.sending) return;
     this.turnAborted = true;
+    this.stops++;
     this.activeTurn = false; // 先置位:旧进程在退出前推来的 idle 不再产生第二个 turn_end(审查意见 9)
     this.sending = false; // 杀旧进程期间再来的 /stop 不再发第二个 turn_end
     this.currentInputId = null;
