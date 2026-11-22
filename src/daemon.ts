@@ -1143,7 +1143,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
       if (stop.signal.aborted) return;
       if (!up && adapter instanceof PluginImAdapter && adapter.faulted) {
         log(adapter.initFailed ? "plugin im init failed" : "plugin im stopped reconnecting", { bot, plugin: adapter.pluginId, error });
-        loop.enqueue({ kind: "connection", bot, up: false, error });
+        loop.enqueue({ kind: "connection", bot, up: false, error, stopped: true });
         return;
       }
       const { botFailures } = config.limits;

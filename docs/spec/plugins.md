@@ -298,7 +298,9 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 - **单 Bot 凭据隔离**：`init.params.config` 只包含这个 `[bots.<name>]` 表和对应 `[plugins.<id>.config]` 的非内部字段（剔除 `platform`、`target`、`owner`），不经命令行参数传递，也不写入日志。
 - **平台认证与核心主人校验分工**：平台侧消息来源的身份认证由 IM 插件承担并原样填充 `sender`；配对码拦截、主人校验（`owners.includes(m.sender)`）、去重和路由决定全部留在 `rhodium` 核心执行。陌生人的 `inbound` 绝不触发 agent。带附件的消息只传不透明 `attachmentId`，核心确认发送者为主人后才反调 `fetch_attachment` 落盘，防止陌生人投递大文件耗尽资源。
 - **消息去重与发送兜底**：核心保留统一的 `seen(chat, messageId)` 检查，避免插件断线重连后重复提交同一条入站消息（配合上述 `inbound` 回执后再推游标保证同批不漏不重）。当插件返回 `unknown`（如平台已收但 HTTP 回执丢失、断连或超时），或 `send` / `edit` RPC 超过 `durations.pluginRpc`（默认 `30s`）无响应时，核心一律按“结局不明（`unknown`）”落库，绝不自动重发。
-- **进程看守与熔断**：IM 插件进程在运行中意外退出时，核心按 `1s`、`2s`、`4s`、`8s`、`16s`、`30s` 指数退避重启；若连续未发出 `connected(up: true)` 即退出或持续报错达 `limits.botFailures`（默认 5 次），核心停止重启，将该 Bot 标为 `faulted` 并在主窗口和看板发出告警。
+- **进程看守与熔断**：分两种情况。
+  - **进程活着、报连不上平台**：插件发 `connected(up: false)`，核心照内置 Bot 处理。连续达 `limits.botFailures`（默认 5 次）时，把该 Bot 标为 `faulted`，在主窗口和看板告警，说它会一直自动重连。核心不结束插件进程，由插件自己重试。插件之后发 `connected(up: true)`，核心把它标回在线，并照内置 Bot 发恢复通知。
+  - **进程本身反复退出**：插件进程在运行中意外退出时，核心按 `1s`、`2s`、`4s`、`8s`、`16s`、`30s` 指数退避重启，退避只看退出次数，不看离线报告。进程连续退出、而且退出前都没发过 `connected(up: true)`，达 `limits.botFailures` 次时，核心停止重启，把该 Bot 标为 `faulted`，告警说已停止重连。
 
 ---
 
@@ -695,7 +697,8 @@ target = "work/main"
 | 图标不可用 | `icon` 不是插件目录里的 SVG/PNG、越界、不存在或超 256KB（§4.6） | 插件照常加载，丢掉图标；记 `warn` 日志 `plugin icon unusable` | `rh doctor` 一条警告；看板显示通用徽章 |
 | 导入查询失败或超时 | `query` 超过 `pluginRpc`（30s）没回 `query_result`、进程先退出、回 `ok: false` 或不合法的结果（§3.5） | 收掉查询进程（关 stdin、`TERM`、`KILL`）；不计崩溃，不改插件状态 | 列表照常给出其余对话并写明这个插件列不出的原因；按 ID 导入或读历史失败时整个导入失败，不建槽位 |
 | 建 Bot 向导失败或中途退出 | 首步超过 `pluginHandshake` 未到、`wizard` 报错、报“完成”前退出、完成字段不合格（§3.6） | 收掉向导进程，流程失败，配置不改 | `rh bot` 打印失败原因并以非零码退出 |
-| IM 插件运行期崩溃、结局不明或 RPC 超时 | 运行中退出，`send`/`edit` 因回执丢失或未捕获异常返回 `unknown`，或超过 `pluginRpc`（30s）未响应 | 运行崩溃按退避重连，连续失败达 `limits.botFailures`（5 次）熔断标 `faulted`；返回 `unknown` 或单次 RPC 超时均将出站记录标为 `unknown`，绝不重发 | 看板显示重连中或故障，主窗口收一条故障通知；`rh send` 回执写明“不知道发出去没有” |
+| IM 插件报连不上平台 | 进程活着，连续发 `connected(up: false)` | 照内置 Bot 计数，连续达 `limits.botFailures`（5 次）标 `faulted`，记日志 `bot keeps failing to reach its platform`；不结束插件进程；之后收到 `connected(up: true)` 即标回在线 | 看板显示故障；主窗口收一条故障通知，说它会一直自动重连；恢复时再收一条恢复通知 |
+| IM 插件运行期崩溃、结局不明或 RPC 超时 | 运行中退出，`send`/`edit` 因回执丢失或未捕获异常返回 `unknown`，或超过 `pluginRpc`（30s）未响应 | 进程退出按退避重启；连续退出、且退出前没发过 `connected(up: true)`，达 `limits.botFailures`（5 次）时停止重启、标 `faulted`，记日志 `plugin im stopped reconnecting`；返回 `unknown` 或单次 RPC 超时均将出站记录标为 `unknown`，绝不重发 | 看板显示重连中或故障；停止重启时主窗口收一条通知，说已停止重连；`rh send` 回执写明“不知道发出去没有” |
 
 ### 4.5 插件目录扫描
 

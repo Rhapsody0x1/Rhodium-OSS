@@ -503,8 +503,9 @@ export type Input =
   // found something you should hear about, or this build is new (architecture §12).
   | { kind: "notice"; text: string }
   // The bot (row id) failed to reach its platform limits.botFailures times in a row, error the last
-  // failure; or it got through, for the first time since it failed (architecture §8.6).
-  | { kind: "connection"; bot: string; up: boolean; error?: string }
+  // failure; or it got through, for the first time since it failed (architecture §8.6). stopped: its
+  // IM plugin process kept exiting, so Rhodium stopped restarting it.
+  | { kind: "connection"; bot: string; up: boolean; error?: string; stopped?: true }
   // The slot's holder unit is held up over its MemoryHigh, with what it uses, its limit and its biggest
   // programs; or no longer (null) (architecture §4.2).
   | { kind: "memory"; slot: string; blocked: Blocked | null }
