@@ -196,4 +196,40 @@ describe("dsh 真实传输层(假 dsh)", () => {
     await cleanup(io);
     rmSync(dir, { recursive: true, force: true });
   }, 25000);
+
+  test("中断时旧 dsh 退出前发来的审批请求被丢弃,不产生过期的 ask", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dsh-rt-"));
+    const program = writeFakeProgram(dir, {
+      FAKE_DSH_MODE: "hang",
+      FAKE_DSH_LOCK_FILE: join(dir, "session.lock"),
+      FAKE_DSH_ASK_ON_TERM: "1",
+    });
+    const io = new Harness(new DshAgentPlugin());
+    io.write(runtimeInit(program, true));
+    await io.waitFor((f) => f.type === "ready", "ready", 15000);
+    io.write({ type: "send", id: "in-1", text: "run forever", human: true, mode: "turn" });
+    await io.waitFor((f) => f.type === "turn_start", "turn_start", 15000);
+    io.write({ type: "interrupt" });
+    await io.waitFor((f) => f.type === "turn_end", "interrupted turn_end", 15000);
+    expect(io.outgoing.some((f) => f.type === "ask")).toBe(false);
+    await cleanup(io);
+    rmSync(dir, { recursive: true, force: true });
+  }, 25000);
+
+  test("压缩中 /stop:停掉 dsh,命令报已中断并发 turn_end,不等核心超时", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dsh-rt-"));
+    const program = writeFakeProgram(dir, { FAKE_DSH_MODE: "hang" });
+    const io = new Harness(new DshAgentPlugin());
+    io.write(runtimeInit(program));
+    await io.waitFor((f) => f.type === "ready", "ready", 15000);
+    io.write({ type: "command", id: "cmd-1", name: "compact", args: "" });
+    await Bun.sleep(200); // 等 session/query 发出
+    io.write({ type: "interrupt" });
+    const result = await io.waitFor((f) => f.type === "command_result" && f.id === "cmd-1", "command_result", 5000);
+    expect(result.ok).toBe(false);
+    expect(String(result.error)).toContain("压缩已中断");
+    await io.waitFor((f) => f.type === "turn_end", "turn_end", 5000);
+    await cleanup(io);
+    rmSync(dir, { recursive: true, force: true });
+  }, 25000);
 });

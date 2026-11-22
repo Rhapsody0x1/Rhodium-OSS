@@ -69,17 +69,20 @@ describe("dsh agent 插件(离线回放)", () => {
     expect(peer.requests.some((r) => r.method === "shutdown")).toBe(true); // close → shutdown
   }, 15000);
 
-  test("dsh 拒绝 prompt → error(不可恢复)并退出,等待核心重启槽位重投递", async () => {
+  test("dsh 拒绝 prompt → 可恢复 error + turn_end,插件不退出,下一条照常(审查意见 10)", async () => {
     const io = await readyHarness();
     io.write({ type: "send", id: "in-f", text: "/fail", human: true, mode: "turn" });
     const error = await io.waitFor((f) => f.type === "error", "error");
-    expect(error.recoverable).toBe(false);
+    expect(error.recoverable).toBe(true);
     expect(String(error.detail)).toContain("model unavailable");
-    // 插件自己退出(exit 1),未发过 taken 的输入由核心在重启后重投递;不发 turn_end。
-    const code = await Promise.race([io.done, Bun.sleep(8000).then(() => -999)]);
-    expect(code).toBe(1);
-    expect(io.outgoing.some((f) => f.type === "turn_end")).toBe(false);
-    expect(io.outgoing.some((f) => f.type === "taken")).toBe(false);
+    await io.waitFor((f) => f.type === "turn_end", "turn_end");
+    expect(io.exitCode).toBeNull(); // 不退出:否则核心重投递同一条,再被拒,循环到熔断
+    expect(io.outgoing.some((f) => f.type === "taken" && f.inputId === "in-f")).toBe(false);
+
+    io.write({ type: "send", id: "in-g", text: "继续修那个 flaky 测试", human: true, mode: "turn" });
+    await io.waitFor((f) => f.type === "turn_end" && typeof f.reply === "string", "next turn_end");
+    io.write({ type: "close" });
+    await io.expectCleanExit();
   }, 15000);
 
   test("中断:停对端 → turn_end 不带 reply;下一条消息前重新拉起并 session/resume", async () => {

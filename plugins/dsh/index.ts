@@ -114,6 +114,8 @@ export class DshAgentPlugin implements AgentPlugin {
   private pendingToolCalls = new Map<string, { name: string; input: unknown }>();
   private unnamedToolSeq = 0;
   private pendingAsks = new Map<string, PendingAsk>();
+  /** /compact 进行中:此时 /stop 也要停掉 dsh 并发 turn_end,否则只能等核心的中断超时。 */
+  private compacting = false;
 
   async init(params: AgentInitParams, ctx: AgentContext): Promise<AgentReadyInfo> {
     this.ctxRef = ctx;
@@ -166,13 +168,13 @@ export class DshAgentPlugin implements AgentPlugin {
         }
       }
       const transport = new FixtureTransport(this.fixturePeer);
-      transport.onInbound((frame) => this.handleDshFrame(this.ctxRef!, frame));
+      transport.onInbound((frame) => this.handleFrameFrom(transport, frame));
       this.transport = transport;
       return;
     }
     try {
       const transport = await DshProcessTransport.launch(this.program, ["--profile", "sdk"], this.cwd, LOCKED_DSH_VERSION);
-      transport.onInbound((frame) => this.handleDshFrame(this.ctxRef!, frame));
+      transport.onInbound((frame) => this.handleFrameFrom(transport, frame));
       transport.onStderrLine((line) => this.ctxRef?.log(`[dsh] ${line}`));
       transport.onExited((reason) => this.handleTransportExit(transport, reason));
       this.transport = transport;
@@ -311,6 +313,11 @@ export class DshAgentPlugin implements AgentPlugin {
   // ---------------------------------------------------------------------------
   // dsh 通知与服务端请求 → rh-agent/1
   // ---------------------------------------------------------------------------
+
+  /** 只处理当前这一代 dsh 的帧:中断时正在退出的旧进程发来的帧(如迟到的审批请求)直接丢弃。 */
+  private handleFrameFrom(transport: DshTransport, frame: DshInboundFrame): void {
+    if (this.transport === transport) this.handleDshFrame(this.ctxRef!, frame);
+  }
 
   /** dsh 入站帧的统一入口。公开以便单元测试直接驱动帧处理。 */
   handleDshFrame(ctx: AgentContext, frame: DshInboundFrame): void {
@@ -522,16 +529,21 @@ export class DshAgentPlugin implements AgentPlugin {
   async command(name: string, _args: string, _ctx: AgentContext): Promise<CommandResult> {
     if (name !== "compact") throw new Error(`Unsupported command: ${name}`);
     await this.ensureLaunched();
+    const transport = this.transport!;
     let result: unknown;
+    this.compacting = true;
     try {
       // 压缩要等摘要模型跑完,长对话经常超过默认 20 秒;给足 10 分钟,期间用户可 /stop(审查意见 2)。
-      result = await this.transport!.request("session/query", {
+      result = await transport.request("session/query", {
         sessionId: this.sessionId,
         contentBlocks: [{ type: "text", text: "/compact" } satisfies DshContentBlock],
       }, 600_000);
     } catch (err) {
+      if (this.transport !== transport) throw new Error("dsh 压缩已中断");
       // dsh 在 agent 忙时拒绝压缩等:由 SDK 回 ok:false 带原因。
       throw new Error(`dsh 压缩失败:${(err as Error).message}`);
+    } finally {
+      this.compacting = false;
     }
     const execution = (result as { execution?: { beforeTokens?: unknown; afterTokens?: unknown } } | null)?.execution;
     const tokens = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
@@ -551,7 +563,7 @@ export class DshAgentPlugin implements AgentPlugin {
       pending.answer.resolve(null);
       pending.delivered.resolve();
     }
-    if (!this.activeTurn && !hadPending) return;
+    if (!this.activeTurn && !hadPending && !this.compacting) return;
     this.turnAborted = true;
     this.activeTurn = false; // 先置位:旧进程在退出前推来的 idle 不再产生第二个 turn_end(审查意见 9)
     this.currentInputId = null;

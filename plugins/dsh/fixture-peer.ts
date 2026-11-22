@@ -203,7 +203,7 @@ export class FixtureTransport implements DshTransport {
         // 响应帧:兑现(或拒绝)当前请求;让出一个宏任务,保证请求方的续延
         // (send 的 taken/session、命令的 command_result 等)先于后续通知帧执行。
         if (frame.error !== undefined) {
-          pending.reject(new Error(`dsh 回放错误响应:${frame.error.message ?? JSON.stringify(frame.error)}`));
+          pending.reject(new Error(`dsh 错误响应:${frame.error.message ?? JSON.stringify(frame.error)}`));
         } else {
           pending.resolve(frame.result);
         }

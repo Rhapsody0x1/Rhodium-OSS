@@ -5,6 +5,8 @@
 //   FAKE_DSH_PID_FILE  hang 模式下把一个子孙进程的 PID 写到这里,供测试验证整树被清理
 //   FAKE_DSH_LOCK_FILE 模拟会话锁:prompt/resume 时占锁(写入自己的 PID),锁主进程还活着就拒绝;
 //                      收到 SIGTERM 后 400ms 才退出(模拟刷持久化),退出时释放锁
+//   FAKE_DSH_ASK_ON_TERM 配合 LOCK_FILE:收到 SIGTERM 后、退出前再发一个 approval/request(迟到的旧帧)
+// hang 模式下 session/query(/compact)也永不回复。
 // prompt 文本含 "need approval" 时先发 approval/request,等插件应答后再回复。
 
 const version = process.env.FAKE_DSH_VERSION ?? "0.2.2-rc.5";
@@ -27,7 +29,12 @@ if (process.env.FAKE_DSH_PID_FILE) {
 const lockFile = process.env.FAKE_DSH_LOCK_FILE;
 if (lockFile) {
   const { rmSync } = await import("node:fs");
-  process.on("SIGTERM", () => setTimeout(() => { rmSync(lockFile, { force: true }); process.exit(0); }, 400));
+  process.on("SIGTERM", () => {
+    if (process.env.FAKE_DSH_ASK_ON_TERM) {
+      send({ jsonrpc: "2.0", id: "srv-stale", method: "approval/request", params: { toolName: "delete_file", sessionId } });
+    }
+    setTimeout(() => { rmSync(lockFile, { force: true }); process.exit(0); }, 400);
+  });
 }
 
 /** 占会话锁;别的活进程占着时返回 false。 */
@@ -90,6 +97,7 @@ async function handle(frame: { id?: string | number; method?: string; params?: a
     process.exit(0);
   }
   if (frame.method === "session/query") {
+    if (mode === "hang") return;
     send({ jsonrpc: "2.0", id: frame.id, result: { kind: "command", execution: { beforeTokens: 100, afterTokens: 10 } } });
     return;
   }
