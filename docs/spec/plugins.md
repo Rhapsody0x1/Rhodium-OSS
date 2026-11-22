@@ -64,7 +64,7 @@ flowchart TD
     CLI["外部 harness 或 CLI"]:::ext
     PAD -. "hold/1" .-> H
     H -- "stdio JSONL (rh-agent/1)" --> PA
-    PA -- "ACP / stream-json" --> CLI
+    PA -- "JSON-RPC / stream-json" --> CLI
   end
 
   subgraph PluginIM["IM 侧扩展边界"]
@@ -650,7 +650,7 @@ enabled = true
 
 [plugins.dsh.config]
 # 仅示范可选静态配置，严禁在文档或测试样例中填写真实密钥
-fixture = "./fixtures/dsh-acp.jsonl"
+fixture = "./fixtures/dsh-sdk.jsonl"
 
 [plugins.weixin]
 # 扫到的 plugins/weixin 不用写 path；写了 path 就改用那个目录
@@ -884,7 +884,7 @@ target = "work/main"
 ### 两阶段验收与对比矩阵
 
 - **阶段 A（PR 6 核心验收）**：核心使用 `demo/baseline-agent` + 内置 `fake` IM；接入的核心示例插件为 `examples/plugins/echo-agent` 与 `examples/plugins/local-im`。
-- **阶段 B（全组插件合入后的最终全新目录零 Key 集成验收）**：将最终制品解压到全新临时目录，使用**微信 Bot 未预填 `owner`、全局未设 `mainChat`** 的初始演示配置接入组员交付的 `dsh`（离线 ACP 回放）、`agy`（离线回放）和 `weixin`（本地 `mock-weixin-server` HTTP 模拟模式）完成全流程验证（若同一配置中的 `fake` Bot 仍按 `rh dev --fake` 带有自己的 `socket` 与 `owner`，不影响微信 Bot 的首次配对与自动设主窗口）；若某部署场景选择跳过 `rh pair` 直接预绑定主人，可将预填 `owner` 作为另一种配置方式单独验证，不替代首次配对演示。
+- **阶段 B（全组插件合入后的最终全新目录零 Key 集成验收）**：将最终制品解压到全新临时目录，使用**微信 Bot 未预填 `owner`、全局未设 `mainChat`** 的初始演示配置接入组员交付的 `dsh`（离线 SDK JSON-RPC 回放）、`agy`（离线回放）和 `weixin`（本地 `mock-weixin-server` HTTP 模拟模式）完成全流程验证（若同一配置中的 `fake` Bot 仍按 `rh dev --fake` 带有自己的 `socket` 与 `owner`，不影响微信 Bot 的首次配对与自动设主窗口）；若某部署场景选择跳过 `rh pair` 直接预绑定主人，可将预填 `owner` 作为另一种配置方式单独验证，不替代首次配对演示。
 
 | 演示步骤 | 固定输入与操作 | 核对结果 |
 |---|---|---|
@@ -902,21 +902,80 @@ target = "work/main"
 
 ### 9.1 DeepSeek Harness 插件（`dsh`）
 
-- **对接途径**：底层托管 `dsh acp`（MIT 许可，TypeScript 编写的 DeepSeek 官方 harness 的 ACP stdio 模式）。
-- **对核心的要求**：
-  1. **支持非插话排队**：`dsh` 走标准 ACP v1，回合进行中不支持中途插话，核心必须依据插件回报的 `steer: false` 把回合中收到的新消息排队到 `turn_end` 后再写入；`!` 消息先发 `interrupt`（对应插件发 `session/cancel`）。
-  2. **提问与重启对账**：插件将 ACP 的 `session/request_permission` 与 `elicitation` 映射为 `rh-agent/1` 的 `ask` 消息，收到 `answer` 后回报 `ask_resolved`；核心在 `rhodium` 重启时经 `pending_asks` 与数据库对账防止丢提问或重复弹窗。
-  3. **程序路径与配置透传**：核心通过 `init.program` 传入 `[programs.dsh]` 覆盖值（默认 `"dsh"`），通过 `init.config.fixture` 传入离线回放样例路径；**未安装 `dsh` 二进制时，离线回放模式必须可以直接运行**。
-  4. **环境变量清理**：核心在拉起 `dsh` 插件时剥离 Anthropic/Claude 凭据变量，同时保留用户配置给 DeepSeek 的非 Anthropic 变量（无 Key 测试中则完全不配置）。
-  5. **通用命令子集与降级**：支持通过 `ready.capabilities.commands` 声明实际实现的子集（如 `model`、`status`、`context`），未声明的（如 `ultracode`、`compact`）由核心自动拒绝，不在插件内重复写拒绝文案。
-  6. **托管对话记录**：插件无需反向解析 DeepSeek 内部存储，由核心通过 `item`/`turn_end` 按幂等键自动写入 `<stateDir>/transcripts/dsh/`。
-- **插件侧风险与测试约定**：`dsh` 处于预览期，接口可能变化，组员需锁定版本；CI 和助教演示必须通过录制好的 ACP JSON-RPC 样例文件（`fixture`）跑通，不依赖真实 DeepSeek API Key。
+`dsh` 是 DeepSeek 官方的 agent harness（MIT 许可，TypeScript 编写，上游仓库 `deepseek-ai/deepseek-harness`）。下面的映射全在插件里做，核心不为它改动。依据是上游文档 `docs/cli-help.md`、`packages/bundle/sdk-app`、`packages/sdk/server` 与 `packages/sdk/protocol` 的中文 README。
+
+- **对接途径**：插件常驻，拉起一个 `dsh --profile sdk`（等价写法 `dsh sdk`），在它的 stdio 上讲 dsh 原生的 SDK JSON-RPC 协议。
+  - 协议是 JSON-RPC 2.0，一行一帧，以 `\n` 结尾。dsh 的 stdout 只放协议帧，诊断写 stderr，插件把它转进自己的 stderr。
+  - 一个插件进程对应一个槽位，只开一个 dsh 会话。dsh 的 `session.event` 会推送运行时里所有会话（含子 agent 的子会话），插件只认 `sessionId` 等于本槽位会话的那些。
+  - 被否掉的另两条路：`dsh acp`（2026-11-22 前的方案）多套一层通用协议，dsh 自己的审批、提问和恢复语义要再翻一遍；`dsh headless --json` 每个任务起一个进程、跑完就退，审批只能预设 `ask`/`never`，没有回传通道，提问和中断都接不上。
+- **启动与握手（`init` → `initialize` → `ready`）**：
+  - 插件用 `init.program`（`[programs.dsh]` 覆盖值，默认 `"dsh"`）拉起 `dsh --profile sdk`，然后发 `initialize`：
+    - `cwd`：取 `init.cwd`；
+    - `provider`：取 `init.config.provider`，缺省 `deepseek-official`（dsh 唯一会自动挂适配器的提供方）；
+    - `model`：取 `init.model`，为空时取 `init.config.model`，两者都没有就报 `fatal(retryable: false)`；
+    - `reasoningEffort`：`init.effort` 非空时才带；
+    - `approvalRequests: true`：审批都走插件，见下文“审批与提问”；
+    - `capabilities: { userQuestions: true }`：`ask_user_question` 工具的提问都交给插件。
+  - `initialize` 的结果里 `serverInfo.name` 必须是 `deepseek-harness-sdk-runtime`，不是就报 `fatal(retryable: false)`。dsh 在 `initialize` 成功前拒收 `session/prompt`，所以插件等它返回后才发 `ready`。
+  - `ready.capabilities`：`steer: false`、`liveApproval: true`、`commands: ["compact"]`；`ready.version` 填 dsh 的版本号。
+  - 找不到 `dsh` 程序、`initialize` 失败（例如模型不可用、缺适配器）都报 `fatal(retryable: false)`，原因取 dsh 的错误信息。
+- **会话 ID 与续接**：
+  - dsh 的会话 ID 由客户端定：`session/prompt` 带一个没见过的 `sessionId`，dsh 就新建这个会话。
+  - `init.session` 为 `{ new: id }` 时，插件拿 `id` 当 dsh 的 `sessionId`。`ready.session` 先填 `null`，等第一条 `session/prompt` 返回后再发 `{"type":"session","session":"<id>"}`。原因：dsh 的会话在第一次写入前不落盘，槽位还没收过消息就被空闲回收时，下次用 `{ resume }` 会找不到这个会话。
+  - `init.session` 为 `{ resume: id }` 时，插件在 `initialize` 之后发 `session/resume { sessionId: id }`，返回后再发 `ready`（`session` 即 `id`）。dsh 会修复上次被打断的最后一轮；会话缺失、读不了、格式不兼容或被别的进程占着，`session/resume` 直接失败，插件报 `fatal(retryable: false)`。
+- **系统提示**：SDK 协议没有系统提示参数。插件在新会话的第一条 `session/prompt` 前面拼上 `init.systemPromptFile` 的内容；续接的会话历史里已经有，不再拼。
+- **发消息（`send` → `session/prompt`）**：
+  - `send.text` 转成一个文本块，`send.images` 每张转成 `{ type: "image", data, mimeType }`，一起作为 `contentBlocks` 发 `session/prompt`。
+  - 用 `session/prompt` 而不用 `session/query`：前者不做 slash 命令路由，用户发来的 `/xxx` 文字原样交给模型；Rhodium 的命令由核心自己处理。
+  - `session/prompt` 返回 `{ messageId }` 表示 dsh 已把这条消息持久入队，插件此时发 `taken`。它不是模型结果，回合进度看下面的通知。
+- **回合与事件（通知 → `turn_start` / `text_delta` / `tool_start` / `item` / `turn_end`）**：
+  - `session.status` 变成 `running`：发 `turn_start`（`input` 填触发这一轮的 `send.id`）。
+  - `session.status` 变成 `idle`：发 `turn_end`，`reply` 取本轮最后一条助手消息的文字。它是整个 agent 的状态，含进程内子 agent，所以只有全部停下才算空闲；回合结束只认这个信号，不认单个事件。
+  - `session.event` 只推已持久的事件，没有逐 token 的增量。插件按事件类型转换，不认识的类型直接略过：
+    - `assistant/message`：取其中的文本块，先发一条同内容的 `text_delta`，再发 `item`（`kind: "message"`）；
+    - `tool/call`：发 `tool_start`（`id` 取调用 ID，`name`、`input` 取工具名和参数）；
+    - `tool/result`：按调用 ID 配上对应的 `tool/call`，发 `item`（`kind: "tool"`，`result.text` 取结果文字，失败时 `error: true`）；
+    - `user/message` 等其余事件：不转。
+- **审批与提问（`approval/request`、`user-question/ask` → `ask` / `answer`）**：
+  - `approval/request { sessionId, toolName, callId?, reason? }`（dsh 发给插件的 JSON-RPC 请求）：
+    - `init.approval` 为 `false`（或运行中收到 `approval { on: false }`）：插件直接回 `{ outcome: "allowed-once" }`，不惊动核心；
+    - 否则发 `ask`：`requestId` 取 `"ap-" + JSON-RPC id`，`kind: "permission"`，`tool` 取 `toolName`，`input` 取 `{ reason }`，`toolUse` 取 `callId`；
+    - 收到 `answer`：允许回 `allowed-once`，拒绝回 `rejected`。dsh 的审批不收附言，`answer.message` 丢弃；
+    - 审批开关由插件逐个请求判断，所以声明 `liveApproval: true`。dsh 自己的沙箱（默认 `workspace-write`）照旧生效，审批放行不越过它。
+  - `user-question/ask { requestId, sessionId, questions }`：
+    - 发 `ask`：`requestId` 取 `"uq-" + requestId`，`kind: "question"`，`input` 把 `questions` 的题面和选项转成核心提问的形状；
+    - 收到 `answer`：按题面配回每个问题的 `id`；答案等于某个选项时填 `selected`，否则当自由回答填 `custom`；回 `{ answers: [{ id, selected, custom? }] }`，每个问题恰好一项；
+    - `user-question.cancelled { requestId }`：发 `ask_cancel`。
+  - 去重照 §3.2：同一 `requestId` 至多回 dsh 一次，回成功后发 `ask_resolved`。
+  - dsh 的提问只在当前 dsh 进程里有效，进程重启后旧问题答不了。插件收到不认识的 `requestId` 的 `answer`（例如插件重启后核心重发），发 `ask_cancel`，不回 dsh。
+- **中断（`interrupt`）**：dsh 的 SDK 协议没有取消方法，也没有逐会话关闭方法；上游文档写明，客户端放弃回合的办法是关掉运行时进程。所以：
+  1. 插件收到 `interrupt`，给 dsh 发 `SIGTERM`（Windows 上结束进程），dsh 的启动器会释放运行时并刷完持久化；等 2 秒没退出就强杀。等待中的审批随进程断开按拒绝处理。
+  2. dsh 退出后插件马上发 `turn_end`（不带 `reply`），槽位回到空闲。
+  3. 下一条 `send` 到来前，插件重新拉起 dsh，`initialize` 后 `session/resume`，再发这条 `session/prompt`。dsh 在恢复时给被打断的工具调用补上“未开始”或“结果未知”的合成结果，模型自己决定要不要重试。
+  - ponytail：强杀落在 dsh 正写一批事件的瞬间时，靠 dsh 自己的撕裂尾部恢复（只丢没写完的最后一行）；整段停在 `durations.pluginInterrupt`（默认 10 秒）以内，超了由核心按 §3.2 关停整个插件。
+- **命令（`command`）**：只声明 `compact`。插件发 `session/query`，`contentBlocks` 为一个文本块 `"/compact"`，返回的 `{ kind: "command", execution }` 转成 `command_result`。dsh 在 agent 忙时拒绝压缩，插件回 `ok: false` 带原因。`model`、`effort` 不声明：模型路由在 `initialize` 时定死，换模型要重启 dsh；其余命令由核心拒绝。
+- **关闭（`close`）**：插件发 `shutdown`，dsh 回 `{}` 后释放运行时并以 0 退出；没回就关 dsh 的 stdin，dsh 把 stdin EOF 当作正常关闭。插件随后自己退出；超出 `durations.stopGrace` 时由核心按 §3.2 发 `TERM`、`KILL`。
+- **对话导入（§3.5）**：本期不声明 `import`。
+  - SDK 协议没有列出或读取会话的方法；dsh 的会话查询服务只在它自己的进程里用。
+  - 磁盘上每段会话存在 `<root>/--<规范化 cwd>--/<转义 ID>/session.vN.jsonl[.zstd]`，默认 Zstandard 压缩，格式随版本迁移；占用中的会话持有 `session.lock` 的 `flock`。插件直接读这些文件，就把自己绑在 dsh 的存储格式上。
+  - 真要导入时再加：只读扫描上面的目录，只认当前格式版本，`busy` 用非阻塞试锁 `session.lock` 判断，其余跳过。
+- **环境变量**：核心拉起插件时剥离 Anthropic/Claude 凭据变量，保留用户给 DeepSeek 配的非 Anthropic 变量；零 Key 测试里一个都不配。dsh 自己从它的 profile 与 credentials 读 Key。
+- **托管对话记录**：插件不解析 dsh 的存储，由核心按 `item` / `turn_end` 写入 `<stateDir>/transcripts/dsh/`。
+- **零 Key 演示：离线回放**：
+  - `init.config.fixture` 指向一份录好的样例：每行一帧，记下当时 dsh 写出的 JSON-RPC 帧（响应、通知、dsh 发来的请求）和插件发出的请求。
+  - 设了 `fixture` 时插件不拉起 `dsh`，换成一个读样例的假对端：插件每发一个请求，假对端回样例里对应方法的下一条响应，并按顺序放出其后的通知与请求。样例里的 `approval/request` 照样走插件的 `ask` 流程，核心怎么答都接受。
+  - 所以未安装 `dsh`、没有 DeepSeek Key 时，回放模式也能跑通启动、回合、工具、审批和关闭；CI 与助教演示都只用回放。
+  - 样例由组员用自己的 Key 跑一次真实 `dsh sdk` 录下，录制时用便宜模型；样例里写明录制用的 dsh 版本，不放任何 Key。
+- **版本锁定**：dsh 是开发者预览版（2026-11-22 上游最新为 `dsh-v0.2.3-alpha.1`）。协议没有版本协商，握手只带一个客户端不校验的 `serverInfo.version`，上游也不承诺兼容。
+  - 插件锁定一个实测过的 dsh 版本，写在插件代码里，并和样例的录制版本一致。
+  - 真实模式下插件先跑 `dsh --version`，与锁定版本不同就报 `fatal(retryable: false)`，写明两个版本号。
+  - 升级 dsh 时同时重录样例并改锁定版本，在同一个 PR 里。
 
 ### 9.2 Antigravity 插件（`agy`）
 
 - **实测依据与决策阶梯**：本机已实测 `agy 1.5.13` 带有 `-p --input-format stream-json --output-format stream-json`、`--conversation <ID>`、`agy acp` 与 `--dangerously-skip-permissions`；但社区有反馈非 TTY 管道下 `stream-json` 可能吞输出或卡死（`antigravity-cli` 上游有过相关报告）。因此组员开工第一件事是用半天验证本机管道输出稳定性：
-  - **路径 1（首选）**：如果非 TTY 管道下 `stream-json` 稳定输出，优先走 `stream-json`。这样与 `dsh` 的 ACP 形成两种截然不同的协议翻译（JSON-RPC vs stream-json），避免同质化。
-  - **路径 2（备选）**：如果管道 `stream-json` 卡死或丢失流式输出，切换为包装 `agy acp`（由 `agy` 插件自己独立实现 ACP 客户端翻译，不与 `dsh` 共用代码）。
+  - **路径 1（首选）**：如果非 TTY 管道下 `stream-json` 稳定输出，优先走 `stream-json`。这样与 `dsh` 的 SDK JSON-RPC 形成两种截然不同的协议翻译（JSON-RPC vs stream-json），避免同质化。
+  - **路径 2（备选）**：如果管道 `stream-json` 卡死或丢失流式输出，切换为包装 `agy acp`（由 `agy` 插件自己独立实现 ACP 客户端翻译）。
   - **路径 3（兜底）**：若 `agy` 在无头或无凭据录制下受阻，改接 Gemini CLI（`gemini --acp`）或 OpenCode（`opencode acp`），同样通过 `rh-agent/1` 独立接入。
 - **对核心的要求（以上三条路径对核心接口完全透明，核心零改动）**：
   1. **系统提示路径**：插件可通过 `init.systemPromptFile` 获取 Rhodium 的规则说明路径并在首次或每轮注入。
@@ -1103,7 +1162,7 @@ flowchart LR
 | 角色 | 实质代码与测试贡献 | 交叉 Review 职责（须留具体行为/边界意见与复核结果） | 对应验收里程碑 |
 |---|---|---|---|
 | **核心与集成负责人** | 核心插件化 PR 1–6、公开契约与运行时 SDK（`packages/plugin-sdk/`）、契约测试器、`ci.yml` 与零 Key 基线演示包 | 审查三个插件 PR 的协议合规性、错误恢复与跨平台路径 | PR 1 锁定契约并交付运行时 SDK；PR 6 完成核心 CI 成功记录；全组插件合入后牵头全新目录零 Key 集成验收 |
-| **DeepSeek 插件负责人** | `plugins/dsh/`（可基于 `packages/plugin-sdk/` 实现 `AgentPlugin`：`dsh acp` 协议翻译、独立构建声明、录制 ACP 样例与 `dsh` 插件单元测试/契约测试） | 审查核心驱动 PR 或其他成员插件的边界与失败处理 | 完成 `dsh` PR 合并；通过 `scripts/plugin-conformance.ts` 与阶段 B 集成演示 |
+| **DeepSeek 插件负责人** | `plugins/dsh/`（可基于 `packages/plugin-sdk/` 实现 `AgentPlugin`：`dsh sdk` JSON-RPC 协议翻译、独立构建声明、录制 JSON-RPC 样例与 `dsh` 插件单元测试/契约测试） | 审查核心驱动 PR 或其他成员插件的边界与失败处理 | 完成 `dsh` PR 合并；通过 `scripts/plugin-conformance.ts` 与阶段 B 集成演示 |
 | **Antigravity 插件负责人** | 先行完成 `agy` 非 TTY 管道稳定性实测；`plugins/agy/`（基于 `packages/plugin-sdk/` 实现 `AgentPlugin`：`stream-json` 或备选 ACP 独立封装、录制样例与单元测试/契约测试） | 审查核心 PR 或 `dsh` / `weixin` PR 的测试覆盖与失败反馈 | 先交付管道实测结论，再完成 `agy` PR 合并并通过契约测试 |
 | **微信官方 Bot 插件负责人** | `plugins/weixin/`（基于 `packages/plugin-sdk/` 实现 `ImPlugin`：锁定官方 `openclaw-weixin` `ffc7ae16` 自绑定协议与长轮询、`inbound` 全批回执后再推 `sync_buf`、`context_token` 保守拒发与 `unknown` 语义、AES 加解密、`mock-weixin-server` 本地模拟服务、单元测试与契约测试） | 审查核心 IM 适配器 PR 或其他插件的错误处理与文档一致性 | 完成 `weixin` PR 合并，在微信 Bot 未预填 `owner`、全局未设 `mainChat` 的本地模拟配置下跑通 `rh pair` 首配自动设主窗口、同批 A/B 不丢不重、编号选择与“允许”/“拒绝”审批、以及重启回推 |
 
@@ -1118,17 +1177,21 @@ flowchart LR
 
 ## 12. 已拍板的决策记录
 
-以下 4 项选型决策已于 2026-11-21 拍板定案，连同正文既定架构（两类插件独立进程、`agent` 插件跑在 `rh-hold` 内、插件配置 `path` 支持相对路径、核心写幂等托管对话记录、Linux CI 复用 `src/detached.ts`）一起作为实现与验收基线：
+以下选型决策中，前 4 项已于 2026-11-21 拍板定案，第 5 项于 2026-11-22 拍板，连同正文既定架构（两类插件独立进程、`agent` 插件跑在 `rh-hold` 内、插件配置 `path` 支持相对路径、核心写幂等托管对话记录、Linux CI 复用 `src/detached.ts`）一起作为实现与验收基线：
 
 1. **额外 IM 插件选型：微信官方 Bot（`plugins/weixin/`）—— 已定**
    - **决策结果**：放弃此前候选的 Discord、Matrix、Slack、钉钉、企业微信，改做**微信官方 Bot**（锁定腾讯官方 `Tencent/openclaw-weixin` `ffc7ae16` 自绑定长轮询协议并参考 `AstrBot` `weixin_oc` 结构设计，见 §9.3）。
    - **取舍依据**：功能边界小、无需公网 HTTPS Webhook 域名与企业资质审核，不支持编辑消息与内联按钮之处正好完整展示 Rhodium 核心按 `Capabilities` 自动降级（追加纯文本、编号选择与“允许”/“拒绝”等文字审批提示）的能力，且内置 `mock-weixin-server` 可在无账号无 Key 下复现全部流程。
 
 2. **Antigravity（`agy`）对接协议与排雷策略 —— 已定（按原推荐方案 A）**
-   - **决策结果**：组员开工先花半天实测 `agy` 在非 TTY 管道下 `--input-format stream-json --output-format stream-json` 是否稳定；**稳定则首选 `stream-json`**（与 `dsh` 的 ACP 形成真双协议对比），**卡死则切换包装 `agy acp`**（由 `agy` 插件独立翻译，不与 `dsh` 共用代码），**均不通则改接 Gemini CLI（`gemini --acp`）或 OpenCode（`opencode acp`）**。
+   - **决策结果**：组员开工先花半天实测 `agy` 在非 TTY 管道下 `--input-format stream-json --output-format stream-json` 是否稳定；**稳定则首选 `stream-json`**（与 `dsh` 的 SDK JSON-RPC 形成真双协议对比），**卡死则切换包装 `agy acp`**（由 `agy` 插件独立翻译），**均不通则改接 Gemini CLI（`gemini --acp`）或 OpenCode（`opencode acp`）**。
 
 3. **组员插件代码的仓库组织方式 —— 已定（按原推荐方案 A）**
    - **决策结果**：放在 `Rhodium-OSS` 同仓库的 `plugins/<name>/` 目录下（`plugins/dsh/`、`plugins/agy/`、`plugins/weixin/`），各自持有独立的 `package.json`（或依赖声明）、独立构建命令与 `plugin.json`，不导入核心 `src/`；通过各自独立的 PR 提交与交叉 Review 合入。
 
 4. **macOS CI 触发策略 —— 已定（按原推荐方案 A）**
    - **决策结果**：`push` 与 PR 自动触发 **`linux-check`（`ubuntu-24.04`）** 与 **`windows-check`（`windows-2022`）**；**`macos-check`（`macos-15`）** 设为 `workflow_dispatch` 手动触发，避免平时每次提交消耗大量 macOS Runner 分钟数。
+
+5. **DeepSeek Harness（`dsh`）对接协议 —— 已定（2026-11-22）**
+   - **决策结果**：`dsh` 插件不走 `dsh acp`，改走 dsh 原生的 stdio JSON-RPC：`dsh --profile sdk`（即 `dsh sdk`）。映射写在 §9.1，全在插件里做，核心不改。
+   - **取舍依据**：SDK 协议直接给出持久入队回执、会话恢复、审批请求和原生提问，少翻一层通用协议；它没有取消方法，中断改用结束 dsh 进程再恢复会话。
