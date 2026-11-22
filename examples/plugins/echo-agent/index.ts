@@ -1,14 +1,38 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   PluginFatalError,
   runAgentPlugin,
   type AgentContext,
   type AgentInitParams,
   type AgentPlugin,
+  type AgentQueryParams,
   type AgentReadyInfo,
   type AgentSendParams,
   type AskAnswer,
   type CommandResult,
+  type ImportBlock,
+  type ImportConversation,
 } from "@rhodium-oss/plugin-sdk";
+
+/** A sample conversation file: one JSON object per file in the conversations folder. */
+type Sample = ImportConversation & { blocks?: ImportBlock[] };
+
+/** The sample conversations: config.conversations, else the folder beside this file. A relative dir
+ *  is taken from this plugin's own folder, so the bundled sample has one on any machine. */
+function samples(params: AgentQueryParams): Sample[] {
+  const folder = params.config.conversations || join(import.meta.dir, "conversations");
+  let files: string[];
+  try {
+    files = readdirSync(folder).filter((f) => f.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  return files.map((f) => {
+    const s = JSON.parse(readFileSync(join(folder, f), "utf8")) as Sample;
+    return { ...s, dir: isAbsolute(s.dir) ? s.dir : resolve(import.meta.dir, s.dir) };
+  });
+}
 
 export class EchoAgentPlugin implements AgentPlugin {
   deliveredAnswers = 0;
@@ -120,6 +144,18 @@ export class EchoAgentPlugin implements AgentPlugin {
       return { command: "model", model: "echo-model", label: "Echo Model" };
     }
     throw new Error(`Unsupported command: ${name}`);
+  }
+
+  async listConversations(params: AgentQueryParams): Promise<ImportConversation[]> {
+    return samples(params)
+      .filter((s) => params.dir === null || resolve(s.dir) === resolve(params.dir))
+      .map(({ blocks: _, ...c }) => c);
+  }
+
+  async readConversation(session: string, params: AgentQueryParams): Promise<ImportBlock[]> {
+    const found = samples(params).find((s) => s.id === session);
+    if (!found) throw new Error(`No such conversation: ${session}`);
+    return found.blocks ?? [];
   }
 
   async close(): Promise<void> {

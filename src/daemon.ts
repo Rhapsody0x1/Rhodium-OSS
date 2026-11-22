@@ -991,7 +991,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
       loop.enqueue({ kind: "notice", text: `rh doctor 自检：\n${text}` });
     },
   });
-  const tui = createTui({ cfg: config, store, loop, capabilities }, checkPi);
+  const tui = createTui({ cfg: config, store, loop, capabilities, plugins }, checkPi);
   const runner = createRunner({
     plugins,
     cfg: config,

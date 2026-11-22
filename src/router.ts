@@ -3471,18 +3471,23 @@ function imported(state: State, input: Extract<Input, { kind: "import" }>, ctx: 
     const disk = free.filter((i) => !i.pane).slice(0, IMPORT_LISTED);
     // Herdr's session by name only when it is not your usual one (docs/im-style.md §6.3).
     const where = ctx.config.herdr.session === "default" ? "Herdr 里" : `Herdr ${ctx.config.herdr.session} 会话里`;
-    if (!panes.length && !disk.length) return say(true, `没有可以导入的：${where}没有报告了对话的 agent，${f.dir} 里也没有槽位没用过的对话。`);
+    // An agent plugin that could not list its conversations says why, after the rest (spec plugins §3.5).
+    const failed = f.failed ?? [];
+    if (!panes.length && !disk.length) return say(true, [`没有可以导入的：${where}没有报告了对话的 agent，${f.dir} 里也没有槽位没用过的对话。`, ...failed].join("\n"));
     // In chat, a panel (docs/im-style.md §9.7); its buttons name the whole id, as a start of one could come to name two.
     if (at) {
       const candidates = imCommand("rh_import")!.list!({ importable: [...panes, ...disk], now: ctx.now });
-      showIn(state, ctx, d, at, { command: "/rh_import", head: [`导入哪一个？${where}正在用的排在前面。`], candidates, ...(at.ui?.edit && { back: "/rh_help" }) });
+      showIn(state, ctx, d, at, { command: "/rh_import", head: [`导入哪一个？${where}正在用的排在前面。`, ...failed], candidates, ...(at.ui?.edit && { back: "/rh_help" }) });
       return d;
     }
-    const label = (i: (typeof free)[number]) => (i.pane ? `${i.pane}  ${i.agent}  ${i.dir}` : `${i.session.slice(0, 8)}  ${i.agent}  ${time(i.at!)}  ${clip(i.said ?? "", 30)}`);
+    // An agent plugin's id is its own, not a UUID: shown whole, as rh import takes it.
+    const short = (i: Importable) => (isBuiltinAgent(i.agent) ? i.session.slice(0, 8) : i.session);
+    const label = (i: (typeof free)[number]) => (i.pane ? `${i.pane}  ${i.agent}  ${i.dir}` : `${short(i)}  ${i.agent}  ${time(i.at!)}  ${clip(i.said ?? "", 30)}${i.busy ? "  正被别的进程使用" : ""}`);
     const text = [
       ...(panes.length ? [`Herdr 会话 ${ctx.config.herdr.session} 里的 agent：`, ...panes.map((i) => `rh import ${label(i)}`)] : []),
       ...(disk.length ? [`${f.dir} 里的对话，最近的在前：`, ...disk.map((i) => `rh import ${label(i)}`)] : []),
       `照上面的命令导入，--name <名字> 给槽位起名。`,
+      ...failed,
     ];
     return say(true, text.join("\n"));
   }
@@ -4417,9 +4422,10 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
         return null;
       }
       if (values.name !== undefined && !NAME.test(values.name)) refuse(`槽位名字只能由文字、数字和 _ . - 组成，不超过 64 个字符：${values.name}`);
-      // Herdr's pane ids are "<workspace>:<pane>"; session ids are UUIDs, looked up by glob.
+      // Herdr's pane ids are "<workspace>:<pane>"; session ids are UUIDs, looked up by glob, or an
+      // agent plugin's own, of the characters spec plugins §3.5 allows.
       const pane = what.includes(":");
-      if (!pane && !/^[0-9a-f-]+$/i.test(what)) refuse(`看不懂 ${what}：写对话 ID（或它的开头），或 Herdr 的 pane ID，例如 w1:p1。`);
+      if (!pane && !/^[A-Za-z0-9_-]{1,128}$/.test(what)) refuse(`看不懂 ${what}：写对话 ID（或它的开头），或 Herdr 的 pane ID，例如 w1:p1。`);
       d.effects.push({ kind: "import", id: input.id, name: values.name, what: pane ? { pane: what } : { session: what } });
       return null;
     }

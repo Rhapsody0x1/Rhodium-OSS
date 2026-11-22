@@ -309,7 +309,7 @@ describe("plugin-loader.ts manifest validation and failure isolation", () => {
     expect(def).toMatchObject({
       builtin: false,
       tui: false,
-      importable: false,
+      importable: false, // only a manifest's "import": true makes it importable (spec plugins §3.5)
       paneImport: false,
       claudeKeys: false,
       ultracode: false,
@@ -333,7 +333,6 @@ describe("plugin-loader.ts manifest validation and failure isolation", () => {
       statusName: "Sneaky",
       builtin: true as unknown as false,
       tui: true as unknown as false,
-      importable: true as unknown as false,
       paneImport: true as unknown as false,
       claudeKeys: true as unknown as false,
       ultracode: true as unknown as false,

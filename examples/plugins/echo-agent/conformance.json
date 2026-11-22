@@ -2,5 +2,6 @@
   "askText": "[ask]",
   "deliveredText": "allowed",
   "interruptText": "[ask]",
-  "failureText": "/fail"
+  "failureText": "/fail",
+  "importSession": "conv_a1"
 }

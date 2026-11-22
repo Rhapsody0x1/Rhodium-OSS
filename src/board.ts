@@ -30,7 +30,8 @@ import { moment } from "./panels";
 import { agentCommands } from "./commands";
 import { AT_BOARD, askGone, contactOf, IN_TUI, resumeWaits, settingsOf, slotState, STATE, target, WEB_PAUSED, WEB_QUEUE, workspaceName, type Payload, type RhReply } from "./router";
 import { namesOf, type Ask, type Bot, type Chat, type Conversation, type Event, type Outbound, type Slot, type Store, type Tx } from "./store";
-import type { PluginRegistry } from "./plugin-loader";
+import type { LoadedPlugin, PluginRegistry } from "./plugin-loader";
+import { listPluginConversations, readPluginConversation } from "./plugin-query";
 import { allPlatformLabels, isBuiltinPlatform, platformDef } from "./platforms";
 import { splitSource, withoutSource } from "./prompt";
 import { paneSession } from "./tui";
@@ -326,9 +327,10 @@ async function folder(store: Store, path: string): Promise<FolderData> {
 
 /** A conversation the import list has (architecture §7.10): its session id, and the pane it is open in
  *  in Herdr, if it is; the directory it was started in, ~/… under HOME; its title, when it last
- *  changed, how many things were said, its branch; what you last said, the start of the agent's last
- *  reply; where a full-text search hit, in a message. */
-export type ImportRow = { session: string; pane?: string; dir: string; title: string; at: number; count: number; branch?: string; you?: string; reply?: string; hit?: Hit };
+ *  changed, how many things were said (an agent plugin may not say), its branch; what you last said,
+ *  the start of the agent's last reply; where a full-text search hit, in a message; busy, an agent
+ *  plugin's that another process holds, which cannot be picked. */
+export type ImportRow = { session: string; pane?: string; dir: string; title: string; at: number; count?: number; branch?: string; you?: string; reply?: string; hit?: Hit; busy?: true };
 /** GET /api/importable: a page of the list; cursor, where the next starts, while there is more; partial,
  *  that the page stopped as its time ran out. */
 export type ImportableData = { list: ImportRow[]; cursor?: string; partial?: true };
@@ -336,10 +338,12 @@ export type ImportableData = { list: ImportRow[]; cursor?: string; partial?: tru
 /** What GET /api/importable answers (architecture §7.10): agent's conversations started in dir, or in
  *  any with q and no dir; with q, those it finds, in what was said too with full=1. The first page has
  *  first the agent's panes in Herdr that report one there, any folder's with no dir, not a slot's. */
-async function importableAt(req: Request, store: Store, cfg: Config, herdrSocket: () => Promise<string>, p: URLSearchParams): Promise<Response> {
+async function importableAt(req: Request, store: Store, cfg: Config, herdrSocket: () => Promise<string>, p: URLSearchParams, plugins?: PluginRegistry): Promise<Response> {
   if (!ownPage(req)) return new Response("只认看板自己的页面发来的请求。\n", { status: 403 });
   const agent = p.get("agent") as AgentKind;
   const words = (p.get("q") ?? "").trim();
+  const plugin = importer(plugins, agent);
+  if (plugin && (p.get("dir") || words)) return pluginImportable(store, cfg, plugin, p.get("dir") ? await pathOf(p.get("dir")!) : null, words);
   if (!isBuiltinAgent(agent) || (!p.get("dir") && !words)) return new Response("要 agent，和 dir 或 q。\n", { status: 400 });
   const dir = p.get("dir") ? await pathOf(p.get("dir")!) : undefined;
   const search = words ? { words, full: p.get("full") === "1" } : undefined;
@@ -382,6 +386,25 @@ async function importableAt(req: Request, store: Store, cfg: Config, herdrSocket
   }
 }
 
+/** The loaded agent plugin id, if it answers import queries (spec plugins §3.5). */
+const importer = (plugins: PluginRegistry | undefined, id: string) => plugins?.loaded.find((x) => x.id === id && x.manifest.kind === "agent" && x.manifest.import === true);
+
+/** GET /api/importable for an agent plugin (spec plugins §3.5): what it lists in dir, or anywhere, the
+ *  newest first, but for a slot's; words matched against titles alone; one page. 502 if it cannot list. */
+async function pluginImportable(store: Store, cfg: Config, plugin: LoadedPlugin, dir: string | null, words: string): Promise<Response> {
+  const taken = used(store);
+  const fold = (t: string) => t.toLowerCase();
+  try {
+    const list = (await listPluginConversations(plugin, cfg, dir))
+      .filter((c) => !taken.has(c.id) && (!words || fold(c.title).includes(fold(words))))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((c): ImportRow => ({ session: c.id, dir: tilde(c.dir), title: c.title, at: c.updatedAt, ...(c.count !== undefined && { count: c.count }), ...(c.busy && { busy: true as const }) }));
+    return Response.json({ list } satisfies ImportableData, { headers: { "cache-control": "no-store" } });
+  } catch (e) {
+    return new Response(`插件 ${plugin.id} 列不出对话：${(e as Error).message}\n`, { status: 502 });
+  }
+}
+
 /** GET /api/importable/messages: what you and the agent said on a page of a conversation to import;
  *  before, where the page before it ends, while there is one. */
 export type ImportPreviewData = { blocks: Extract<Block, { kind: "user" | "assistant" }>[]; before?: number };
@@ -389,10 +412,18 @@ export type ImportPreviewData = { blocks: Extract<Block, { kind: "user" | "assis
 /** What GET /api/importable/messages answers (architecture §7.10): a page back from before, the end
  *  for none, of the agent's conversation session, by its whole id alone, in whatever directory it was
  *  started; what you and the agent said on it, nothing else. Read only, of a slot's too. */
-async function importPreview(req: Request, p: URLSearchParams): Promise<Response> {
+async function importPreview(req: Request, p: URLSearchParams, cfg: Config, plugins?: PluginRegistry): Promise<Response> {
   if (!ownPage(req)) return new Response("只认看板自己的页面发来的请求。\n", { status: 403 });
   const agent = p.get("agent") as AgentKind;
   const session = p.get("session") ?? "";
+  const plugin = importer(plugins, agent);
+  // An agent plugin's whole conversation, in one page: what you and it said.
+  if (plugin) {
+    const blocks = await readPluginConversation(plugin, cfg, session).catch((e: Error) => e);
+    if (blocks instanceof Error) return new Response(`插件 ${plugin.id} 读不出这段对话：${blocks.message}\n`, { status: 502 });
+    const said = blocks.flatMap((b, i): ImportPreviewData["blocks"] => (b.kind === "user" ? [{ kind: b.kind, text: b.text, source: null, from: null, at: String(i), time: b.at ?? null }] : b.kind === "assistant" ? [{ kind: b.kind, text: b.text, at: String(i), time: b.at ?? null }] : []));
+    return Response.json({ blocks: said } satisfies ImportPreviewData, { headers: { "cache-control": "no-store" } });
+  }
   const before = p.get("before") === null ? Infinity : count(p.get("before"));
   if (!isBuiltinAgent(agent) || Number.isNaN(before)) return new Response("要 agent，before 不对。\n", { status: 400 });
   // findConversations takes hex digits and "-" alone: no path, no glob.
@@ -1827,9 +1858,9 @@ export function serveBoard(
         if (!ownPage(req)) return new Response("只认看板自己的页面发来的请求。\n", { status: 403 });
         return folder(store, url.searchParams.get("path") ?? "").then((f) => Response.json(f, { headers: { "cache-control": "no-store" } }));
       case "/api/importable":
-        return importableAt(req, store, cfg, herdrSocket, url.searchParams);
+        return importableAt(req, store, cfg, herdrSocket, url.searchParams, plugins);
       case "/api/importable/messages":
-        return importPreview(req, url.searchParams);
+        return importPreview(req, url.searchParams, cfg, plugins);
       // What the page times the round trip by (#286).
       case "/api/ping":
         return new Response(null, { status: 204 });

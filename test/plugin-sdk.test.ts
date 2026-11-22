@@ -1556,13 +1556,26 @@ process.stdin.resume();
     const agentRes = await runConformance(join(REPO_ROOT, "examples", "plugins", "echo-agent", "plugin.json"));
     expect(agentRes.stderr).toBe("");
     expect(agentRes.code).toBe(0);
-    expect(agentRes.stdout.match(/^ok \d+ - /gm)).toHaveLength(7);
+    expect(agentRes.stdout.match(/^ok \d+ - /gm)).toHaveLength(8);
+    expect(agentRes.stdout).toContain("conversation import query");
+
+    // Without "import" the checker skips the query group.
+    const dir = makeTempDir("rhodium no import ");
+    const example = join(REPO_ROOT, "examples/plugins/echo-agent");
+    const { import: _, ...plain } = JSON.parse(readFileSync(join(example, "plugin.json"), "utf8"));
+    writeFileSync(join(dir, "plugin.json"), JSON.stringify({ ...plain, command: ["bun", "run", join(example, "index.ts")] }));
+    writeFileSync(join(dir, "icon.svg"), readFileSync(join(example, "icon.svg")));
+    // Its test inputs too: without interruptText the interrupt group races the echo's turn.
+    writeFileSync(join(dir, "conformance.json"), readFileSync(join(example, "conformance.json")));
+    const plainRes = await runConformance(join(dir, "plugin.json"));
+    expect(plainRes.code).toBe(0);
+    expect(plainRes.stdout.match(/^ok \d+ - /gm)).toHaveLength(7);
 
     const imRes = await runConformance(join(REPO_ROOT, "examples", "plugins", "local-im", "plugin.json"));
     expect(imRes.stderr).toBe("");
     expect(imRes.code).toBe(0);
     expect(imRes.stdout.match(/^ok \d+ - /gm)).toHaveLength(7);
-  }, 20_000);
+  }, 40_000);
 
   test.skipIf(process.platform !== "win32")("conformance launches a .cmd wrapper in a directory with spaces on Windows", async () => {
     const dir = makeTempDir("rhodium Windows wrapper ");
@@ -1842,4 +1855,75 @@ runAgentPlugin({
     expect(res.code).not.toBe(0);
     expect(res.stderr).toContain("icon is outside the plugin directory");
   });
+});
+
+describe("agent.ts one-shot import query (spec §3.5)", () => {
+  async function query(plugin: AgentPlugin, msg: object) {
+    const stdin = new PassThrough();
+    const stdout = createLineCapture();
+    const stderr = createLineCapture();
+    let exitCode: number | undefined;
+    const run = runAgentPlugin(plugin, { stdin, stdout: stdout.sink, stderr: stderr.sink, exit: (c) => void (exitCode = c), registerSignals: false });
+    stdin.write(JSON.stringify(msg) + "\n");
+    const code = await run;
+    stdin.end();
+    return { code, exitCode, lines: stdout.lines() as Record<string, unknown>[], stderr: stderr.raw() };
+  }
+  const base: AgentPlugin = {
+    async init() {
+      throw new Error("init must not run for a query");
+    },
+    async send() {},
+    async interrupt() {},
+  };
+
+  test("list answers with query_result and exits 0 without calling init", async () => {
+    let seen: unknown;
+    const r = await query(
+      {
+        ...base,
+        async listConversations(params) {
+          seen = params;
+          return [{ id: "conv_a1", dir: "/p", title: "t", updatedAt: 1 }];
+        },
+      },
+      { type: "query", proto: 1, id: "q-1", query: "list", dir: "/p", program: "x", config: { k: "v" } },
+    );
+    expect(seen).toEqual({ dir: "/p", program: "x", config: { k: "v" } });
+    expect(r.lines).toEqual([{ type: "query_result", id: "q-1", ok: true, conversations: [{ id: "conv_a1", dir: "/p", title: "t", updatedAt: 1 }] }]);
+    expect([r.code, r.exitCode]).toEqual([0, 0]);
+  });
+
+  test("read answers with blocks", async () => {
+    const r = await query(
+      { ...base, async readConversation(session) { return [{ kind: "user", text: session }]; } },
+      { type: "query", proto: 1, id: "q-2", query: "read", session: "s1", program: null, config: {} },
+    );
+    expect(r.lines).toEqual([{ type: "query_result", id: "q-2", ok: true, blocks: [{ kind: "user", text: "s1" }] }]);
+    expect(r.code).toBe(0);
+  });
+
+  test("an unimplemented method answers ok:false", async () => {
+    const r = await query(base, { type: "query", proto: 1, id: "q-3", query: "list", dir: null, program: null, config: {} });
+    expect(r.lines).toEqual([{ type: "query_result", id: "q-3", ok: false, error: "该插件不支持导入" }]);
+    expect(r.code).toBe(0);
+  });
+
+  test("a throwing method answers ok:false with its message and logs the stack", async () => {
+    const r = await query(
+      { ...base, async readConversation() { throw new Error("no such conversation"); } },
+      { type: "query", proto: 1, id: "q-4", query: "read", session: "x", program: null, config: {} },
+    );
+    expect(r.lines).toEqual([{ type: "query_result", id: "q-4", ok: false, error: "no such conversation" }]);
+    expect(r.stderr).toContain("no such conversation");
+    expect(r.code).toBe(0);
+  });
+});
+
+test("manifest import is an optional agent boolean", () => {
+  const echo = JSON.parse(readFileSync(join(REPO_ROOT, "examples/plugins/echo-agent/plugin.json"), "utf8"));
+  expect(validateManifest({ ...echo, import: true }).ok).toBe(true);
+  expect(validateManifest({ ...echo, import: "yes" }).ok).toBe(false);
+  const im = JSON.parse(readFileSync(join(REPO_ROOT, "examples/plugins/local-im/plugin.json"), "utf8"));
+  expect(validateManifest({ ...im, import: true }).ok).toBe(false);
 });

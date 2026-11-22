@@ -469,8 +469,8 @@ export type Used = { effort?: string; model?: string; ultra?: boolean };
  *  agent in a Herdr pane, which goes with it. */
 export type ImportFound = { agent: AgentKind; session: string; dir: string; pane?: TuiPane };
 /** What rh import alone lists: the agent in a Herdr pane, or a conversation on disk, with when it was
- *  last active and what was said first. */
-export type Importable = { agent: AgentKind; session: string; dir: string; pane?: string; at?: number; said?: string };
+ *  last active and what was said first; busy, an agent plugin's that another process holds. */
+export type Importable = { agent: AgentKind; session: string; dir: string; pane?: string; at?: number; said?: string; busy?: true };
 
 /** What a holder unit held up over its MemoryHigh uses and its limit, in bytes, high null for none
  *  ("max"); top: its biggest programs by anonymous memory, by name, for the notice (architecture §4.2). */
@@ -548,4 +548,4 @@ export type Input =
   // slot's name, if the call gave one. chat: where to answer; point: the chat goes to the slot made
   // from now on (/rh_import typed there), rather than only hearing of it (an rh import you agreed to).
   // panel: how the answer shows, should it come to a press on a panel.
-  | { kind: "import"; id: string; chat?: string; point?: true; name?: string; panel?: PanelUi; found: ImportFound | { dir: string; list: Importable[] } | { error: string } };
+  | { kind: "import"; id: string; chat?: string; point?: true; name?: string; panel?: PanelUi; found: ImportFound | { dir: string; list: Importable[]; failed?: string[] } | { error: string } };

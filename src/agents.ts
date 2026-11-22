@@ -107,7 +107,7 @@ export function registerAgentPlugin(
     claudeKeys: false,
     builtin: false,
     tui: false,
-    importable: false,
+    importable: Boolean(def.importable),
     steer: Boolean(def.steer),
     supportedCommands: def.supportedCommands ? [...def.supportedCommands] : [],
   });
