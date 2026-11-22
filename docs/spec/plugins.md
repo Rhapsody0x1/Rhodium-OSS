@@ -14,7 +14,7 @@
 
 - **两类扩展点**：支持接入新的 agent 种类（经 `rh-agent/1` 协议）和新的 IM 平台（经 `rh-im/1` 协议），内置三家 agent（Claude、pi、Codex）与内置 IM（QQ、Telegram、飞书、fake）保持原生实现不变。
 - **目录扫描、显式登记与失败隔离**：核心扫描 `config.toml` 旁的 `plugins/` 目录，扫到的插件默认加载；`[plugins.<id>]` 可禁用某个插件，也可用 `path` 从别处登记插件（§4.5）。核心读取并校验 `plugin.json` [插件清单](../../GLOSSARY.md)与版本要求；配置失败、清单损坏、运行崩溃均隔离在单个插件内。
-- **插件图标、对话导入与建 Bot 向导**：插件可在清单里带图标，看板在内置图标出现的地方显示它（§4.6）；agent 插件可声明支持导入本机已有的对话（§3.5）；IM 插件可声明支持 `rh bot` 建 Bot 向导（§3.6）。
+- **插件图标、对话导入与建 Bot 向导**：插件可在清单里带图标，看板在内置图标出现的地方显示它（§4.6）；agent 插件可声明支持导入本机已有的对话（§3.5）；IM 插件可声明支持建 Bot 向导，网页看板的“新建 Bot”和终端的 `rh bot` 都能跑它（§3.6）。
 - **核心内部表开放化**：放开 `AgentKind` 与 `Platform` 联合类型限制，为非内置种类在对话记录、终端切换、设置带回、看板图标等查找表提供安全默认值。
 - **公开契约、运行时 SDK 与契约测试器**：提供零内部依赖的 TypeScript 契约与运行时 SDK（`packages/plugin-sdk/`，含 `AgentPlugin`/`ImPlugin` 接口与 `runAgentPlugin`/`runImPlugin` 运行时辅助）及语言无关的黑盒[契约测试](../../GLOSSARY.md)脚本，随仓库附带两个基于 SDK 实现的最小示例插件（`echo-agent` 与 `local-im`）。
 - **跨平台支持、自动化 CI 与零 Key 演示**：确保 Linux、Windows、macOS 可用；补全 GitHub Actions 构建与测试流程；提供不依赖任何真实 API Key 和真实 IM 账号的完整可重复演示路径。

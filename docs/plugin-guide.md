@@ -565,7 +565,7 @@ env -u CODEX_HOME -u CLAUDE_CONFIG_DIR HOME="$ROOT" \
      .\dist\rhodium.exe rh doctor
      .\dist\rhodium.exe rh ls
      ```
-   - **验证 IM 插件建 Bot 向导**：在这三种模式下不通过本地 `rh bot` 跑向导，直接用第 5 节的契约检查器（第 8 组）和插件集成测试验证向导流程。
+   - **验证 IM 插件建 Bot 向导**：在这三种模式下不通过本地 `rh bot` 跑向导，用第 5 节的契约检查器（第 8 组）和插件集成测试验证向导流程，也可以在看板的“新建 Bot”里选这个插件平台跑一遍向导。
 2. **普通 Linux（路线 D，带 systemd 用户会话，在真实交互终端运行）**：
    - 除看板与假 IM 外，还可以在另一个真实交互终端里直接建工作区、建槽位并运行 `rh bot` 向导。注意新配置没有 `mainChat`，首次跑 `rh bot` 必须把已有目标槽位写在最后：
 

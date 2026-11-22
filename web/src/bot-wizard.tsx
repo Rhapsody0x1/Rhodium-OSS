@@ -113,12 +113,12 @@ export function BotWizard({ open, close }: { open: boolean; close: () => void })
     setPaste(paste);
     setId(r.flow.id);
   };
-  const of = steps(paste || platform === "telegram", flow);
+  const of = steps(paste || platform === "telegram" || !!plugin, flow);
   const form = { open, close: shut, error, submit: () => {} };
 
   if (!id || !flow)
     return (
-      <Form {...form} title="新建 Bot" step={`第 1 / ${steps(platform === "telegram", undefined)} 步`} submit={() => void (NAME.test(name) && target && start(platform === "telegram"))}>
+      <Form {...form} title="新建 Bot" step={`第 1 / ${steps(platform === "telegram" || !!plugin, undefined)} 步`} submit={() => void (NAME.test(name) && target && start(platform === "telegram"))}>
         <div className="flex items-end gap-2">
           {/* Built-ins and wizard plugins in one group: arrow keys move through all of them. */}
           <RadioGroup aria-label="平台" value={platform} onValueChange={(v) => setPlatform(v as string)} className="flex shrink-0 overflow-hidden rounded-lg border">

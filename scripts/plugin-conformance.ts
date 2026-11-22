@@ -481,7 +481,11 @@ async function main() {
     if (manifest.kind === "agent") await testAgent(o, fixture);
     else await testIm(o, fixture);
     console.log("PASS " + manifest.kind + " plugin conformance: " + manifest.id);
-  } finally { rmSync(cwd, { recursive: true, force: true }); }
+  } finally {
+    // A leaked child (the very thing a check may report) still holds this directory on Windows (EBUSY);
+    // don't let the cleanup error replace the real one. ponytail: leaves a temp dir behind in that case.
+    try { rmSync(cwd, { recursive: true, force: true }); } catch {}
+  }
 }
 
 if (import.meta.main) main().catch(err => {
