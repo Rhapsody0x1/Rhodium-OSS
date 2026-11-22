@@ -5,6 +5,7 @@
 // - 中断:dsh 的 SDK 协议没有取消方法,客户端放弃回合的办法是停掉进程(SIGTERM → 2s → 强杀)。
 // - 关闭:发 shutdown,dsh 回 {} 后自行退出;没回就关 stdin(EOF = 正常关闭)。
 
+import { readdirSync, readFileSync } from "node:fs";
 import { readJsonLines } from "@rhodium-oss/plugin-sdk";
 import {
   parseDshVersionOutput,
@@ -218,10 +219,39 @@ export class DshProcessTransport implements DshTransport {
   /** 中断当前回合:结束整棵进程树(dsh 的启动器会释放运行时并刷完持久化)。 */
   async kill(): Promise<void> {
     if (!this.alive) return;
+    const descendants = this.collectDescendants(this.proc.pid);
     await this.terminateTree(2000);
     await Promise.race([this.proc.exited, Bun.sleep(2000)]);
+    // POSIX 没有整树终止:启动器没转发到的后代进程(dsh 崩溃/不转发时)一并清理。
+    for (const pid of descendants) { try { process.kill(pid, "SIGKILL"); } catch { /* 已退出 */ } }
     this.stopped = true;
     this.rejectPending("dsh 进程已被终止");
+  }
+
+  /** Linux:经 /proc 的 PPID 链收集 pid 的全部后代;其他平台返回空(macOS 无 /proc,dsh 启动器负责转发)。 */
+  private collectDescendants(pid: number): number[] {
+    if (process.platform !== "linux") return [];
+    const parentOf = new Map<number, number>();
+    try {
+      for (const entry of readdirSync("/proc")) {
+        if (!/^\d+$/.test(entry)) continue;
+        try {
+          const stat = readFileSync("/proc/" + entry + "/stat", "utf8");
+          const rest = stat.slice(stat.lastIndexOf(")") + 2);
+          const ppid = Number(rest.split(" ")[1]);
+          if (Number.isFinite(ppid)) parentOf.set(Number(entry), ppid);
+        } catch { /* 进程可能刚消失 */ }
+      }
+    } catch { return []; }
+    const out: number[] = [];
+    const queue = [pid];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const [child, parent] of parentOf) {
+        if (parent === current && !out.includes(child)) { out.push(child); queue.push(child); }
+      }
+    }
+    return out;
   }
 
   /**
@@ -253,6 +283,7 @@ export class DshProcessTransport implements DshTransport {
       this.rejectPending("dsh 进程已关闭");
       return;
     }
+    const descendants = this.collectDescendants(this.proc.pid);
     try {
       this.proc.stdin.end();
     } catch {
@@ -260,6 +291,7 @@ export class DshProcessTransport implements DshTransport {
     }
     await Promise.race([this.proc.exited, Bun.sleep(2000)]);
     if (this.alive) await this.terminateTree(0); // EOF 宽限已给过,直接结束整树
+    for (const pid of descendants) { try { process.kill(pid, "SIGKILL"); } catch { /* 已退出 */ } }
     this.stopped = true;
     this.rejectPending("dsh 进程已关闭");
   }

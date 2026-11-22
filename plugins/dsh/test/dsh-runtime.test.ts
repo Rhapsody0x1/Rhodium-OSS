@@ -11,6 +11,20 @@ import { cleanupTempDirs, Harness, makeTempDir, type Frame } from "./harness";
 
 const FAKE_TS = resolve(import.meta.dir, "fake-dsh.ts");
 
+/** 进程是否还活着:Linux 上 SIGKILL 后的孤儿在被 init 回收前呈 zombie 状态,kill(pid, 0) 分不出来,读 /proc 状态位。 */
+function processAlive(pid: number): boolean {
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync("/proc/" + pid + "/stat", "utf8");
+      const state = stat.slice(stat.lastIndexOf(")") + 2).trim().split(" ")[0];
+      return state !== "Z" && state !== "X";
+    } catch {
+      return false; // /proc 条目消失 = 已退出并被回收
+    }
+  }
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 afterEach(() => cleanupTempDirs());
 
 /** 生成本平台的包装脚本:bun 执行假 dsh(复制到临时目录,避免中文仓库路径被 cmd.exe 按 GBK 解析),并注入行为环境变量。 */
@@ -111,9 +125,7 @@ describe("dsh 真实传输层(假 dsh)", () => {
     expect(end.reply).toBeUndefined();
 
     // 子进程属于 dsh 进程树的一部分,整树清理后应当已退出(审查意见 3)
-    let childAlive = true;
-    try { process.kill(childPid, 0); } catch { childAlive = false; }
-    expect(childAlive).toBe(false);
+    expect(processAlive(childPid)).toBe(false);
 
     io.write({ type: "close" });
     await io.expectCleanExit();
