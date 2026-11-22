@@ -1,167 +1,18 @@
 // dsh 插件的单元/集成测试:在进程内用内存流驱动 runAgentPlugin,以离线样例回放覆盖
-// 正常路径、边界与失败处理、接入与契约(插件开发指南 §7)。真实 dsh 的版本校验、
-// 子进程生命周期由 dsh-runtime.ts 单独封装,这里通过回放与纯函数验证其余全部行为。
+// 正常路径、边界与失败处理、接入与契约(插件开发指南 §7)。真实传输层的测试见 dsh-runtime.test.ts。
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import {
-  runAgentPlugin,
-  validateManifest,
-  type AgentContext,
-  type AgentPlugin,
-} from "@rhodium-oss/plugin-sdk";
+import { validateManifest, type AgentContext } from "@rhodium-oss/plugin-sdk";
 import { dshPromptMatchKey, LOCKED_DSH_VERSION, parseDshVersionOutput } from "../dsh-protocol";
 import { parseFixture } from "../fixture-peer";
 import { DshAgentPlugin } from "../index";
+import { cleanupTempDirs, FIXTURE_PATH, Harness, initParams, makeTempDir, readyHarness, type Frame } from "./harness";
 
-const FIXTURE_PATH = resolve(import.meta.dir, "../fixtures/sample.jsonl");
 const MANIFEST = JSON.parse(readFileSync(resolve(import.meta.dir, "../plugin.json"), "utf8")) as unknown;
 
-type Frame = Record<string, unknown>;
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
-});
-
-function makeTempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "dsh-plugin-test-"));
-  tempDirs.push(dir);
-  return dir;
-}
-
-function makeLineCollector(into: Frame[]): { write(chunk: string | Uint8Array): unknown } {
-  let buffer = "";
-  return {
-    write(chunk: string | Uint8Array): unknown {
-      buffer += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
-      for (;;) {
-        const nl = buffer.indexOf("\n");
-        if (nl < 0) break;
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (line) into.push(JSON.parse(line) as Frame);
-      }
-      return true;
-    },
-  };
-}
-
-class Harness {
-  readonly outgoing: Frame[] = [];
-  exitCode: number | null = null;
-  readonly stderrText: { text: string };
-  readonly done: Promise<number>;
-  private queue: (string | null)[] = [];
-  private resolvers: ((value: string | null) => void)[] = [];
-
-  constructor(readonly plugin: AgentPlugin) {
-    const out = this.outgoing;
-    const stderrText = { text: "" };
-    this.stderrText = stderrText;
-    this.done = runAgentPlugin(plugin, {
-      stdin: this.lines(),
-      stdout: makeLineCollector(out),
-      stderr: {
-        write(chunk: string | Uint8Array): unknown {
-          stderrText.text += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
-          return true;
-        },
-      },
-      exit: (code) => {
-        this.exitCode = code;
-      },
-      registerSignals: false,
-    });
-  }
-
-  private async *lines(): AsyncGenerator<string> {
-    for (;;) {
-      const value = this.queue.length > 0
-        ? (this.queue.shift() as string | null)
-        : await new Promise<string | null>((resolveWait) => this.resolvers.push(resolveWait));
-      if (value === null) return;
-      yield value;
-    }
-  }
-
-  write(frame: Frame | string): void {
-    // rh-agent/1 按行分帧:每条消息必须以 \n 结尾,否则 readJsonLines 会一直缓冲到流结束。
-    const line = (typeof frame === "string" ? frame : JSON.stringify(frame)) + "\n";
-    const resolver = this.resolvers.shift();
-    if (resolver) resolver(line);
-    else this.queue.push(line);
-  }
-
-  endStdin(): void {
-    const resolver = this.resolvers.shift();
-    if (resolver) resolver(null); // null = EOF
-    else this.queue.push(null);
-  }
-
-  async waitFor(pred: (frame: Frame) => boolean, label: string, timeoutMs = 6000): Promise<Frame> {
-    const deadline = Date.now() + timeoutMs;
-    let scanned = 0;
-    for (;;) {
-      while (scanned < this.outgoing.length) {
-        const frame = this.outgoing[scanned++]!;
-        if (pred(frame)) return frame;
-        if (frame.type === "fatal") throw new Error(`插件提前报 fatal(等待 ${label}):${String(frame.message)}`);
-      }
-      if (Date.now() > deadline) {
-        throw new Error(`等待 ${label} 超时;已收到:${JSON.stringify(this.outgoing)}`);
-      }
-      await Bun.sleep(5);
-    }
-  }
-
-  /** 关闭输入并等待插件以 0 退出。 */
-  async expectCleanExit(): Promise<void> {
-    this.endStdin();
-    const code = await Promise.race([this.done, Bun.sleep(8000).then(() => -999)]);
-    expect(code).toBe(0);
-    expect(this.exitCode).toBe(0);
-  }
-
-  /** 取回放假对端(观察插件发出的请求与写回的应答)。 */
-  peer(): { requests: { method: string; params: unknown }[]; responses: { id: unknown; frame: unknown }[] } {
-    const peer = (this.plugin as unknown as {
-      fixturePeer?: { requests: { method: string; params: unknown }[]; responses: { id: unknown; frame: unknown }[] };
-    }).fixturePeer;
-    if (!peer) throw new Error("插件不在回放模式");
-    return peer;
-  }
-}
-
-type InitOptions = {
-  session?: { new: string } | { resume: string };
-  approval?: boolean;
-  model?: string | null;
-  config?: Record<string, string>;
-};
-
-function initParams(options: InitOptions = {}): Frame {
-  const dir = makeTempDir();
-  const promptFile = join(dir, "system-prompt.md");
-  writeFileSync(promptFile, "离线测试系统提示(样例)\n");
-  return {
-    type: "init",
-    proto: 1,
-    conv: "conv-1",
-    session: options.session ?? { new: "conf-session-1" },
-    cwd: dir,
-    systemPromptFile: promptFile,
-    program: "dsh",
-    approval: options.approval ?? false,
-    model: options.model !== undefined ? options.model : "deepseek-chat",
-    effort: null,
-    resumed: false,
-    config: { fixture: FIXTURE_PATH, ...options.config },
-  };
-}
+afterEach(() => cleanupTempDirs());
 
 /** 直接驱动帧处理用的最小 AgentContext 记录器。 */
 function fakeCtx(): AgentContext & { frames: Frame[] } {
@@ -186,13 +37,6 @@ function fakeCtx(): AgentContext & { frames: Frame[] } {
     error: (detail, recoverable) => record({ type: "error", detail, recoverable }),
     log: (message) => record({ type: "log", message }),
   };
-}
-
-async function readyHarness(options: InitOptions = {}): Promise<Harness> {
-  const io = new Harness(new DshAgentPlugin());
-  io.write(initParams(options));
-  await io.waitFor((frame) => frame.type === "ready", "ready");
-  return io;
 }
 
 describe("dsh agent 插件(离线回放)", () => {
@@ -409,6 +253,49 @@ describe("dsh agent 插件(离线回放)", () => {
     const fatal = await io.waitFor((f) => f.type === "fatal", "fatal");
     expect(String(fatal.message)).toContain("未配置模型");
   }, 15000);
+
+  test("turn/end 错误原因透出:error + reply(审查意见 1)", async () => {
+    const io = await readyHarness();
+    io.write({ type: "send", id: "in-e", text: "触发一次模型错误", human: true, mode: "turn" });
+    await io.waitFor((f) => f.type === "turn_start", "turn_start");
+    const error = await io.waitFor((f) => f.type === "error", "error");
+    expect(String(error.detail)).toContain("invalid api key (offline sample)");
+    const end = await io.waitFor((f) => f.type === "turn_end", "turn_end");
+    expect(String(end.reply)).toContain("dsh 出错");
+    io.write({ type: "close" });
+    await io.expectCleanExit();
+  }, 15000);
+
+  test("多选题:核心拼接答案按 ', ' 拆分匹配标签(审查意见 6)", async () => {
+    const plugin = new DshAgentPlugin();
+    const ctx = fakeCtx();
+    const responses: { id: unknown; frame: unknown }[] = [];
+    (plugin as unknown as { transport: unknown }).transport = {
+      alive: true,
+      dshVersion: LOCKED_DSH_VERSION,
+      request: async () => ({}),
+      respond: (id: unknown, frame: unknown) => responses.push({ id, frame }),
+      respondError: () => {},
+      onInbound: () => {},
+      onStderrLine: () => {},
+      onExited: () => {},
+      kill: async () => {},
+      dispose: async () => {},
+    };
+    void plugin.handleDshFrame(ctx, {
+      id: "srv-m",
+      method: "user-question/ask",
+      params: {
+        requestId: "q-m",
+        questions: [{ id: "q1", question: "选哪些语言?", multiSelect: true, options: [{ label: "TypeScript" }, { label: "Python" }] }],
+      },
+    });
+    await Bun.sleep(20);
+    expect(ctx.frames.some((f) => f.type === "ask" && f.requestId === "uq-q-m")).toBe(true);
+    await plugin.answer("uq-q-m", { kind: "question", answers: { "选哪些语言?": "TypeScript, Python" } }, ctx);
+    await Bun.sleep(20);
+    expect(responses).toContainEqual({ id: "srv-m", frame: { answers: [{ id: "q1", selected: ["TypeScript", "Python"] }] } });
+  });
 });
 
 describe("dsh 协议辅助与清单", () => {

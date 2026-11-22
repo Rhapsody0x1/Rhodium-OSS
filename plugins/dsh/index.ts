@@ -106,6 +106,8 @@ export class DshAgentPlugin implements AgentPlugin {
   private currentInputId: string | null = null;
   private turnAborted = false;
   private lastAssistantText: string | null = null;
+  /** 本轮的 dsh 出错原因(turn/end 事件 reason.kind === "error"),idle 时透出(审查意见 1)。 */
+  private turnError: string | null = null;
   private turnDone: PromiseWithResolvers<void> | null = null;
   private pendingToolCalls = new Map<string, { name: string; input: unknown }>();
   private unnamedToolSeq = 0;
@@ -170,6 +172,7 @@ export class DshAgentPlugin implements AgentPlugin {
       const transport = await DshProcessTransport.launch(this.program, ["--profile", "sdk"], this.cwd, LOCKED_DSH_VERSION);
       transport.onInbound((frame) => this.handleDshFrame(this.ctxRef!, frame));
       transport.onStderrLine((line) => this.ctxRef?.log(`[dsh] ${line}`));
+      transport.onExited((reason) => this.handleTransportExit(transport, reason));
       this.transport = transport;
     } catch (err) {
       // 找不到程序、版本不符、启动失败一律 fatal(retryable: false),原因取 dsh 侧信息(§9.1)。
@@ -254,6 +257,7 @@ export class DshAgentPlugin implements AgentPlugin {
 
     this.currentInputId = msg.id;
     this.lastAssistantText = null;
+    this.turnError = null;
     this.turnAborted = false;
     const done = Promise.withResolvers<void>();
     this.turnDone = done;
@@ -266,9 +270,15 @@ export class DshAgentPlugin implements AgentPlugin {
       await done.promise;
     } catch (err) {
       if (aborted()) return; // 中断/关停期间的对端退出:回合已由 interrupt() 收尾
-      // dsh 拒绝 prompt(模型/适配器错误)或对端崩溃:按可重试失败上报,插件退出,
-      // 核心重启槽位后重新拉起并 resume,未发过 taken 的输入会原样重投递(§3.2 taken 语义)。
-      throw new PluginFatalError((err as Error).message, { retryable: true });
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.startsWith("dsh 错误响应:")) {
+        // dsh 明确拒收这条 prompt(如不支持的输入):可恢复——把原因告诉用户并结束回合(审查意见 10)。
+        // 若按可重试失败退出,核心会重投递同一条消息,再次被拒,循环到熔断。
+        throw new Error(msg);
+      }
+      // 进程死亡/传输异常:按可重试失败上报,插件退出,核心重启槽位后重新拉起并 resume,
+      // 未发过 taken 的输入会原样重投递(§3.2 taken 语义)。
+      throw new PluginFatalError(msg, { retryable: true });
     } finally {
       if (this.turnDone === done) this.turnDone = null;
       this.activeTurn = false;
@@ -284,6 +294,15 @@ export class DshAgentPlugin implements AgentPlugin {
       this.sessionReported = true;
       ctx.session(this.sessionId);
     }
+  }
+
+  /** dsh 进程意外退出(非中断/非关闭):让当前回合以可重试失败收场,由核心重启续接(审查意见 4)。 */
+  private handleTransportExit(transport: DshTransport, reason: string): void {
+    if (this.closing || this.turnAborted || this.transport !== transport) return;
+    const done = this.turnDone;
+    if (!done) return;
+    // 只 reject、不动 turnDone:send 的 catch 里 aborted() 依据 turnDone === done 区分中断与意外退出
+    done.reject(new Error(reason));
   }
 
   // ---------------------------------------------------------------------------
@@ -317,16 +336,25 @@ export class DshAgentPlugin implements AgentPlugin {
   private handleSessionStatus(ctx: AgentContext, params: DshSessionStatusParams): void {
     if (params.sessionId !== this.sessionId) return; // 子 agent 的子会话等全部忽略,避免提前 turn_end(§9.1)
     if (params.status === "running") {
-      if (!this.activeTurn && this.currentInputId !== null) {
+      // dsh 自发回合(后台任务、定时提醒)没有触发输入:turn_start 不带 input(审查意见 5)。
+      if (!this.activeTurn) {
         this.activeTurn = true;
-        ctx.turnStart(this.currentInputId);
+        ctx.turnStart(this.currentInputId ?? undefined);
       }
       return;
     }
     if (params.status === "idle" && this.activeTurn) {
       // idle 是整个 agent 的状态(含进程内子 agent),全部停下才算空闲;回合结束只认这个信号。
       this.activeTurn = false;
-      ctx.turnEnd(this.lastAssistantText ?? undefined);
+      const error = this.turnError;
+      this.turnError = null;
+      if (error && !this.lastAssistantText) {
+        // 模型调用出错(Key 无效/欠费等)且本轮没有助手正文:把原因透出给用户(审查意见 1)。
+        ctx.error("dsh 出错:" + error, true);
+        ctx.turnEnd("dsh 出错:" + error);
+      } else {
+        ctx.turnEnd(this.lastAssistantText ?? undefined);
+      }
       this.currentInputId = null;
       const done = this.turnDone;
       this.turnDone = null;
@@ -372,7 +400,13 @@ export class DshAgentPlugin implements AgentPlugin {
       });
       return;
     }
-    // user/message、system/message、step/*、turn/*、job/*、request/* 等其余事件:不转。
+    if (event.type === "turn/end") {
+      // 回合结束原因:dsh 出错时记下原因,等 idle 时透出给用户(审查意见 1)。
+      const reason = (data as { reason?: { kind?: string; error?: { message?: string } } }).reason;
+      if (reason?.kind === "error") this.turnError = reason.error?.message ?? "未知错误";
+      return;
+    }
+    // user/message、system/message、step/*、job/*、request/* 等其余事件:不转。
   }
 
   // ---------------------------------------------------------------------------
@@ -438,11 +472,19 @@ export class DshAgentPlugin implements AgentPlugin {
       .filter((question) => question.id !== undefined)
       .map((question) => {
         const given = answer.kind === "question" ? answer.answers[question.question ?? ""] : undefined;
-        const option = question.options?.find((o) => o.label !== undefined && o.label === given);
-        if (option?.label !== undefined) return { id: question.id as string, selected: [option.label] };
-        return given === undefined
-          ? { id: question.id as string, selected: [] as string[] }
-          : { id: question.id as string, selected: [] as string[], custom: given };
+        const labels = (question.options ?? []).map((o) => o.label).filter((l): l is string => l !== undefined);
+        if (given === undefined) return { id: question.id as string, selected: [] as string[] };
+        // 多选题:核心把答案拼成 "A, B";每段都是选项标签才填 selected,否则当自由回答(审查意见 6)。
+        if (question.multiSelect === true) {
+          const parts = given.split(", ").map((part) => part.trim());
+          if (parts.length > 0 && parts.every((part) => labels.includes(part))) {
+            return { id: question.id as string, selected: parts };
+          }
+          return { id: question.id as string, selected: [] as string[], custom: given };
+        }
+        const option = labels.find((label) => label === given);
+        if (option !== undefined) return { id: question.id as string, selected: [option] };
+        return { id: question.id as string, selected: [] as string[], custom: given };
       });
     this.transport?.respond(rpcId, { answers });
     pending.delivered.resolve();
@@ -474,10 +516,11 @@ export class DshAgentPlugin implements AgentPlugin {
     await this.ensureLaunched();
     let result: unknown;
     try {
+      // 压缩要等摘要模型跑完,长对话经常超过默认 20 秒;给足 10 分钟,期间用户可 /stop(审查意见 2)。
       result = await this.transport!.request("session/query", {
         sessionId: this.sessionId,
         contentBlocks: [{ type: "text", text: "/compact" } satisfies DshContentBlock],
-      });
+      }, 600_000);
     } catch (err) {
       // dsh 在 agent 忙时拒绝压缩等:由 SDK 回 ok:false 带原因。
       throw new Error(`dsh 压缩失败:${(err as Error).message}`);
@@ -502,12 +545,12 @@ export class DshAgentPlugin implements AgentPlugin {
     }
     if (!this.activeTurn && !hadPending) return;
     this.turnAborted = true;
+    this.activeTurn = false; // 先置位:旧进程在退出前推来的 idle 不再产生第二个 turn_end(审查意见 9)
+    this.currentInputId = null;
     const transport = this.transport;
     this.transport = null;
-    if (transport && this.activeTurn) await transport.kill();
+    if (transport && !hadPending) await transport.kill();
     else transport?.kill().catch(() => {});
-    this.activeTurn = false;
-    this.currentInputId = null;
     this.pendingToolCalls.clear();
     ctx.turnEnd(); // 不带 reply,槽位回到空闲
     const done = this.turnDone;

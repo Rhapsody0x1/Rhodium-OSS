@@ -19,7 +19,7 @@
    触发一次审批、触发一次 `ask_user_question`、中途 `/stop` 打断、恢复后继续、`/compact`、退出。
 2. 录下 `dsh --profile sdk` 在 stdout 上写出的每一帧,以及插件发出的每个请求,
    按上面的格式整理进 `sample.jsonl`,并在首行写明录制用的 dsh 版本。
-3. 清理样例:去掉任何 Key、令牌、真实用户名或个人路径(合规红线 §9.5)。
+3. 清理样例:去掉任何 Key、令牌、真实用户名或个人路径(红线见插件开发指南 §9)。
 4. 在**同一个 PR** 里:更新 `../dsh-protocol.ts` 的 `LOCKED_DSH_VERSION` 为实测版本,
    并确认 `bun scripts/plugin-conformance.ts --manifest plugins/dsh/plugin.json
    --config '{"fixture":"./fixtures/sample.jsonl"}'` 全过。

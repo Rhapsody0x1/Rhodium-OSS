@@ -85,7 +85,16 @@ export class DshProcessTransport implements DshTransport {
     this.dshVersion = dshVersion;
     void this.pumpStdout();
     void this.pumpStderr();
-    void this.proc.exited.then(() => this.rejectPending("dsh 进程已退出"));
+    void this.proc.exited.then(() => {
+      this.exitHandler?.("dsh 进程已退出");
+      this.rejectPending("dsh 进程已退出");
+    });
+  }
+
+  private exitHandler: ((reason: string) => void) | null = null;
+
+  onExited(handler: (reason: string) => void): void {
+    this.exitHandler = handler;
   }
 
   /** 拉起 dsh 子进程;版本不符或启动失败抛 DshLaunchError(由插件转成 fatal)。 */
@@ -206,18 +215,38 @@ export class DshProcessTransport implements DshTransport {
     this.pending.clear();
   }
 
-  /** 中断当前回合:SIGTERM → 等 2s → 强杀(dsh 的启动器会释放运行时并刷完持久化)。 */
+  /** 中断当前回合:结束整棵进程树(dsh 的启动器会释放运行时并刷完持久化)。 */
   async kill(): Promise<void> {
     if (!this.alive) return;
-    this.tryKill("SIGTERM");
-    await Promise.race([this.proc.exited, Bun.sleep(2000)]);
-    if (this.alive) this.tryKill("SIGKILL");
+    await this.terminateTree(2000);
     await Promise.race([this.proc.exited, Bun.sleep(2000)]);
     this.stopped = true;
     this.rejectPending("dsh 进程已被终止");
   }
 
-  /** 关闭收尾:关 stdin(EOF = dsh 视为正常关闭)→ 等退出 → 必要时强杀。shutdown 请求由插件层发出。 */
+  /**
+   * 结束整棵进程树:Windows 上 proc.kill 只能杀 dsh.cmd 本体,SDK 运行时子进程还挂着
+   * (审查意见 3),用 `taskkill /T /F` 结束整棵树;POSIX 走 SIGTERM → 宽限 → SIGKILL。
+   */
+  private async terminateTree(graceMs: number): Promise<void> {
+    if (process.platform === "win32") {
+      try {
+        const taskkill = Bun.spawn(["taskkill", "/PID", String(this.proc.pid), "/T", "/F"], {
+          windowsHide: true, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+        });
+        await taskkill.exited;
+      } catch {
+        // 进程可能已自行退出。
+      }
+      return;
+    }
+    this.tryKill("SIGTERM");
+    const deadline = Date.now() + graceMs;
+    while (this.alive && Date.now() < deadline) await Bun.sleep(50);
+    if (this.alive) this.tryKill("SIGKILL");
+  }
+
+  /** 关闭收尾:关 stdin(EOF = dsh 视为正常关闭)→ 等退出 → 必要时结束整棵进程树。shutdown 请求由插件层发出。 */
   async dispose(): Promise<void> {
     if (!this.alive) {
       this.stopped = true;
@@ -230,7 +259,7 @@ export class DshProcessTransport implements DshTransport {
       // 已退出。
     }
     await Promise.race([this.proc.exited, Bun.sleep(2000)]);
-    if (this.alive) await this.kill();
+    if (this.alive) await this.terminateTree(0); // EOF 宽限已给过,直接结束整树
     this.stopped = true;
     this.rejectPending("dsh 进程已关闭");
   }

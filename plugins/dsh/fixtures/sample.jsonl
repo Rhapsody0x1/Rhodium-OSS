@@ -1,4 +1,4 @@
-{"v":1,"dshVersion":"0.2.2-rc.5","note":"按真实 dsh 0.2.2-rc.5(npm @deepseek-ai/dsh)实测帧整理:事件载荷在 event.data,assistant 文本在 data.message.content 的 text 块(reasoning/tool-call 块跳过),tool 参数是 data.arguments JSON 字符串。已脱敏,不含任何 Key、真实路径或私人内容。"}
+{"v":1,"dshVersion":"0.2.2-rc.5","note":"按真实 dsh 0.2.2-rc.5(npm @deepseek-ai/dsh)实测帧整理:事件载荷在 event.data,assistant 文本在 data.message.content 的 text 块(reasoning/tool-call 块跳过),tool 参数是 data.arguments JSON 字符串。其中 /fail 的错误响应为示意帧(真实错误随原因而异)。已脱敏,不含任何 Key、真实路径或私人内容。"}
 {"dir":"out","method":"initialize","params":{"cwd":"<slot-cwd>","provider":"deepseek-official","model":"deepseek-chat","approvalRequests":true,"capabilities":{"userQuestions":true}}}
 {"dir":"in","method":"initialize","result":{"serverInfo":{"name":"deepseek-harness-sdk-runtime","version":"0.0.1"}}}
 {"dir":"out","method":"session/prompt","match":"hello dsh","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"你是运行在 Rhodium 看板里的助手。\n\n"},{"type":"text","text":"hello dsh"}]}}
@@ -22,7 +22,7 @@
 {"dir":"out","method":"initialize","params":{"cwd":"<slot-cwd>","provider":"deepseek-official","model":"deepseek-chat","approvalRequests":true,"capabilities":{"userQuestions":true}}}
 {"dir":"in","method":"initialize","result":{"serverInfo":{"name":"deepseek-harness-sdk-runtime","version":"0.0.1"}}}
 {"dir":"out","method":"session/resume","params":{"sessionId":"conf-session-1"}}
-{"dir":"in","method":"session/resume","result":{"restored":true}}
+{"dir":"in","method":"session/resume","result":{}}
 {"dir":"out","method":"session/prompt","match":"继续修那个 flaky 测试","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"继续修那个 flaky 测试"}]}}
 {"dir":"in","method":"session/prompt","result":{"messageId":"msg-104"}}
 {"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"running"}}
@@ -42,6 +42,11 @@
 {"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"running"}}
 {"dir":"in","id":"srv-2","method":"user-question/ask","params":{"requestId":"q-9","sessionId":"conf-session-1","questions":[{"id":"q1","header":"选择语言","question":"用哪种语言重写这个脚本?","options":[{"label":"TypeScript","description":"使用 TypeScript 重写脚本。"},{"label":"Python","description":"使用 Python 重写脚本。"}],"multiSelect":false},{"id":"q2","header":"测试","question":"要写测试吗?"}]}}
 {"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"reasoning","text":""},{"type":"text","text":"好的,按你的选择来。"}]}}}}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"idle"}}
+{"dir":"out","method":"session/prompt","match":"触发一次模型错误","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"触发一次模型错误"}]}}
+{"dir":"in","method":"session/prompt","result":{"messageId":"msg-107"}}
+{"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"running"}}
+{"dir":"in","method":"session.event","params":{"sessionId":"conf-session-1","event":{"type":"turn/end","data":{"reason":{"kind":"error","error":{"code":401,"message":"invalid api key (offline sample)"}}}}}}
 {"dir":"in","method":"session.status","params":{"sessionId":"conf-session-1","status":"idle"}}
 {"dir":"out","method":"session/query","params":{"sessionId":"conf-session-1","contentBlocks":[{"type":"text","text":"/compact"}]}}
 {"dir":"in","method":"session/query","result":{"kind":"command","execution":{"beforeTokens":9600,"afterTokens":2100}}}

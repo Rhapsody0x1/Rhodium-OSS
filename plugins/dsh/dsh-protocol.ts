@@ -125,6 +125,8 @@ export interface DshTransport {
   onInbound(handler: (frame: DshInboundFrame) => void): void;
   /** 注册 dsh stderr 行处理器(插件把它转进自己的 stderr)。 */
   onStderrLine(handler: (line: string) => void): void;
+  /** 注册进程退出回调(真实模式:dsh 意外死亡时用于让当前回合以可重试失败收场)。 */
+  onExited?(handler: (reason: string) => void): void;
   /** 中断:停掉当前 dsh(SIGTERM → 2s → 强杀),等待中的请求全部 reject。 */
   kill(): Promise<void>;
   /** 关闭:发 shutdown → 关 stdin → 等退出 → 必要时强杀。 */

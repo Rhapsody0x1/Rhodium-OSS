@@ -168,6 +168,10 @@ export class FixtureTransport implements DshTransport {
     // 回放模式没有下游进程,没有 stderr 可转。
   }
 
+  onExited(_handler: (reason: string) => void): void {
+    // 回放对端的"退出"由 kill 显式触发,走中断路径,不经意外退出回调。
+  }
+
   request(method: string, params: unknown, timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<unknown> {
     if (!this.generationAlive) return Promise.reject(new Error(`对端已退出,无法发送 ${method}`));
     const id = this.nextRequestId++;
