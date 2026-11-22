@@ -18,7 +18,7 @@ export function startMock({ port = 0, seed = false, wizardRedirectHost }: {
   const blobs = new Map<string, ArrayBuffer>();
   const qrPolls = new Map<string, number>();
   const downloadFailures: number[] = [];
-  let qrCount = 0, loseReceipt = false;
+  let qrCount = 0, loseReceipt = false, downloadDelay = 0;
   const queue = (inputs: MockInput[]) => batches.push(inputs.map(input => ({
     from_user_id: input.sender ?? mockChat, message_id: input.id, message_type: 1, message_state: 2,
     create_time_ms: Date.now(), context_token: mockContext,
@@ -49,6 +49,7 @@ export function startMock({ port = 0, seed = false, wizardRedirectHost }: {
     if (route === "/c2c/download" && req.method === "GET") {
       const failure = downloadFailures.shift();
       if (failure) return reject(failure);
+      if (downloadDelay) await Bun.sleep(downloadDelay);
       const bytes = blobs.get(url.searchParams.get("encrypted_query_param") ?? "");
       return bytes ? new Response(bytes) : reject(404);
     }
@@ -120,6 +121,7 @@ export function startMock({ port = 0, seed = false, wizardRedirectHost }: {
     config: { token: mockToken, baseUrl: server.url.origin, cdnBaseUrl: `${server.url.origin}/c2c` },
     loseNextReceipt() { loseReceipt = true; },
     failDownloads(...statuses: number[]) { downloadFailures.push(...statuses); },
+    slowDownloads(ms: number) { downloadDelay = ms; },
     putBlob(param: string, bytes: Uint8Array) { blobs.set(param, bytes.slice().buffer); },
   };
 }

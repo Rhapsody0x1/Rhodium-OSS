@@ -39,22 +39,24 @@ class TooLarge extends Error {
 const transient = (error: unknown) => error instanceof HttpTimeout || error instanceof HttpInterrupted ||
   (error instanceof HttpError && error.status >= 500);
 
-export async function download(root: string, attachment: Attachment, dest: string, signal: AbortSignal) {
+// The core gives fetch_attachment durations.pluginRpc (30 s by default), then deletes the temp dir,
+// so both attempts share one deadline just under that and each uses only the time left.
+export async function download(root: string, attachment: Attachment, dest: string, signal: AbortSignal, budget = 28_000) {
+  const end = Date.now() + budget;
   try {
-    return await downloadOnce(root, attachment, dest, signal);
+    return await downloadOnce(root, attachment, dest, signal, budget);
   } catch (error) {
-    if (signal.aborted || !transient(error)) throw error;
+    if (signal.aborted || !transient(error) || end - Date.now() < 2_000) throw error;
     await Bun.sleep(1_000);
-    return downloadOnce(root, attachment, dest, signal);
+    return downloadOnce(root, attachment, dest, signal, end - Date.now());
   }
 }
 
-async function downloadOnce(root: string, attachment: Attachment, dest: string, signal: AbortSignal) {
+async function downloadOnce(root: string, attachment: Attachment, dest: string, signal: AbortSignal, timeout: number) {
   const { media, kind } = attachment;
   const key = decodeKey(attachment);
   if (!key && kind !== "image") throw new Error("Weixin media key missing");
-  // The deadline covers the body too: 20 s plus about 100 KB/s up to the size limit.
-  const timeout = 20_000 + maxFileBytes[kind] / 100;
+  // The deadline covers the body too.
   const response = await request(cdnUrl(root, "download", media.full_url, media.encrypt_query_param), {}, signal, timeout);
   if (!response.ok) throw new HttpError(response.status);
   const max = maxFileBytes[kind];
@@ -78,8 +80,10 @@ async function downloadOnce(root: string, attachment: Attachment, dest: string, 
   } finally { reader.releaseLock(); }
   let bytes = Buffer.concat(chunks);
   if (key) {
-    const cipher = createDecipheriv("aes-128-ecb", key, null);
-    bytes = Buffer.concat([cipher.update(bytes), cipher.final()]);
+    try {
+      const cipher = createDecipheriv("aes-128-ecb", key, null);
+      bytes = Buffer.concat([cipher.update(bytes), cipher.final()]);
+    } catch { throw new Error("Weixin attachment could not be decrypted"); }
   }
   if (bytes.length > max) throw new TooLarge();
   await Bun.write(dest, bytes);

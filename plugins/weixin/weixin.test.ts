@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ImContext, ImInboundMessage } from "../../packages/plugin-sdk";
+import { download } from "./media";
 import { startMock } from "./mock-weixin-server";
 import { Weixin } from "./weixin";
 import { wizard } from "./wizard";
@@ -259,6 +260,37 @@ test("does not retry a rejected attachment download and reports why", async () =
     mock.failDownloads(403);
     await expect(fetchIt()).rejects.toThrow("Weixin HTTP 403");
   });
+});
+
+test("both download attempts share one deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rhodium-weixin-deadline-"));
+  const mock = startMock();
+  try {
+    mock.putBlob("plain", Buffer.from("plain image"));
+    mock.failDownloads(503);
+    mock.slowDownloads(5_000);
+    const dest = join(root, "dest.png"), started = Date.now();
+    await expect(download(mock.config.cdnBaseUrl, { kind: "image", media: { encrypt_query_param: "plain" } },
+      dest, new AbortController().signal, 2_500)).rejects.toThrow("Weixin HTTP request timed out");
+    expect(Date.now() - started).toBeLessThan(3_500);
+    expect(await Bun.file(dest).exists()).toBe(false);
+  } finally {
+    await mock.server.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reports a wrong attachment key without the raw cipher error", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rhodium-weixin-key-"));
+  const mock = startMock();
+  try {
+    mock.putBlob("sealed", new Uint8Array(32).fill(7));
+    await expect(download(mock.config.cdnBaseUrl, { kind: "image", key: "00".repeat(16), media: { encrypt_query_param: "sealed" } },
+      join(root, "dest.png"), new AbortController().signal)).rejects.toThrow(/^Weixin attachment could not be decrypted$/);
+  } finally {
+    await mock.server.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("never echoes a malformed attachment URL in the error", async () => {
