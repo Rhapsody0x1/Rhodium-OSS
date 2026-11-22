@@ -327,4 +327,30 @@ describe("dsh 真实传输层(假 dsh)", () => {
     await cleanup(io);
     rmSync(dir, { recursive: true, force: true });
   }, 30000);
+
+  test("下一条搭上被停消息的拉起后,prompt 等待期间再 /stop:照样立刻 turn_end", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dsh-rt-"));
+    const program = writeFakeProgram(dir, { FAKE_DSH_VERSION_DELAY_MS: "800", FAKE_DSH_PROMPT_DELAY_MS: "5000" });
+    const io = new Harness(new DshAgentPlugin());
+    io.write(runtimeInit(program, true));
+    await io.waitFor((f) => f.type === "ready", "ready", 15000);
+    io.write({ type: "send", id: "in-1", text: "need approval first", human: true, mode: "turn" });
+    await io.waitFor((f) => f.type === "ask", "ask", 15000);
+    io.write({ type: "interrupt" });
+    await io.waitFor((f) => f.type === "turn_end", "interrupted turn_end", 15000);
+    const ends = (): Frame[] => io.outgoing.filter((f) => f.type === "turn_end");
+
+    io.write({ type: "send", id: "in-2", text: "second", human: true, mode: "turn" }); // 重新拉起,--version 慢 800ms
+    await Bun.sleep(300);
+    io.write({ type: "interrupt" });
+    await io.waitFor(() => ends().length === 2, "second turn_end", 3000);
+    io.write({ type: "send", id: "in-3", text: "slow third", human: true, mode: "turn" }); // 搭上同一次拉起,prompt 慢 5s
+    await Bun.sleep(1500); // 拉起已完成,session/prompt 还在等
+    io.write({ type: "interrupt" });
+    await io.waitFor(() => ends().length === 3, "third turn_end", 3000);
+    expect(ends()[2]!.reply).toBeUndefined();
+    expect(io.outgoing.some((f) => f.type === "taken" && f.inputId === "in-3")).toBe(false);
+    await cleanup(io);
+    rmSync(dir, { recursive: true, force: true });
+  }, 30000);
 });

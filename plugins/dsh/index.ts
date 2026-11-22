@@ -116,7 +116,7 @@ export class DshAgentPlugin implements AgentPlugin {
   private pendingAsks = new Map<string, PendingAsk>();
   /** /compact 进行中:此时 /stop 也要停掉 dsh 并发 turn_end,否则只能等核心的中断超时。 */
   private compacting = false;
-  /** send 从拉起 dsh 到 dsh 报 running 之前:此时的 /stop 也要发 turn_end,同 compacting。 */
+  /** send 进行中(从拉起 dsh 到 send 结束):此时的 /stop 也要发 turn_end,同 compacting。 */
   private sending = false;
   /** interrupt() 每次真正收尾就加一:send/compact 拉起 dsh 后比对它,不看会被下一条消息清掉的 turnAborted。 */
   private stops = 0;
@@ -263,12 +263,12 @@ export class DshAgentPlugin implements AgentPlugin {
     try {
       await this.ensureLaunched();
     } catch (err) {
-      this.sending = false;
+      if (this.stops === stops) this.sending = false; // 被 /stop 时别清掉搭上同一次拉起的下一条消息的标记
       if (this.closing || this.stops !== stops) return; // 拉起中被 /stop 杀掉或关停:回合已由 interrupt() 收尾
       throw err;
     }
     if (this.closing || !this.transport || this.stops !== stops) {
-      this.sending = false; // 被 /stop 时不发 prompt,也不发 taken
+      if (this.stops === stops) this.sending = false; // 被 /stop 时不发 prompt,也不发 taken
       return;
     }
 
@@ -301,7 +301,7 @@ export class DshAgentPlugin implements AgentPlugin {
       throw new PluginFatalError(msg, { retryable: true });
     } finally {
       if (this.turnDone === done) this.turnDone = null;
-      this.sending = false;
+      if (this.stops === stops) this.sending = false;
       this.activeTurn = false;
       this.currentInputId = null;
     }
@@ -564,7 +564,7 @@ export class DshAgentPlugin implements AgentPlugin {
       // dsh 在 agent 忙时拒绝压缩等:由 SDK 回 ok:false 带原因。
       throw new Error(`dsh 压缩失败:${(err as Error).message}`);
     } finally {
-      this.compacting = false;
+      if (this.stops === stops) this.compacting = false; // 被 /stop 时已由 interrupt() 清掉,别清掉紧接着的下一个 /compact 的标记
     }
     const execution = (result as { execution?: { beforeTokens?: unknown; afterTokens?: unknown } } | null)?.execution;
     const tokens = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
@@ -589,6 +589,7 @@ export class DshAgentPlugin implements AgentPlugin {
     this.stops++;
     this.activeTurn = false; // 先置位:旧进程在退出前推来的 idle 不再产生第二个 turn_end(审查意见 9)
     this.sending = false; // 杀旧进程期间再来的 /stop 不再发第二个 turn_end
+    this.compacting = false;
     this.currentInputId = null;
     const transport = this.transport;
     this.transport = null;
