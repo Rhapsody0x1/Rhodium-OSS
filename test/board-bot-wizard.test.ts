@@ -298,13 +298,17 @@ for (const [kind, device] of [
     expect(await plugin.getAttribute("aria-checked")).toBe("true");
     expect(await page.getByRole("radio", { name: "QQ" }).getAttribute("aria-checked")).toBe("false");
     expect(await page.getByLabel("名称").inputValue()).toBe(PLUGIN);
+    // A plugin bot always pairs (the core refuses an owner from a plugin), so three steps like Telegram.
+    await page.getByText("第 1 / 3 步").waitFor();
     await page.getByRole("button", { name: "下一步" }).click();
     expect(started.at(-1)).toEqual([PLUGIN, PLUGIN, a]);
+    await page.getByText("第 2 / 3 步").waitFor();
     const box = page.getByLabel("接入码", { exact: true });
     expect(await box.getAttribute("type")).toBe("password");
     await box.fill("join-me");
     await page.getByRole("button", { name: "下一步" }).click();
     await page.getByText("等待平台确认").waitFor();
+    await page.getByText("第 2 / 3 步").waitFor();
     expect(plugged.at(-1)).toBe("join-me");
     set(PLUGIN, { state: "done", target: "w/a" });
     await page.getByText("创建成功").waitFor();
