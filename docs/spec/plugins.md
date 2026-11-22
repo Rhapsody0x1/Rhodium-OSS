@@ -416,12 +416,13 @@ runImPlugin(new WeixinImPlugin());
 |---|---|---|
 | 核心 -> 插件 | `query`（`query: "list"`） | `proto: 1`、`id`、`dir: string \| null`（只列在这个目录开的对话；`null` 列全部）、`program`、`config`（同 `init` 的同名字段） |
 | 核心 -> 插件 | `query`（`query: "read"`） | `proto: 1`、`id`、`session`（要读的对话 ID）、`program`、`config` |
-| 插件 -> 核心 | `query_result`（答 `list`） | `id`、`ok: true`、`conversations: { id: string; dir: string; title: string; updatedAt: number; busy?: boolean }[]` |
+| 插件 -> 核心 | `query_result`（答 `list`） | `id`、`ok: true`、`conversations: { id: string; dir: string; title: string; updatedAt: number; count?: number; busy?: boolean }[]` |
 | 插件 -> 核心 | `query_result`（答 `read`） | `id`、`ok: true`、`blocks: ImportBlock[]` |
 | 插件 -> 核心 | `query_result`（失败） | `id`、`ok: false`、`error: string` |
 
+- `conversations[].id` 必须匹配 `^[A-Za-z0-9_-]{1,128}$`：只用字母、数字、`_` 和 `-`，不含 `:`（含 `:` 的会被 `rh import` 当成 Herdr pane），也不含 `.` 和 `/`（它要拼进托管对话记录的文件名）。不合格的对话，核心整条丢掉，不列也不导入。
 - `conversations[].dir` 是对话开在的绝对目录。插件找不到目录的对话不列出，因为槽位要有目录。
-- `title` 是对话的标题，没有就取第一句用户消息的开头。`updatedAt` 是毫秒时间戳。
+- `title` 是对话的标题，没有就取第一句用户消息的开头。`updatedAt` 是毫秒时间戳。`count` 是对话的消息条数，插件算不出就不给。
 - `busy: true`：别的进程正占着这段对话（例如用户在另一个终端开着它）。怎么判断由插件自己决定。
 - `ImportBlock` 是核心的标准块，和 `item` 事件同构，外加用户消息：
   - `{ kind: "user"; text: string; at?: number }`
@@ -450,6 +451,7 @@ runImPlugin(new WeixinImPlugin());
 - **网页导入对话框**：`GET /api/importable?agent=<插件 ID>` 对插件发 `list`。
   - 按 `dir` 由插件过滤，按 `q` 由核心只比对标题（插件对话不做全文搜索），不分页，一次返回全部。
   - `ImportRow` 新增 `busy?: true`；对话框把这一行显示成不能选。
+  - `ImportRow.count` 改成可选：插件给了 `count` 就带上，没给就省略；对话框没有条数时不画条数图标。
   - `GET /api/importable/messages` 对插件发 `read`，只取 `user` 与 `assistant` 块做预览。
   - 查询失败返回 `502` 和中文原因，对话框照常显示错误。
 - **导入一段插件对话**：
@@ -470,7 +472,7 @@ runImPlugin(new WeixinImPlugin());
   - 方法没实现，写 `ok: false`、`error: "该插件不支持导入"`；
   - 方法抛错，写 `ok: false` 与错误消息，堆栈记 `stderr`。
 - 契约测试器对声明 `import` 的插件加一项：
-  - 发 `list`（`dir: null`），要求超时内收到合法 `query_result`，并且进程退出；
+  - 发 `list`（`dir: null`），要求超时内收到合法 `query_result`，每个 `conversations[].id` 都匹配上面的字符集，并且进程退出；
   - `conformance.json` 给了 `importSession` 时，再发 `read`，要求 `blocks` 非空且每块合法。
 - 没声明 `import` 的插件不测这一项。
 
@@ -530,12 +532,14 @@ runImPlugin(new WeixinImPlugin());
 
 | 情况 | 核心行为 | `rh bot` 看到的 |
 |---|---|---|
-| 插件 `durations.pluginHandshake`（默认 `10s`）内没报出第一步 | 发 `shutdown`，等 `durations.stopGrace` 后 `TERM`、`KILL` | 失败，“插件 `<id>` 的向导没有响应” |
+| 插件 `durations.pluginHandshake`（默认 `10s`）内既没发 `wizard_step` 也没发 `wizard_input` | 发 `shutdown`，等 `durations.stopGrace` 后 `TERM`、`KILL` | 失败，“插件 `<id>` 的向导没有响应” |
 | `wizard` 返回 JSON-RPC 错误 | 进程退出后流程失败 | 失败，原因是错误消息 |
 | 插件在报“完成”前退出（中途退出） | 流程失败，配置不改 | 失败，“插件 `<id>` 的向导中途退出（退出码 N）：<stderr 末行>” |
 | 用户 Ctrl-C 或终端断开 | 照旧取消流程，发 `shutdown`，随后 `TERM`、`KILL` | 退出，配置不改 |
 | 30 分钟没建完 | 照旧作废流程，同取消 | 失败，“30 分钟内没有建完，这次作废了” |
 | 收到不认识的 `kind` 或残缺的步骤 | 当作中途失败，发 `shutdown` | 失败，“插件 `<id>` 的向导报了看不懂的一步” |
+
+第一条 `wizard_step` 或 `wizard_input` 一到，首步计时就停；之后只受 30 分钟总时限约束，用户输入多久都不算超时。
 
 写进配置以后的事（配对码过期、配对完成）和内置向导完全一样。
 
@@ -552,7 +556,7 @@ runImPlugin(new WeixinImPlugin());
   - 期间收到 `shutdown`、stdin EOF 或信号，触发 `signal`，回 `{ ok: true }` 后退出。
 - 契约测试器对声明 `wizard` 的插件加一项：
   - 按 `conformance.json` 的 `wizardInputs`（按 `label` 给值）回答每个 `wizard_input`；
-  - 要求第一步在握手时限内到达，每一步合法，最后收到的完成字段通过上面的检查；
+  - 要求第一条 `wizard_step` 或 `wizard_input` 在握手时限内到达（之后回答 `wizard_input` 不受这个时限约束），每一步合法，最后收到的完成字段通过上面的检查；
   - 再跑一次，在第一步后发 `shutdown`，要求进程在 `stopGrace` 内退出。
 - 没声明 `wizard` 的插件不测这一项。
 
@@ -1011,7 +1015,7 @@ target = "work/main"
 - **改动文件**：
   - `packages/plugin-sdk/agent.ts`、`index.ts`：`query` / `query_result` 类型、`ImportConversation`、`ImportBlock`、`AgentPlugin.listConversations` 与 `readConversation`，`runAgentPlugin` 的查询分支；`manifest.ts`：`import` 字段；
   - `src/plugin-query.ts`（新增）：拉起插件答一次查询，限时、收尾、报失败原因；
-  - `src/tui.ts`（`rh import` 的列表与按 ID 查找）、`src/router.ts`（列表里的 `busy` 标注、导入插件对话）、`src/board.ts`（`/api/importable` 与 `/api/importable/messages` 的插件分支）、`web/src/create.tsx`（`busy` 行不能选）；
+  - `src/tui.ts`（`rh import` 的列表与按 ID 查找）、`src/router.ts`（列表里的 `busy` 标注、导入插件对话；`case "import"` 里对话 ID 的正则从 `^[0-9a-f-]+$` 放宽到 §3.5 的字符集）、`src/board.ts`（`/api/importable` 与 `/api/importable/messages` 的插件分支，`importPreview` 等处的同一正则一起放宽；`ImportRow.count` 改可选）、`web/src/create.tsx`（`busy` 行不能选，没有 `count` 不画条数图标）；
   - `src/plugin-transcript.ts`：把标准块写在托管对话记录开头；
   - `src/agents.ts`、`src/plugin-loader.ts`：`importable` 取清单 `import`；
   - `examples/plugins/echo-agent/`：用一个本地样例目录实现 `list` 与 `read`；
@@ -1019,7 +1023,7 @@ target = "work/main"
 - **验收**：
   - `test/plugin-sdk.test.ts`：`query` 不触发 `init`，答完以 `0` 退出；未实现与抛错都回 `ok: false`；
   - `test/plugin-query.test.ts`：正常列表；超时后进程被收掉且报超时；进程先退出报 `stderr` 末行；不合法的 `query_result` 当失败；
-  - 导入用例（用 `echo-agent`）：`rh import --dir` 同时列出内置与插件对话，已有槽位用过的不列；`busy` 的标出且按 ID 导入被拒；前缀跨插件歧义报“写长一点”；一个插件查询失败不影响其余，并写明原因；
+  - 导入用例（用 `echo-agent`，其中一段对话 ID 不是十六进制，例如 `conv_a1`，且不给 `count`）：能列出、预览并按 ID 导入非十六进制 ID；ID 不合字符集（含 `:` 或 `.`）的对话被丢掉；`rh import --dir` 同时列出内置与插件对话，已有槽位用过的不列；`busy` 的标出且按 ID 导入被拒；前缀跨插件歧义报“写长一点”；一个插件查询失败不影响其余，并写明原因；
   - 导入后 `rh read` 与网页对话页能读到导入的历史，接着发消息时插件收到 `init.session = { resume }`，新回合接在历史之后；重启 `rhodium` 后历史不重复（幂等键）；
   - 网页：导入对话框列出插件对话，预览显示用户与助手消息，`busy` 行不能选；截图同 PR (a) 的要求；
   - 契约测试器对 `echo-agent` 的导入检查通过，对未声明 `import` 的插件跳过。
@@ -1039,6 +1043,7 @@ target = "work/main"
 - **验收**：
   - `test/plugin-sdk.test.ts`：`wizard` 不触发 `init`；步骤按顺序发出；`input` 等到核心回值；`shutdown` 触发 `signal` 并退出；
   - 向导用例（用 `local-im`，终端用假的输入）：二维码、链接、等待依次出现在 `rh bot` 输出里；`secret` 输入不回显；完成后 `config.toml` 里有新 `[bots.<名字>]` 且只含声明过的键，随后显示配对码，发码后流程 `done`；
+  - 首步就是 `wizard_input` 的向导：用户超过 `pluginHandshake` 才输入，流程照常走完；
   - 失败用例：首步超时、`wizard` 报错、中途退出、未声明的键、带 `owner`、缺 `requiredConfig`，都失败且配置不变；Ctrl-C 后插件进程退出、配置不变；
   - 没声明 `wizard` 的插件平台，`rh bot` 照旧拒绝并提示手写配置；网页建 Bot 向导不列插件平台；
   - 契约测试器对 `local-im` 的向导检查通过，对未声明 `wizard` 的插件跳过；
