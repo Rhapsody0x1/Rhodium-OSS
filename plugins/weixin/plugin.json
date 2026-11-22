@@ -1,0 +1,24 @@
+{
+  "manifestVersion": 1,
+  "kind": "im",
+  "id": "weixin",
+  "name": "Weixin",
+  "label": "微信",
+  "version": "0.1.0",
+  "protocol": "rh-im/1",
+  "minRhodium": "1.5.0",
+  "command": ["bun", "run", "${PLUGIN_DIR}/index.ts"],
+  "capabilities": {
+    "progress": "append",
+    "buttons": false,
+    "menu": { "scope": "global", "maxItems": 0 },
+    "maxTextLength": 2000,
+    "maxFileBytes": { "image": 10485760, "file": 26214400 },
+    "sendLimit": { "kind": "rate", "perChatPerSecond": 1 },
+    "markdown": null
+  },
+  "requiredConfig": ["token"],
+  "optionalConfig": ["baseUrl", "cdnBaseUrl", "accountId"],
+  "wizard": true,
+  "icon": "icon.svg"
+}

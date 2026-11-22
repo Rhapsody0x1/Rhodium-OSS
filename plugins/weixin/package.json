@@ -1,0 +1,11 @@
+{
+  "name": "@rhodium-oss/weixin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build index.ts --target=bun --outfile dist/weixin.js",
+    "test": "bun --config=../../bunfig.ci.toml test ./weixin.test.ts",
+    "conformance": "bun conformance.ts"
+  }
+}

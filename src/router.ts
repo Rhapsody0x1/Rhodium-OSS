@@ -13,7 +13,7 @@ import { contextText, formatCommand, left, statusText, time, usageText, type Slo
 import { fileKind, mediaLine, withoutMedia, type Media } from "./media";
 import { buttonRows, CANCEL, layout, moment, PAGE, showPanel, span, unpaged, width, type Candidate, type Panel } from "./panels";
 import type { FlowView } from "./bot-flow";
-import { isBuiltinPlatform, amid, MADE, PLATFORMS, platformDef, platformLabel, series, type BotDef, type Made } from "./platforms";
+import { amid, MADE, PLATFORMS, platformDef, platformLabel, series, type BotDef, type Made } from "./platforms";
 import type { PluginRegistry } from "./plugin-loader";
 import { DECISION_LINE, REPORT_LINE, RESUME_PROMPT, sendLine, sourceLine, withoutSource } from "./prompt";
 import { forIm, localRefs, type Checked } from "./reply-images";
@@ -1125,12 +1125,18 @@ function rhCommand(state: State, cmd: { word: string; args: string }, here: Slot
   if (!def) return fail(`没有 ${cmd.word} 这个命令，${im ? "发 /rh_help" : "打 /"} 看有哪些。`);
   const args = cmd.args.split(/\s+/).filter(Boolean);
   if (name === "help") {
+    const caps = ctx.capabilities(im!.bot.id);
+    const candidates = homeButtons(here?.mode);
+    const text = here ? `这里的消息交给 ${slotView(state, here).ref}，用 ${agentDef(agentOf(state, here)).name}。` : "这里还没指定槽位。";
+    if (!caps?.buttons) {
+      showIn(state, ctx, d, at, { command: cmd.word, head: [text], candidates });
+      return null;
+    }
     // Rhodium's home (docs/im-style.md §10.1): not paged, so its 9 are past a page's 8. A press shows,
     // on Telegram, in place of it, with 返回 to it, as /status's buttons do (§7).
-    const buttons = layout(homeButtons(here?.mode).map((c) => ({ label: c.label, data: c.command, ...(c.fill !== undefined && { fill: c.fill }) })), true);
+    const buttons = layout(candidates.map((c) => ({ label: c.label, data: c.command, ...(c.fill !== undefined && { fill: c.fill }) })), true);
     buttons.push({ label: "取消", data: CANCEL, row: buttons.at(-1)!.row! + 1, muted: true });
-    const text = here ? `这里的消息交给 ${slotView(state, here).ref}，用 ${agentDef(agentOf(state, here)).name}。` : "这里还没指定槽位。";
-    answer(d, ctx, at, text, fitting(ctx.capabilities(im!.bot.id), buttons));
+    answer(d, ctx, at, text, fitting(caps, buttons));
     return null;
   }
   if (name === "verbose") return verbose(ctx, d, im!.chat, ctx.capabilities(im!.bot.id), at, args);
@@ -3136,16 +3142,16 @@ function connection(state: State, input: Extract<Input, { kind: "connection" }>,
   const d = nothing();
   const bot = state.bots.find((b) => b.id === input.bot);
   const conn = input.up ? "online" : "faulted";
-  if (!bot || bot.connState === conn) return d;
+  if (!bot || (bot.connState === conn && !input.stopped)) return d; // stopped is news even to a faulted bot
   d.writes.push({ op: "update", table: "bot", where: { id: bot.id }, patch: { connState: conn } });
   if (input.up && bot.connState !== "faulted") return d;
   d.events.push(input.up ? { source: "connection", type: "bot_online", data: { bot: bot.name } } : { source: "connection", type: "bot_faulted", data: { bot: bot.name, error: input.error } });
   const q = quotas(state, ctx, d);
   const to = elsewhere(state, ctx, d, q, bot, undefined);
   const name = `${platformLabel(bot.platform)} Bot ${bot.name}`;
-  const down = isBuiltinPlatform(bot.platform)
-    ? `连不上平台，已经连续失败 ${ctx.config.limits.botFailures} 次。它会一直自动重连，连上之前这个 Bot 的消息收不到也发不出。`
-    : "已停止重连。检查插件配置和连接后重启 Rhodium。";
+  const down = input.stopped
+    ? "已停止重连。检查插件配置和连接后重启 Rhodium。"
+    : `连不上平台，已经连续失败 ${ctx.config.limits.botFailures} 次。它会一直自动重连，连上之前这个 Bot 的消息收不到也发不出。`;
   const text = input.up ? `${name} 已恢复，又连上平台了。` : `${name} ${down}${input.error ? `\n原因：${input.error}` : ""}`;
   // Rhodium's own words: plain text, not the agent's Markdown (send()).
   if (to) outbound(d, ctx, { chat: to.chat.id, replyTo: null, trace: null, status: place(q, to, null).status, text });
@@ -4489,12 +4495,11 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
       if (!BOT_NAME.test(name)) refuse(`Bot 名字只能由英文字母、数字和 _ - 组成，不超过 64 个字符：${name}`);
       if (name === "me") refuse("Bot 不能叫 me：rh send me 另有用处。");
       if (name === "web") refuse("Bot 不能叫 web：还在跑的 agent 可能照旧写 rh send web。");
-      // A loaded IM plugin that declares the wizard makes its bots too (spec plugins §3.6), at the terminal only.
+      // A loaded IM plugin that declares the wizard makes its bots too (spec plugins §3.6).
       const rec = ctx.plugins?.plugins[platform];
       const im = rec?.status === "loaded" && rec.manifest.kind === "im" ? rec.manifest : undefined;
       if (!Object.hasOwn(MADE, platform) && !im) refuse(`平台只能是 ${series(Object.keys(MADE), "或")}：${platform}`);
       if (im && !im.wizard) refuse(`插件 ${platform} 没有建 Bot 向导：在配置文件里手写 [bots.${name}]，再用 rh pair ${name} 配对。`);
-      if (im && who.kind === "you" && who.board === true) refuse(`插件 ${platform} 的 Bot 只能在终端用 rh bot 建。`);
       if (im && (values["api-root"] !== undefined || values.paste)) refuse(`插件平台不收 --api-root 和 --paste：要指向本地模拟服务，写在 [plugins.${platform}.config] 里。`);
       const how: BotDef = im ? { needed: im.requiredConfig ?? [], optional: im.optionalConfig ?? [], how: "", another: "再走一次向导，换一个账号" } : MADE[platform as Made];
       // Not the row of one rh bot rm took out, which a bot of its name takes over (architecture §14.8).

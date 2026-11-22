@@ -1,0 +1,4 @@
+{
+  "kept": { "ctx:conf-user-1": "mock-context", "sync_buf": "1" },
+  "wizardInputs": { "输入手机上显示的数字": "123456" }
+}

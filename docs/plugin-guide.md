@@ -91,7 +91,7 @@ Copy-Item -Recurse examples\plugins\local-im plugins\my-im
 |---|---|---|
 | `label` | 是 | 来源行与看板使用的平台名称（不能写 `statusName`）。 |
 | `capabilities` | 是 | 静态能力表（运行时以 `init` 返回值为准）：必填 `progress`（`"append"` 或 `"edit"`）、`buttons`（`boolean \| "markdown"`）、`sendLimit`（`{ kind: "rate", perChatPerSecond: 正数 }`，禁止 `"qq_quota"`）、`menu`（`{ scope: "global" \| "per_chat", maxItems: 非负整数, row?: ... }`）、`maxTextLength`（正整数）、`maxFileBytes`（`{ image, file }`）、`markdown`（必须显式填对象或 `null`，不能省略）。 |
-| `wizard` | 否 | 设为 `true` 时，插件支持终端 `rh bot <名字> <插件ID>` 建 Bot 向导（[规格 §3.6](spec/plugins.md#36-im-插件建-bot-向导rh-bot-名字-插件平台)）。缺省为 `false`。 |
+| `wizard` | 否 | 设为 `true` 时，插件支持网页看板「新建 Bot」和终端 `rh bot <名字> <插件ID>`（[规格 §3.6](spec/plugins.md#36-im-插件建-bot-向导rh-bot-名字-插件平台)）。缺省为 `false`。 |
 
 ### 保留内置名称
 
@@ -565,7 +565,7 @@ env -u CODEX_HOME -u CLAUDE_CONFIG_DIR HOME="$ROOT" \
      .\dist\rhodium.exe rh doctor
      .\dist\rhodium.exe rh ls
      ```
-   - **验证 IM 插件建 Bot 向导**：在这三种模式下不通过本地 `rh bot` 跑向导，直接用第 5 节的契约检查器（第 8 组）和插件集成测试验证向导流程。
+   - **验证 IM 插件建 Bot 向导**：在这三种模式下不通过本地 `rh bot` 跑向导，用第 5 节的契约检查器（第 8 组）和插件集成测试验证向导流程，也可以在看板的“新建 Bot”里选这个插件平台跑一遍向导。
 2. **普通 Linux（路线 D，带 systemd 用户会话，在真实交互终端运行）**：
    - 除看板与假 IM 外，还可以在另一个真实交互终端里直接建工作区、建槽位并运行 `rh bot` 向导。注意新配置没有 `mainChat`，首次跑 `rh bot` 必须把已有目标槽位写在最后：
 

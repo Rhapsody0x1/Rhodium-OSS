@@ -14,7 +14,7 @@
 
 - **两类扩展点**：支持接入新的 agent 种类（经 `rh-agent/1` 协议）和新的 IM 平台（经 `rh-im/1` 协议），内置三家 agent（Claude、pi、Codex）与内置 IM（QQ、Telegram、飞书、fake）保持原生实现不变。
 - **目录扫描、显式登记与失败隔离**：核心扫描 `config.toml` 旁的 `plugins/` 目录，扫到的插件默认加载；`[plugins.<id>]` 可禁用某个插件，也可用 `path` 从别处登记插件（§4.5）。核心读取并校验 `plugin.json` [插件清单](../../GLOSSARY.md)与版本要求；配置失败、清单损坏、运行崩溃均隔离在单个插件内。
-- **插件图标、对话导入与建 Bot 向导**：插件可在清单里带图标，看板在内置图标出现的地方显示它（§4.6）；agent 插件可声明支持导入本机已有的对话（§3.5）；IM 插件可声明支持 `rh bot` 建 Bot 向导（§3.6）。
+- **插件图标、对话导入与建 Bot 向导**：插件可在清单里带图标，看板在内置图标出现的地方显示它（§4.6）；agent 插件可声明支持导入本机已有的对话（§3.5）；IM 插件可声明支持建 Bot 向导，网页看板的“新建 Bot”和终端的 `rh bot` 都能跑它（§3.6）。
 - **核心内部表开放化**：放开 `AgentKind` 与 `Platform` 联合类型限制，为非内置种类在对话记录、终端切换、设置带回、看板图标等查找表提供安全默认值。
 - **公开契约、运行时 SDK 与契约测试器**：提供零内部依赖的 TypeScript 契约与运行时 SDK（`packages/plugin-sdk/`，含 `AgentPlugin`/`ImPlugin` 接口与 `runAgentPlugin`/`runImPlugin` 运行时辅助）及语言无关的黑盒[契约测试](../../GLOSSARY.md)脚本，随仓库附带两个基于 SDK 实现的最小示例插件（`echo-agent` 与 `local-im`）。
 - **跨平台支持、自动化 CI 与零 Key 演示**：确保 Linux、Windows、macOS 可用；补全 GitHub Actions 构建与测试流程；提供不依赖任何真实 API Key 和真实 IM 账号的完整可重复演示路径。
@@ -24,7 +24,7 @@
 - 不做插件市场、远程在线下载、热加载或运行时免重启动态插拔插件代码（启用、禁用或升级插件需要重启 `rhodium`）。
 - 不做插件 agent 的 Herdr TUI 模式切换与网页终端嵌入（插件槽位的 `tui` 能力为 `false`）。
 - 不做插件 agent 的 Herdr pane 导入。插件对话只能按对话 ID 导入（§3.5）。
-- 不做插件 IM 的网页和 IM 里的建 Bot 向导。插件向导第一版只在终端 `rh bot` 里跑（§3.6）；不声明向导的插件 IM，Bot 仍在 `config.toml` 中手写 `[bots.<name>]` 后配合 `rh pair` 配对主人。
+- 不做插件 IM 在 IM 里的建 Bot 向导（§3.6）。不声明向导的插件 IM，Bot 可在 `config.toml` 中手写 `[bots.<name>]` 后用 `rh pair` 配对主人。
 - 不扫描家目录或全局目录里的插件，扫描 `plugins/` 时不跟随符号链接（§4.5）。
 - 不做插件 IM 的 QQ 专属被动回复窗口与额度重投模型（仅保留内置 `qq` 自己用 `qq_quota`）。
 - 不做跨插件版本热兼容或操作系统级容器沙箱。
@@ -134,7 +134,7 @@ sequenceDiagram
 | 槽位生命周期 | 空闲回收（`idleReap`）、崩溃自动续跑、连续崩溃熔断、并发上限（`maxRunning`）、定时任务、`interrupt` 超时回收 | 在 `close` 时正常清理下游进程并退出 | — |
 | 对话记录与展示 | 按幂等键写入[托管对话记录](../../GLOSSARY.md)，驱动网页对话页、`rh read`、槽位时间线 `/resume`；导入时把插件转好的标准块写在托管对话记录开头 | 通过 `turn_start` / `item` / `tool_start` / `turn_end` 报出标准事件；声明 `import` 的插件回答一次性查询，列出本机对话并把已有内容转成标准块（§3.5） | 不支持 Herdr pane 导入；不接管已有外部进程 |
 | 合规与安全 | 保留内置名称（含 `herdr`）、清洗环境变量（含 Windows 混合大小写过滤）、集中执行配对、主人校验（`owners.includes(m.sender)`）与投递决定、`rh doctor` 巡检插件进程子树 | IM 插件承担平台账号身份认证并原样上报发送者 ID（私聊归一为用户 ID）；Agent 插件读取 `init.systemPromptFile`，遵守三条红线（不得拉起 `claude` 或包装 Claude Code、不得用 Claude 订阅、仅本人触发） | 插件属于用户显式信任代码；不允许任何非内置 `claude` 驱动获取 Claude 订阅凭据 |
-| 路由与渲染降级 | 消息排队、分段截断、Markdown 降级纯文本、工具折叠、`/rh_*` 命令、按钮分页、发送限流与超时记 `unknown` | 如实声明 `Capabilities`（agent 能力或 IM 平台能力） | 插件 IM 不支持 `qq_quota`；建 Bot 向导只在终端 `rh bot` 里跑，且只对声明 `wizard` 的插件（§3.6） |
+| 路由与渲染降级 | 消息排队、分段截断、Markdown 降级纯文本、工具折叠、`/rh_*` 命令、按钮分页、发送限流与超时记 `unknown` | 如实声明 `Capabilities`（agent 能力或 IM 平台能力） | 插件 IM 不支持 `qq_quota`；建 Bot 向导可在网页看板和终端 `rh bot` 里跑，且只对声明 `wizard` 的插件（§3.6） |
 | 终端与专属特性 | 统一拒绝提示（切 TUI、`/ultracode` 等） | — | 不支持切 Herdr TUI；不支持 Claude 订阅额度窗口自动续跑 |
 
 ### 3.2 Agent 插件协议：`rh-agent/1`
@@ -298,7 +298,9 @@ IM 插件由 `rhodium` 在主守护进程中按“每个已启用的插件 Bot �
 - **单 Bot 凭据隔离**：`init.params.config` 只包含这个 `[bots.<name>]` 表和对应 `[plugins.<id>.config]` 的非内部字段（剔除 `platform`、`target`、`owner`），不经命令行参数传递，也不写入日志。
 - **平台认证与核心主人校验分工**：平台侧消息来源的身份认证由 IM 插件承担并原样填充 `sender`；配对码拦截、主人校验（`owners.includes(m.sender)`）、去重和路由决定全部留在 `rhodium` 核心执行。陌生人的 `inbound` 绝不触发 agent。带附件的消息只传不透明 `attachmentId`，核心确认发送者为主人后才反调 `fetch_attachment` 落盘，防止陌生人投递大文件耗尽资源。
 - **消息去重与发送兜底**：核心保留统一的 `seen(chat, messageId)` 检查，避免插件断线重连后重复提交同一条入站消息（配合上述 `inbound` 回执后再推游标保证同批不漏不重）。当插件返回 `unknown`（如平台已收但 HTTP 回执丢失、断连或超时），或 `send` / `edit` RPC 超过 `durations.pluginRpc`（默认 `30s`）无响应时，核心一律按“结局不明（`unknown`）”落库，绝不自动重发。
-- **进程看守与熔断**：IM 插件进程在运行中意外退出时，核心按 `1s`、`2s`、`4s`、`8s`、`16s`、`30s` 指数退避重启；若连续未发出 `connected(up: true)` 即退出或持续报错达 `limits.botFailures`（默认 5 次），核心停止重启，将该 Bot 标为 `faulted` 并在主窗口和看板发出告警。
+- **进程看守与熔断**：分两种情况。
+  - **进程活着、报连不上平台**：插件发 `connected(up: false)`，核心照内置 Bot 处理。连续达 `limits.botFailures`（默认 5 次）时，把该 Bot 标为 `faulted`，在主窗口和看板告警，说它会一直自动重连。核心不结束插件进程，由插件自己重试。插件之后发 `connected(up: true)`，核心把它标回在线，并照内置 Bot 发恢复通知。
+  - **进程本身反复退出**：插件进程在运行中意外退出时，核心按 `1s`、`2s`、`4s`、`8s`、`16s`、`30s` 指数退避重启，退避只看退出次数，不看离线报告。进程连续退出、而且退出前都没发过 `connected(up: true)`，达 `limits.botFailures` 次时，核心停止重启，把该 Bot 标为 `faulted`，告警说已停止重连。
 
 ---
 
@@ -480,7 +482,7 @@ runImPlugin(new WeixinImPlugin());
 
 ### 3.6 IM 插件建 Bot 向导：`rh bot <名字> <插件平台>`
 
-声明支持向导的 IM 插件，可以像内置 QQ、飞书那样，在终端里由 `rh bot` 走完建 Bot 的流程（[建 Bot 向导](../../GLOSSARY.md)）。插件报出一步步要做什么，核心负责显示、读输入、写配置和配对。第一版只在终端 `rh bot` 里跑，网页和 IM 里的建 Bot 向导不列插件平台。
+声明支持向导的 IM 插件可从网页看板「新建 Bot」或终端 `rh bot` 走完建 Bot 的流程（[建 Bot 向导](../../GLOSSARY.md)）。两处复用相同的插件协议。网页列出已加载且声明 `wizard: true` 的插件，显示二维码、链接、等待状态和输入提示。核心校验凭据、写配置和配对主人。
 
 #### 清单字段
 
@@ -612,7 +614,7 @@ runImPlugin(new WeixinImPlugin());
 | `requiredConfig` / `optionalConfig` | 通用 | 声明插件期望在 `[plugins.<id>.config]` 或 `[bots.<name>]` 中提供的键名列表；核心用于启动前检查与脱敏提示；建 Bot 向导的完成字段也只能用这些键（§3.6） |
 | `icon` | 通用，可选 | 插件目录里一个 SVG 或 PNG 的相对路径；检查不过只丢图标（§4.6） |
 | `import` | 仅 `agent`，可选 | 为 `true` 时插件回答一次性查询，支持导入本机对话（§3.5） |
-| `wizard` | 仅 `im`，可选 | 为 `true` 时插件支持 `rh bot` 建 Bot 向导（§3.6） |
+| `wizard` | 仅 `im`，可选 | 为 `true` 时插件支持网页和 `rh bot` 建 Bot 向导（§3.6） |
 
 #### 保留内置名称与合规禁止项
 
@@ -695,7 +697,8 @@ target = "work/main"
 | 图标不可用 | `icon` 不是插件目录里的 SVG/PNG、越界、不存在或超 256KB（§4.6） | 插件照常加载，丢掉图标；记 `warn` 日志 `plugin icon unusable` | `rh doctor` 一条警告；看板显示通用徽章 |
 | 导入查询失败或超时 | `query` 超过 `pluginRpc`（30s）没回 `query_result`、进程先退出、回 `ok: false` 或不合法的结果（§3.5） | 收掉查询进程（关 stdin、`TERM`、`KILL`）；不计崩溃，不改插件状态 | 列表照常给出其余对话并写明这个插件列不出的原因；按 ID 导入或读历史失败时整个导入失败，不建槽位 |
 | 建 Bot 向导失败或中途退出 | 首步超过 `pluginHandshake` 未到、`wizard` 报错、报“完成”前退出、完成字段不合格（§3.6） | 收掉向导进程，流程失败，配置不改 | `rh bot` 打印失败原因并以非零码退出 |
-| IM 插件运行期崩溃、结局不明或 RPC 超时 | 运行中退出，`send`/`edit` 因回执丢失或未捕获异常返回 `unknown`，或超过 `pluginRpc`（30s）未响应 | 运行崩溃按退避重连，连续失败达 `limits.botFailures`（5 次）熔断标 `faulted`；返回 `unknown` 或单次 RPC 超时均将出站记录标为 `unknown`，绝不重发 | 看板显示重连中或故障，主窗口收一条故障通知；`rh send` 回执写明“不知道发出去没有” |
+| IM 插件报连不上平台 | 进程活着，连续发 `connected(up: false)` | 照内置 Bot 计数，连续达 `limits.botFailures`（5 次）标 `faulted`，记日志 `bot keeps failing to reach its platform`；不结束插件进程；之后收到 `connected(up: true)` 即标回在线 | 看板显示故障；主窗口收一条故障通知，说它会一直自动重连；恢复时再收一条恢复通知 |
+| IM 插件运行期崩溃、结局不明或 RPC 超时 | 运行中退出，`send`/`edit` 因回执丢失或未捕获异常返回 `unknown`，或超过 `pluginRpc`（30s）未响应 | 进程退出按退避重启；连续退出、且退出前没发过 `connected(up: true)`，达 `limits.botFailures`（5 次）时停止重启、标 `faulted`，记日志 `plugin im stopped reconnecting`；返回 `unknown` 或单次 RPC 超时均将出站记录标为 `unknown`，绝不重发 | 看板显示重连中或故障；停止重启时主窗口收一条通知，说已停止重连；`rh send` 回执写明“不知道发出去没有” |
 
 ### 4.5 插件目录扫描
 
@@ -1105,7 +1108,7 @@ target = "work/main"
   - 向导用例（用 `local-im`，终端用假的输入）：二维码、链接、等待依次出现在 `rh bot` 输出里；`secret` 输入不回显；完成后 `config.toml` 里有新 `[bots.<名字>]` 且只含声明过的键，随后显示配对码，发码后流程 `done`；
   - 首步就是 `wizard_input` 的向导：用户超过 `pluginHandshake` 才输入，流程照常走完；
   - 失败用例：首步超时、`wizard` 报错、中途退出、未声明的键、带 `owner`、缺 `requiredConfig`，都失败且配置不变；Ctrl-C 后插件进程退出、配置不变；
-  - 没声明 `wizard` 的插件平台，`rh bot` 照旧拒绝并提示手写配置；网页建 Bot 向导不列插件平台；
+  - 没声明 `wizard` 的插件平台，`rh bot` 照旧拒绝并提示手写配置；网页建 Bot 向导只列声明了 `wizard` 的插件平台；
   - 契约测试器对 `local-im` 的向导检查通过，对未声明 `wizard` 的插件跳过；
   - 组员的 `weixin` 插件随后按 §9.3 实现向导，并用 `mock-weixin-server` 跑通同一套契约检查。
 

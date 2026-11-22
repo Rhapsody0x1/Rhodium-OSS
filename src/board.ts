@@ -72,7 +72,7 @@ export type Card = {
 /** Public board metadata never includes plugin commands, credentials or bot configuration. */
 export type BoardMetadata = {
   agents: { id: string; name: string; statusName: string; tui: boolean; importable: boolean; icon?: string }[];
-  platforms: { id: string; label: string; icon?: string }[];
+  platforms: { id: string; label: string; icon?: string; wizard?: true }[];
   plugins: { id: string; status: "loaded" | "disabled" | "failed"; kind?: "agent" | "im"; error?: string }[];
   configErrors: string[];
 };
@@ -88,7 +88,11 @@ function boardMetadata(registry?: PluginRegistry): BoardMetadata {
       const { name, statusName, tui, importable } = agentDef(id);
       return { id, name, statusName, tui, importable, ...icon(id) };
     }),
-    platforms: allPlatformLabels().map(p => ({ ...p, ...icon(p.id) })),
+    platforms: allPlatformLabels().map(platform => {
+      const plugin = registry?.plugins[platform.id];
+      const wizard = plugin?.status === "loaded" && plugin.manifest.kind === "im" && plugin.manifest.wizard === true;
+      return { ...platform, ...icon(platform.id), ...(wizard && { wizard: true as const }) };
+    }),
     plugins: Object.values(registry?.plugins ?? {}).map(p => ({
       id: p.id, status: p.status, ...(p.status === "loaded" && { kind: p.manifest.kind }), ...(p.status === "failed" && { error: p.error }),
     })),

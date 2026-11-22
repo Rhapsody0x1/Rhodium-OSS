@@ -139,22 +139,25 @@ export class PluginImAdapter implements ImAdapter {
 
   private async supervise(connected: Connected, push: (m: InboundMessage) => void): Promise<void> {
     const { signal } = this.stop;
-    let failures = 0;
+    // Exits in a row of a process that never reported up. Its own down reports only go to the
+    // daemon, which counts and alerts as it does for a built-in bot; the process keeps retrying.
+    let exits = 0;
     while (!signal.aborted && !this.faulted) {
       let peer: Peer | undefined;
       let reportedDown = false;
       const status = (up: boolean, error?: string) => {
         if (signal.aborted || this.faulted) return;
-        failures = up ? 0 : failures + 1;
-        this.faulted = this.o.botFailures > 0 && failures >= this.o.botFailures;
+        if (up) exits = 0;
         reportedDown = !up;
         connected(up, error === undefined ? undefined : this.reason(error));
-        if (this.faulted) peer?.kill();
       };
       try {
         peer = this.peer = new Peer(this.o);
         await this.run(peer, status, connected, push);
-        if (!reportedDown) status(false, peer.reason);
+        if (!signal.aborted && !this.faulted) {
+          this.faulted = this.o.botFailures > 0 && ++exits >= this.o.botFailures;
+          if (!reportedDown || this.faulted) connected(false, this.reason(peer.reason));
+        }
       } catch (err) {
         this.initFailed = this.faulted = true;
         connected(false, this.reason(err));
@@ -164,7 +167,7 @@ export class PluginImAdapter implements ImAdapter {
       }
       if (!this.faulted && !signal.aborted) {
         this.ready = Promise.withResolvers();
-        await delay(Math.min(30_000, 1_000 * 2 ** Math.max(0, failures - 1)), undefined, { signal }).catch(() => {});
+        await delay(Math.min(30_000, 1_000 * 2 ** Math.max(0, exits - 1)), undefined, { signal }).catch(() => {});
       }
     }
     this.ready.resolve(null);

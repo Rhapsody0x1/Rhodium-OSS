@@ -38,13 +38,14 @@ export type FlowView = {
   until?: number;
   target?: string;
   prompt?: { label: string; secret: boolean };
+  statusText?: string;
   log: Said[];
 };
 
 /** How a scan or check tells the flow what it does: say, a line for the terminal; qr, a QR code to
  *  scan, which expires at expires (ms) where the platform says; input, a line a plugin's wizard waits
  *  for. signal: the flow was cancelled. */
-export type Tell = { say(text: string): void; qr(url: string, expires?: number): void; input?(label: string, secret: boolean): Promise<string>; signal: AbortSignal };
+export type Tell = { say(text: string): void; qr(url: string, expires?: number): void; input?(label: string, secret: boolean): Promise<string>; progress?(text: string, url?: string): void; signal: AbortSignal };
 
 /** A plugin platform's wizard, run for the bot name; what it gives is written as a scan's credentials. */
 export type PluginWizard = (platform: string, name: string, tell: Tell) => Promise<Record<string, string>>;
@@ -121,6 +122,13 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
       f.view.log.push({ qr: url });
       set(f, { state: "scan", url, svg: qrSvg(url), ...(expires !== undefined && { expires }) });
     },
+    progress(text, url) {
+      if (f.abort.signal.aborted) return;
+      f.view.statusText = text;
+      if (url) f.view.url = url;
+      if (f.view.state === "checking") f.view.state = "scan";
+      changed(f);
+    },
     input(label, secret) {
       return new Promise((resolve) => {
         if (f.abort.signal.aborted) return;
@@ -143,10 +151,11 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
     t.say(added.text);
     const bound = target(name);
     let pairing: Partial<FlowView> | undefined;
+    const onboard = Object.hasOwn(ONBOARD, platform) ? ONBOARD[platform as Made] : undefined;
     if (credentials.owner) t.say(`扫码的${amid(platformLabel(platform))}账号已记为你，Bot ${name} 不用再配对。`);
     else {
       // Only now: Feishu's console saves the long connection only once a program holds one.
-      const setup = f.paste && ONBOARD[platform as Made]?.afterPaste;
+      const setup = f.paste && onboard?.afterPaste;
       if (setup) t.say(setup);
       const after = store.lastSeq();
       const pair = await ask(f.caller, ["pair", name]);
@@ -161,7 +170,7 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
       const timer = setTimeout(() => end(f, "failed", "配对码过期了。"), Math.max(0, (row?.pairUntil ?? 0) - Date.now()));
       f.unwatch = () => (off(), clearTimeout(timer));
     }
-    await ONBOARD[platform as Made]?.done?.(credentials, f.apiRoot, t);
+    await onboard?.done?.(credentials, f.apiRoot, t);
     if (ended(f)) return;
     // Last, so rh has every line before it sees the flow through.
     f.view.target = bound;
@@ -184,7 +193,8 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
       // The router took them: a name and a platform rh bot makes, built in or a plugin's with a wizard.
       const [name, platform] = positionals as [string, string];
       if ([...flows.values()].some((f) => f.view.name === name && !ended(f))) return { ok: false, error: `Bot ${name} 正在建：同一个名字同时只能建一个。` };
-      const how: Onboard = ONBOARD[platform as Made] ?? { scan: (_, t) => (wizard ? wizard(platform, name, t) : Promise.reject(new Error("这里不能跑插件的建 Bot 向导。"))) };
+      const how: Onboard = Object.hasOwn(ONBOARD, platform) ? ONBOARD[platform as Made]
+        : { scan: (_, t) => (wizard ? wizard(platform, name, t) : Promise.reject(new Error("这里不能跑插件的建 Bot 向导。"))) };
       const paste = !how.scan || values.paste === true;
       const f: Flow = { view: { id: crypto.randomUUID(), name, platform, state: paste ? "paste" : "scan", log: [] }, caller, argv, apiRoot: values["api-root"], paste, abort: new AbortController() };
       flows.set(f.view.id, f);
@@ -207,9 +217,10 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
       const f = flows.get(id);
       if (!f) return NO_FLOW;
       if (f.view.state !== "paste") return { ok: false, error: "这个流程现在不收粘贴的凭据。" };
-      set(f, { state: "checking" });
       // A plugin's wizard waits for this one line: it goes on from there.
       const answer = f.answer;
+      if (answer && typeof pasted.value !== "string") return { ok: false, error: "请填写向导要求的内容。" };
+      set(f, { state: "checking" });
       if (answer) {
         f.answer = undefined;
         answer(pasted.value ?? "");
@@ -300,8 +311,14 @@ export function pluginWizard(
         if (v.kind === "qr" && str(v.data)) {
           tell.qr(v.data);
           if (v.text) tell.say(v.text);
-        } else if (v.kind === "link" && str(v.url)) tell.say(v.text ? `${v.text}：${v.url}` : v.url);
-        else if (v.kind === "waiting" && str(v.text)) tell.say(v.text);
+          if (v.text) tell.progress?.(v.text);
+        } else if (v.kind === "link" && str(v.url)) {
+          tell.say(v.text ? `${v.text}：${v.url}` : v.url);
+          tell.progress?.(v.text || "打开链接完成绑定", v.url);
+        } else if (v.kind === "waiting" && str(v.text)) {
+          tell.say(v.text);
+          tell.progress?.(v.text);
+        }
         else return bad();
         clearTimeout(first);
       } else if (m.method === "wizard_input") {

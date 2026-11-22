@@ -10,7 +10,6 @@ import { chromium, devices, type Page } from "playwright-core";
 import { qrSvg, type BotFlows, type FlowView } from "../src/bot-flow";
 import { serveBoard } from "../src/board";
 import { loadConfig } from "../src/config";
-import type { Made } from "../src/platforms";
 import type { RhReply } from "../src/router";
 import { openStore } from "../src/store";
 import { botName, startTarget } from "../web/src/bot-wizard";
@@ -46,14 +45,19 @@ const cancelled: string[] = [];
 const watchers = new Set<(id: string) => void>();
 const set = (id: string, patch: Partial<FlowView>) => (Object.assign(flows.get(id)!, patch), watchers.forEach((w) => w(id)));
 const reply = (f: FlowView | undefined): RhReply => (f ? { ok: true, text: "", flow: f } : { ok: false, error: "没有这个流程。" });
+const PLUGIN = "local-im";
+/** What the plugin's wizard was given. */
+const plugged: string[] = [];
 const URL_ = "https://q.qq.com/qqbot/openclaw/connect.html?task_id=T";
 const fake = {
   watch: (w: (id: string) => void) => watchers.add(w),
   async start(argv: string[]) {
     started.push(argv);
-    const [name, platform] = argv as [string, Made];
+    const [name, platform] = argv as [string, string];
     // As the router: --paste is Feishu's own choice; Telegram always takes a pasted token.
     if (argv.includes("--paste") && platform !== "feishu") return { ok: false, error: "--paste 只用于飞书。" };
+    // A plugin's wizard (spec plugins §3.6) asks for one line as it starts.
+    if (platform === PLUGIN) return reply(flows.set(name, { id: name, name, platform, state: "paste", log: [], prompt: { label: "接入码", secret: true } }).get(name));
     const paste = platform === "telegram" || argv.includes("--paste");
     const f: FlowView = { id: crypto.randomUUID(), name, platform, state: paste ? "paste" : "scan", log: [], ...(!paste && { url: URL_, svg: qrSvg(URL_) }) };
     flows.set(f.id, f);
@@ -61,6 +65,11 @@ const fake = {
   },
   get: (id: string) => reply(flows.get(id)),
   async credentials(id: string, pasted: Record<string, string>): Promise<RhReply> {
+    if (flows.get(id)?.platform === PLUGIN) {
+      plugged.push(pasted.value!);
+      set(id, { state: "checking", prompt: undefined });
+      return reply(flows.get(id));
+    }
     if (pasted.token === "bad") {
       set(id, { error: "Telegram 不认这个 token：401" });
       return { ok: false, error: "Telegram 不认这个 token：401" };
@@ -264,3 +273,45 @@ smoke("stories 673, 676, 678, 679, on a wide screen: Telegram's token turned dow
   for (let i = 0; i < 50 && !cancelled.includes(open_); i++) await Bun.sleep(100);
   expect(cancelled).toContain(open_);
 });
+
+for (const [kind, device] of [
+  ["a phone", PHONE],
+  ["a wide screen", WIDE],
+] as const) {
+  smoke(`spec plugins §3.6, on ${kind}: a plugin IM with a wizard is one more platform in the same group; its prompt, then 等待平台确认 once the line is sent`, async () => {
+    // The board as one with a loaded plugin IM that declares the wizard.
+    const page = await open(device, "", async (p) =>
+      void await p.route("**/api/board", async (r) => {
+        const board = await (await r.fetch()).json();
+        board.metadata.platforms.push({ id: PLUGIN, label: "Local IM", wizard: true });
+        await r.fulfill({ json: board });
+      }),
+    );
+    await plus(page);
+    await page.getByRole("menuitem", { name: "新建 Bot" }).click();
+    await page.getByRole("radio", { name: "Local IM" }).waitFor();
+    expect(await page.getByRole("radiogroup").count()).toBe(1);
+    const plugin = page.getByRole("radiogroup", { name: "平台" }).getByRole("radio", { name: "Local IM" });
+    // Arrow keys move through the built-ins and on to the plugin.
+    await page.getByRole("radio", { name: "QQ" }).focus();
+    for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+    expect(await plugin.getAttribute("aria-checked")).toBe("true");
+    expect(await page.getByRole("radio", { name: "QQ" }).getAttribute("aria-checked")).toBe("false");
+    expect(await page.getByLabel("名称").inputValue()).toBe(PLUGIN);
+    // A plugin bot always pairs (the core refuses an owner from a plugin), so three steps like Telegram.
+    await page.getByText("第 1 / 3 步").waitFor();
+    await page.getByRole("button", { name: "下一步" }).click();
+    expect(started.at(-1)).toEqual([PLUGIN, PLUGIN, a]);
+    await page.getByText("第 2 / 3 步").waitFor();
+    const box = page.getByLabel("接入码", { exact: true });
+    expect(await box.getAttribute("type")).toBe("password");
+    await box.fill("join-me");
+    await page.getByRole("button", { name: "下一步" }).click();
+    await page.getByText("等待平台确认").waitFor();
+    await page.getByText("第 2 / 3 步").waitFor();
+    expect(plugged.at(-1)).toBe("join-me");
+    set(PLUGIN, { state: "done", target: "w/a" });
+    await page.getByText("创建成功").waitFor();
+    flows.delete(PLUGIN);
+  });
+}
