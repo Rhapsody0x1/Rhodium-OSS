@@ -35,7 +35,9 @@ export {
 } from "./stdio";
 
 export {
+  IMPORT_ID_RE,
   isAgentReady,
+  isImportBlock,
   PluginFatalError,
   runAgentPlugin,
   type AgentAskPayload,
@@ -47,6 +49,9 @@ export {
   type AgentModelInfo,
   type AgentPlugin,
   type AgentPluginRunOptions,
+  type AgentQueryParams,
+  type ImportBlock,
+  type ImportConversation,
   type AgentReadyInfo,
   type AgentSendParams,
   type AgentSessionSpec,

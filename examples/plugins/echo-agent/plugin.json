@@ -15,6 +15,7 @@
     "commands": ["status", "model"]
   },
   "requiredConfig": [],
-  "optionalConfig": ["delayedSession"],
-  "icon": "icon.svg"
+  "optionalConfig": ["delayedSession", "conversations"],
+  "icon": "icon.svg",
+  "import": true
 }

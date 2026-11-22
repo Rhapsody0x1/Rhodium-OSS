@@ -136,6 +136,42 @@ export function isAgentReady(value: unknown): value is { type: "ready"; proto: 1
       record(m) && typeof m.id === "string" && optionalString(m.label) && (m.efforts === undefined || strings(m.efforts))))));
 }
 
+/** A conversation an import-capable plugin finds on this machine (spec §3.5). */
+export type ImportConversation = {
+  id: string;
+  dir: string;
+  title: string;
+  updatedAt: number;
+  count?: number;
+  busy?: boolean;
+};
+
+/** A block of an imported conversation, in the core's standard shape. */
+export type ImportBlock =
+  | { kind: "user"; text: string; at?: number }
+  | { kind: "assistant"; text: string; at?: number }
+  | { kind: "tool"; id?: string; name: string; input: unknown; result?: { text: string; error?: boolean }; at?: number };
+
+export type AgentQueryParams = {
+  dir: string | null;
+  program: string | null;
+  config: Record<string, string>;
+};
+
+/** Conversation ids an import may use: no ":" (a Herdr pane), "." or "/" (a file name). */
+export const IMPORT_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Whether a value is a well-formed ImportBlock, shared by the host and the offline conformance checker. */
+export function isImportBlock(b: unknown): b is ImportBlock {
+  if (b === null || typeof b !== "object" || Array.isArray(b)) return false;
+  const v = b as Record<string, unknown>;
+  if (v.at !== undefined && (typeof v.at !== "number" || !Number.isFinite(v.at))) return false;
+  if (v.kind === "user" || v.kind === "assistant") return typeof v.text === "string";
+  if (v.kind !== "tool" || typeof v.name !== "string" || (v.id !== undefined && typeof v.id !== "string")) return false;
+  const r = v.result as Record<string, unknown> | undefined;
+  return r === undefined || (r !== null && typeof r === "object" && typeof r.text === "string" && (r.error === undefined || typeof r.error === "boolean"));
+}
+
 export type AgentUsage = {
   inputTokens?: number;
   outputTokens?: number;
@@ -150,7 +186,9 @@ export type CoreToAgentMessage =
   | { type: "answer"; requestId: string; answer: AskAnswer }
   | { type: "approval"; on: boolean }
   | { type: "command"; id: string; name: string; args: string }
-  | { type: "close" };
+  | { type: "close" }
+  | ({ type: "query"; proto: 1; id: string; query: "list" } & AgentQueryParams)
+  | { type: "query"; proto: 1; id: string; query: "read"; session: string; program: string | null; config: Record<string, string> };
 
 export type AgentToCoreMessage =
   | ({ type: "ready"; proto: 1 } & AgentReadyInfo)
@@ -167,7 +205,10 @@ export type AgentToCoreMessage =
   | { type: "turn_end"; reply?: string; background?: boolean; session?: string }
   | ({ type: "usage" } & AgentUsage)
   | { type: "command_result"; id: string; ok: boolean; result?: CommandResult; error?: string }
-  | { type: "error"; detail: string; recoverable?: boolean };
+  | { type: "error"; detail: string; recoverable?: boolean }
+  | { type: "query_result"; id: string; ok: true; conversations: ImportConversation[] }
+  | { type: "query_result"; id: string; ok: true; blocks: ImportBlock[] }
+  | { type: "query_result"; id: string; ok: false; error: string };
 
 export class PluginFatalError extends Error {
   readonly retryable: boolean;
@@ -203,6 +244,9 @@ export interface AgentPlugin {
   approval?(on: boolean, ctx: AgentContext): Promise<void>;
   command?(name: string, args: string, ctx: AgentContext): Promise<CommandResult>;
   close?(): Promise<void>;
+  /** One-shot import query (spec §3.5): run instead of init, in a process of its own. */
+  listConversations?(params: AgentQueryParams): Promise<ImportConversation[]>;
+  readConversation?(session: string, params: AgentQueryParams): Promise<ImportBlock[]>;
 }
 
 export type SignalRegistrar = boolean | ((onSignal: (signal: string) => void) => () => void);
@@ -489,8 +533,9 @@ export async function runAgentPlugin(
         void terminate(0, true);
         return;
       }
-      case "init": {
-        logStderr("Ignoring duplicate init message", stderr);
+      case "init":
+      case "query": {
+        logStderr(`Ignoring ${msg.type} after init`, stderr);
         return;
       }
     }
@@ -529,6 +574,27 @@ export async function runAgentPlugin(
     })();
   };
 
+  // A query process answers once and exits; init never runs in it.
+  const handleQuery = (msg: CoreToAgentMessage & { type: "query" }): void => {
+    initializing = true;
+    void (async () => {
+      const params: AgentQueryParams = { dir: msg.query === "list" ? msg.dir : null, program: msg.program, config: msg.config };
+      try {
+        if (msg.query === "list" && plugin.listConversations) {
+          emit({ type: "query_result", id: msg.id, ok: true, conversations: await plugin.listConversations(params) });
+        } else if (msg.query === "read" && plugin.readConversation) {
+          emit({ type: "query_result", id: msg.id, ok: true, blocks: await plugin.readConversation(msg.session, params) });
+        } else {
+          emit({ type: "query_result", id: msg.id, ok: false, error: "该插件不支持导入" });
+        }
+      } catch (err) {
+        logStderr(`plugin query ${msg.query} failed: ${formatError(err)}`, stderr);
+        emit({ type: "query_result", id: msg.id, ok: false, error: errorMessage(err) });
+      }
+      await terminate(0, false);
+    })();
+  };
+
   const onMessage = (raw: unknown): void => {
     if (finished || stopController.signal.aborted) return;
     if (typeof raw !== "object" || raw === null || typeof (raw as { type?: unknown }).type !== "string") {
@@ -541,6 +607,10 @@ export async function runAgentPlugin(
     if (!initialized && !initializing) {
       if (msg.type === "close") {
         void terminate(0, true);
+        return;
+      }
+      if (msg.type === "query") {
+        handleQuery(msg);
         return;
       }
       if (msg.type !== "init") {

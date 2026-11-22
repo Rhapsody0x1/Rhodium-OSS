@@ -31,6 +31,10 @@ import { start as fresh } from "./render";
 import { BOARD, IN_TUI, type Effect } from "./router";
 import { agentBaseEnv, childEnv, slotToken, writePrompt } from "./runner";
 import { splitSource } from "./prompt";
+import type { ImportBlock } from "@rhodium-oss/plugin-sdk";
+import type { PluginRegistry } from "./plugin-loader";
+import { listPluginConversations, readPluginConversation } from "./plugin-query";
+import { managedFile, seedImport } from "./plugin-transcript";
 import { namesOf, type AgentInput, type Conversation as Conv, type Slot, type Store, type Tx } from "./store";
 import { codexCall, findConversations, hasTranscript, listConversations, piSettings, readPage, sessionsDir, settingsIn as ranOn, startedIn, transcriptFile, type Conversation } from "./transcript";
 
@@ -116,8 +120,10 @@ export async function inspectPaneAgent(kind: AgentKind, pane: string, session: s
 }
 
 /** capabilities: as createRunner's, for the system prompt the terminal is started with. */
-export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabilities: (bot: string) => Capabilities | undefined }, checkPi = piPaneHasCredentials) {
+export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabilities: (bot: string) => Capabilities | undefined; plugins?: PluginRegistry }, checkPi = piPaneHasCredentials) {
   const { cfg, store, loop } = o;
+  /** The loaded agent plugins that answer import queries (spec plugins §3.5). */
+  const importers = () => (o.plugins?.loaded ?? []).filter((p) => p.manifest.kind === "agent" && p.manifest.import === true);
   const program = (p: string) => locate(p, cfg.agentPath) ?? fail(`${p} 不在 PATH 上（${cfg.agentPath}）`);
 
   /**
@@ -1082,17 +1088,42 @@ export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabiliti
 
   // ---- rh import (product §4.3): only what it is told to take, never another agent. ----
 
-  /** The one conversation on disk whose id starts with prefix, and the directory it was started in. */
-  async function fromDisk(prefix: string): Promise<ImportFound> {
-    const hits = await findConversations(prefix);
-    if (!hits.length) fail(`磁盘上没有对话 ${prefix}`);
-    if (hits.length > 1) fail(`以 ${prefix} 开头的对话有 ${hits.length} 段，写长一点：${hits.slice(0, 5).map((h) => h.id).join("、")}${hits.length > 5 ? " 等" : ""}`);
+  const tooMany = (prefix: string, ids: string[]) => fail(`以 ${prefix} 开头的对话有 ${ids.length} 段，写长一点：${ids.slice(0, 5).join("、")}${ids.length > 5 ? " 等" : ""}`);
+
+  /** The one conversation on disk whose id starts with prefix, and the directory it was started in;
+   *  else the one an import-capable plugin lists, with what was said in it (spec plugins §3.5). */
+  async function fromDisk(prefix: string): Promise<ImportFound & { blocks?: ImportBlock[] }> {
+    const hits = /^[0-9a-f-]+$/i.test(prefix) ? await findConversations(prefix) : [];
+    if (!hits.length) return fromPlugins(prefix);
+    if (hits.length > 1) tooMany(prefix, hits.map((h) => h.id));
     const { agent, id: session, file } = hits[0]!;
     const cwd = (await startedIn(file)) ?? fail(`对话 ${session} 的记录里没有它的目录`);
     const dir = windows ? localDrivePath(cwd) : cwd;
     if (!existsSync(dir)) fail(`对话 ${session} 的目录 ${dir} 已经不在了`);
     await nobodyHas(session);
     return { agent, session, dir };
+  }
+
+  /** The one plugin conversation whose id is prefix, or alone starts with it, and its blocks. */
+  async function fromPlugins(prefix: string): Promise<ImportFound & { blocks: ImportBlock[] }> {
+    const failed: string[] = [];
+    const lists = await Promise.all(
+      importers().map((p) =>
+        listPluginConversations(p, cfg, null).then(
+          (list) => list.filter((c) => c.id.startsWith(prefix)).map((c) => ({ p, c })),
+          (err: Error) => (failed.push(`插件 ${p.id} 列不出对话：${err.message}`), []),
+        ),
+      ),
+    );
+    const hits = lists.flat();
+    if (!hits.length) fail([`磁盘上没有对话 ${prefix}`, ...failed].join("；"));
+    const exact = hits.filter((h) => h.c.id === prefix);
+    const [hit, ...more] = exact.length === 1 ? exact : hits;
+    if (more.length) tooMany(prefix, hits.map((h) => h.c.id));
+    const { p, c } = hit!;
+    if (c.busy) fail(`对话 ${c.id} 正被别的进程使用，先关掉它再导入`);
+    if (!existsSync(c.dir)) fail(`对话 ${c.id} 的目录 ${c.dir} 已经不在了`);
+    return { agent: p.id, session: c.id, dir: c.dir, blocks: await readPluginConversation(p, cfg, c.id) };
   }
 
   /** The agent in the pane of Rhodium's Herdr session: the session it reports, its directory, and
@@ -1129,27 +1160,48 @@ export function createTui(o: { cfg: Config; store: Store; loop: Loop; capabiliti
           return { agent: p.agent_session.agent, session, dir: cwd, pane: p.pane_id, ...(c && { at: c.modifiedAt.getTime(), said: c.title }) };
         }),
     );
+    const failed: string[] = [];
+    const plugins = await Promise.all(
+      importers().map((p) =>
+        listPluginConversations(p, cfg, dir).then(
+          (list) => list.map((c): Importable => ({ agent: p.id, session: c.id, dir: c.dir, at: c.updatedAt, said: c.title, ...(c.busy && { busy: true as const }) })),
+          (err: Error) => (failed.push(`插件 ${p.id} 列不出对话：${err.message}`), []),
+        ),
+      ),
+    );
     const disk = (await inDir(dir))
       .filter((c) => !panes.some((p) => p.session === c.id))
-      .map((c) => ({ agent: c.agent, session: c.id, dir, at: c.modifiedAt.getTime(), said: c.title }));
-    return { dir, list: [...panes, ...disk] };
+      .map((c): Importable => ({ agent: c.agent, session: c.id, dir, at: c.modifiedAt.getTime(), said: c.title }))
+      .concat(plugins.flat())
+      .sort((a, b) => b.at! - a.at!);
+    return { dir, list: [...panes, ...disk], ...(failed.length && { failed }) };
   }
 
   /** Looks up what rh import names, and says what came of it with an import input. A pane's slot is
    *  in the terminal from then on: rhodium holds its conversation lock and watches its agent. */
   async function importFrom(e: Extract<Effect, { kind: "import" }>): Promise<void> {
     let found: Extract<Input, { kind: "import" }>["found"];
+    let blocks: ImportBlock[] | undefined;
     try {
-      found = "dir" in e.what ? await importable(e.what.dir) : "session" in e.what ? await fromDisk(e.what.session) : await fromPane(e.what.pane);
+      if ("dir" in e.what) found = await importable(e.what.dir);
+      else if ("pane" in e.what) found = await fromPane(e.what.pane);
+      else ({ blocks, ...found } = await fromDisk(e.what.session));
     } catch (err) {
       found = { error: (err as Error).message };
     }
+    // A plugin conversation's history goes at the start of the managed transcript of the conversation
+    // the import makes, if it makes one (spec plugins §3.5).
+    // ponytail: a crash between the slot's row and this write leaves the slot without its history; add an "import pending" mark if that ever bites.
+    const made = () => ("session" in found ? store.tx((tx) => tx.find("conversation", { agent: found.agent, sessionId: found.session })) : []);
+    const before = blocks ? made().length : 0;
     // The slot this import makes, if it makes one: one with the pane already refuses it (imported()).
     const pane = "pane" in found ? found.pane?.pane : undefined;
     const slots = () => (pane ? store.tx((tx) => tx.find("slot", { herdrPane: pane })) : []);
     const had = slots().length;
     const { what: _, ...rest } = e;
     loop.enqueue({ ...rest, found });
+    const conv = blocks && !before ? made()[0] : undefined;
+    if (conv) seedImport(managedFile(cfg.stateDir, conv.agent, conv.id), blocks!, Date.now());
     const [s] = had ? [] : slots();
     if (!s?.conversation) return; // refused
     const fd = conversationLock(holderPaths(cfg, s.conversation).lock);

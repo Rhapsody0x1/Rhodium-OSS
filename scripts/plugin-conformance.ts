@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { MAX_LINE_BYTES, checkPluginIcon, compareSemver, isAgentReady, validateImCapabilities, validateManifest, type Capabilities } from "@rhodium-oss/plugin-sdk";
+import { IMPORT_ID_RE, MAX_LINE_BYTES, checkPluginIcon, isImportBlock, compareSemver, isAgentReady, validateImCapabilities, validateManifest, type Capabilities } from "@rhodium-oss/plugin-sdk";
 import { Peer, bounded, check, childEnv, nonempty, object, sensitiveKey, type Frame, type Options } from "./lib/conformance-peer";
 
 const ok = (n: number, description: string) => console.log("ok " + n + " - " + description);
@@ -13,6 +13,7 @@ const strings = (v: unknown): v is Record<string, string> => object(v) && Object
 type Fixture = {
   normalText?: string; interruptText?: string; askText?: string; deliveredText?: string; failureText?: string;
   chat?: string; replyTo?: string; failureChat?: string; kept?: Record<string, string>; stateless?: boolean; localPlatform?: boolean;
+  importSession?: string;
 };
 
 function fixtureAt(dir: string): Fixture {
@@ -20,7 +21,7 @@ function fixtureAt(dir: string): Fixture {
   if (!existsSync(path)) return {};
   const f = json(path);
   check(object(f), "conformance.json must be an object");
-  for (const key of ["normalText", "interruptText", "askText", "deliveredText", "failureText", "chat", "replyTo", "failureChat"]) {
+  for (const key of ["normalText", "interruptText", "askText", "deliveredText", "failureText", "chat", "replyTo", "failureChat", "importSession"]) {
     check(f[key] === undefined || nonempty(f[key]), "Invalid fixture field: " + key);
   }
   check(f.kept === undefined || strings(f.kept), "Fixture kept must map keys to string values");
@@ -156,6 +157,32 @@ async function testAgent(o: Options, fixture: Fixture) {
   await failureProbe(o, fixture, "oversize");
   await failureProbe(o, fixture, fixture.failureText ? "failure" : "handshake");
   ok(7, fixture.failureText ? "malformed JSON, oversized line and simulated runtime failure" : "malformed JSON, oversized line and failed-version handshake");
+  if (o.manifest.kind === "agent" && o.manifest.import) {
+    await testImport(o, fixture);
+    ok(8, "conversation import query");
+  }
+}
+
+/** One query per process (spec §3.5): list with dir null, then read importSession if given. */
+async function testImport(o: Options, fixture: Fixture) {
+  const program = o.manifest.kind === "agent" ? o.manifest.program : null;
+  const ask = async (q: Frame) => {
+    const p = new Peer(o);
+    try {
+      p.write({ type: "query", proto: 1, id: "conf-q", program, config: o.config, ...q });
+      const r = await p.wait(0, f => f.type === "query_result" && f.id === "conf-q", "query_result");
+      check(r.ok === true, "Import query failed: " + String(r.error));
+      await p.exited();
+      return r;
+    } finally { await p.clean(); }
+  };
+  const list = await ask({ query: "list", dir: null });
+  check(Array.isArray(list.conversations) && list.conversations.every(c => object(c) && typeof c.id === "string" && IMPORT_ID_RE.test(c.id)
+    && typeof c.dir === "string" && typeof c.title === "string" && Number.isFinite(c.updatedAt)), "Invalid import list");
+  if (fixture.importSession) {
+    const read = await ask({ query: "read", session: fixture.importSession });
+    check(Array.isArray(read.blocks) && read.blocks.length > 0 && read.blocks.every(isImportBlock), "Invalid or empty import read");
+  }
 }
 
 type Kept = Map<string, string>;
@@ -369,6 +396,7 @@ async function main() {
       "bun scripts/plugin-conformance.ts --check-docs",
       "Use an offline plugin configuration. An optional conformance.json beside plugin.json describes test inputs:",
       "  Agent: normalText, interruptText (a turn that stays pending), failureText (reported downstream error).",
+      "         importSession: a conversation id an import-capable plugin's read query returns blocks for.",
       "         askText + deliveredText test duplicate permission answers using one observable downstream tool receipt;",
       "         without askText the checker requests an unsupported command instead.",
       "  IM: chat, normalText, replyTo (inbound message id for stream/draft), failureChat/failureText (a known refusal).",

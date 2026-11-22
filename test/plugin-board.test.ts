@@ -21,7 +21,7 @@ test("the board, slot and service report the selectable plugins and load failure
     const id = board.workspaces.flatMap(w => Object.values(w.groups).flat()).find(s => s.name === "echo")!.id;
     for (const { metadata } of [board, await get<SlotData>("/api/slot?id=" + id), await get<RhodiumData>("/api/rhodium")]) {
       expect(metadata?.agents.map(a => a.id)).toEqual(["claude", "pi", "codex", "echo-agent"]);
-      expect(metadata?.agents.at(-1)).toMatchObject({ name: "Echo Agent", tui: false, importable: false, icon: "api/plugin-icon?id=echo-agent&v=0.1.0" });
+      expect(metadata?.agents.at(-1)).toMatchObject({ name: "Echo Agent", tui: false, importable: true, icon: "api/plugin-icon?id=echo-agent&v=0.1.0" });
       expect(metadata?.agents[0]).not.toHaveProperty("icon");
       expect(metadata?.platforms).toContainEqual({ id: "local-im", label: "Local IM", icon: "api/plugin-icon?id=local-im&v=0.1.0" });
       expect(metadata?.platforms.find(p => p.id === "qq")).not.toHaveProperty("icon");

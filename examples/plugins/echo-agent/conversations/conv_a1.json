@@ -1,0 +1,11 @@
+{
+  "id": "conv_a1",
+  "dir": ".",
+  "title": "整理 README",
+  "updatedAt": 1767225600000,
+  "blocks": [
+    { "kind": "user", "text": "整理 README", "at": 1767225500000 },
+    { "kind": "tool", "id": "t1", "name": "read_file", "input": { "path": "README.md" }, "result": { "text": "# Demo" } },
+    { "kind": "assistant", "text": "已整理。", "at": 1767225600000 }
+  ]
+}
