@@ -404,7 +404,7 @@ export const IM_COMMANDS: ImCommandDef[] = [
       return all.map((i) => {
         const when = i.at === undefined ? "" : moment(i.at, l.now ?? Date.now());
         const mark = mixed && i.agent !== DEFAULT_AGENT ? `（${i.agent}）` : when && " ";
-        return { label: `${i.pane ? "Herdr 里 " : ""}${tilde(i.dir)} ${when}${mark}${clip(i.said ?? "", 8, "…") || i.session.slice(0, 8)}`, command: `/rh_import ${i.pane ?? i.session} --name` };
+        return { label: `${i.pane ? "Herdr 里 " : ""}${tilde(i.dir)} ${when}${mark}${clip(i.said ?? "", 8, "…") || i.session.slice(0, 8)}${i.busy ? " 正被别的进程使用" : ""}`, command: `/rh_import ${i.pane ?? i.session} --name` };
       });
     },
     hint: () => "后面写对话 ID 或 pane ID，例如 /rh_import w1:p1 --name review；不写就列出可以导入的",

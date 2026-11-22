@@ -159,6 +159,7 @@ function registerAgentFromManifest(m: AgentPluginManifest): void {
     steer: Boolean(m.capabilities.steer),
     modelNames: (m.capabilities.models?.length ?? 0) > 0,
     supportedCommands: supported,
+    importable: m.import === true,
   });
 }
 

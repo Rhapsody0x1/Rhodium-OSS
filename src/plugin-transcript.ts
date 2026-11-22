@@ -1,10 +1,33 @@
 // A plugin's own session may be opaque; Rhodium stores its visible messages in the slot conversation's file.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { AgentToCoreMessage } from "@rhodium-oss/plugin-sdk";
+import type { AgentToCoreMessage, ImportBlock } from "@rhodium-oss/plugin-sdk";
 
 export const managedFile = (stateDir: string, agent: string, conversation: string) =>
   join(stateDir, "transcripts", agent, conversation + ".jsonl");
+
+/** Rows for one item, as record() writes it; tool: whether its tool_use row was already written. */
+function itemRows(item: { kind: "message"; text: string } | { kind: "tool"; id: string; name: string; input: unknown; result?: { text: string; error?: boolean } }, toolSeen = false): object[] {
+  const assistant = (content: unknown) => ({ type: "assistant", message: { role: "assistant", content } });
+  if (item.kind === "message") return [assistant([{ type: "text", text: item.text }])];
+  return [
+    ...(toolSeen ? [] : [assistant([{ type: "tool_use", id: item.id, name: item.name, input: item.input }])]),
+    { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: item.id, content: item.result?.text ?? "", is_error: item.result?.error ?? false }] } },
+  ];
+}
+
+/** Writes an imported conversation's blocks at the start of its managed transcript (spec plugins §3.5),
+ *  as record() writes items, keyed import:<n>; each at its own time, else now. */
+export function seedImport(file: string, blocks: ImportBlock[], now: number): void {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const lines = blocks.flatMap((b, n) => {
+    const k = "import:" + n;
+    const timestamp = new Date(b.at ?? now).toISOString();
+    const rows = b.kind === "user" ? [{ type: "user", message: { role: "user", content: b.text } }] : itemRows(b.kind === "assistant" ? { kind: "message", text: b.text } : { ...b, id: b.id ?? k });
+    return rows.map((row, i) => JSON.stringify({ ...row, timestamp, k: i ? k + ":" + i : k }));
+  });
+  if (lines.length) appendFileSync(file, lines.join("\n") + "\n", { mode: 0o600 });
+}
 
 export class PluginTranscript {
   private readonly tools = new Set<string>();
@@ -45,13 +68,12 @@ export class PluginTranscript {
       case "item": {
         const item = m.item;
         if (item.kind === "message") {
-          assistant([{ type: "text", text: item.text }]);
+          rows.push(...itemRows(item));
           this.lastMessage = item.text;
           this.delta = "";
         } else {
           const id = item.id ?? key;
-          if (!this.tools.delete(id)) assistant([{ type: "tool_use", id, name: item.name, input: item.input }]);
-          rows.push({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: item.result?.text ?? "", is_error: item.result?.error ?? false }] } });
+          rows.push(...itemRows({ ...item, id }, this.tools.delete(id)));
         }
         break;
       }

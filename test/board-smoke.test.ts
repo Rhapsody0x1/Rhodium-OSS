@@ -8557,3 +8557,38 @@ smoke("the board offers a loaded agent for creation and switching, keeps import 
   await change.click();
   await page.getByRole("button", { name: /Echo Agent/ }).waitFor();
 });
+
+smoke("spec plugins §3.5: the import dialog lists an agent plugin's conversations, with no count where it gives none, a busy one locked, and previews what was said", async () => {
+  const plugin = { id: "echo-agent", name: "Echo Agent", statusName: "Echo", tui: false, importable: true };
+  const page = await open("", async p => {
+    await p.route("**/api/board", async route => {
+      const data = await (await route.fetch()).json();
+      data.metadata.agents.push(plugin);
+      await route.fulfill({ json: data });
+    });
+    await p.route("**/api/importable?*agent=echo-agent*", route => route.fulfill({ json: { list: [
+      { session: "conv_a1", dir: "~/proj", title: "整理 README", at: Date.now() - 60_000 },
+      { session: "busy_b2", dir: "~/proj", title: "修登录页", at: Date.now() - 3_600_000, busy: true },
+    ] } }));
+    await p.route("**/api/importable/messages?*agent=echo-agent*", route => route.fulfill({ json: { blocks: [
+      { kind: "user", text: "整理 README", source: null, from: null, at: "0", time: null },
+      { kind: "assistant", text: "已整理好了。", at: "1", time: null },
+    ] } }));
+  });
+  await page.getByRole("button", { name: "新建", exact: true }).click();
+  await page.getByRole("menuitem", { name: "导入" }).click();
+  const dialog = page.getByRole("dialog");
+  const echo = dialog.getByRole("radio", { name: "Echo Agent", exact: true });
+  await echo.click();
+  // The plugin shows by its logo alone, as the built-in ones do: on a phone its name would squeeze the slot name beside it.
+  expect([await echo.innerText(), await echo.getAttribute("title")]).toEqual(["", "Echo Agent"]);
+  const rows = dialog.getByRole("radiogroup", { name: "导入哪一段" }).getByRole("radio");
+  const free = rows.filter({ hasText: "整理 README" });
+  const busy = rows.filter({ hasText: "修登录页" });
+  await busy.waitFor();
+  expect(await busy.isDisabled()).toBe(true);
+  expect(await busy.getByLabel("正被别的进程使用").count()).toBe(1);
+  expect(await free.getByLabel("消息条数").count()).toBe(0);
+  await free.click();
+  await dialog.getByRole("log", { name: "预览" }).getByText("已整理好了。").waitFor();
+});

@@ -9,7 +9,7 @@ import { cn } from "cn";
 import { Autocomplete } from "@base-ui/react/autocomplete";
 import type { BaseUIEvent } from "@base-ui/react/types";
 import { Dialog } from "@base-ui/react/dialog";
-import { ArrowDown, ArrowUp, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, FileDiff, Folder, GitBranch, House, Import, LoaderCircle, MessageSquare, Search, SquarePlus, SquareTerminal } from "lucide-react";
+import { ArrowDown, ArrowUp, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, FileDiff, Folder, GitBranch, House, Import, LoaderCircle, Lock, MessageSquare, Search, SquarePlus, SquareTerminal } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { useAgents } from "./metadata";
@@ -410,7 +410,8 @@ function AgentPick({ agent, pick, importing = false }: { agent: AgentKind; pick:
           <span className="grid size-9 place-items-center rounded-md">
             <AgentLogo agent={a} className="size-5" />
           </span>
-          {!isBuiltinAgent(a) && <span className="truncate pr-2 text-sm">{name}</span>}
+          {/* In the import dialog a plugin is its logo alone, as the built-in ones are: its name would squeeze the slot name on a phone. */}
+          {!importing && !isBuiltinAgent(a) && <span className="truncate pr-2 text-sm">{name}</span>}
         </button>
       ))}
     </div>
@@ -507,17 +508,19 @@ function Marked({ text, words }: { text: string; words?: string }) {
 }
 
 /** A conversation on the import list (stories 642, 643, 648): its title, the words in it marked where
- *  a search found them there; open in Herdr, or when it last changed, how many things were said, its
- *  branch, and its folder where every folder's are listed (all); where a full-text search found the
- *  words in a message. Picked, ticked, with children, its preview, under it. */
+ *  a search found them there; open in Herdr, or when it last changed, how many things were said if
+ *  known, its branch, and its folder where every folder's are listed (all); where a full-text search
+ *  found the words in a message. Picked, ticked, with children, its preview, under it. One another
+ *  process holds (busy, an agent plugin's) is locked and cannot be picked. */
 function ImportItem({ row, picked, all, words, pick, children }: { row: ImportRow; picked: boolean; all: boolean; words: string; pick: () => void; children?: ReactNode }) {
   const icon = "size-3.5 shrink-0";
   return (
     <li>
       {/* Picked, not lit under the mouse: its tick and its preview say so. */}
-      <button type="button" role="radio" aria-checked={picked} onClick={pick} className={cn("grid w-full min-w-0 gap-0.5 rounded-lg px-3 py-2 text-left", !picked && "hover:bg-accent")}>
+      <button type="button" role="radio" aria-checked={picked} disabled={row.busy} onClick={pick} className={cn("grid w-full min-w-0 gap-0.5 rounded-lg px-3 py-2 text-left disabled:opacity-50", !picked && !row.busy && "hover:bg-accent")}>
         <span className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 flex-1 truncate">{row.title ? <Marked text={row.title} words={row.hit ? undefined : words} /> : row.session.slice(0, 8)}</span>
+          {row.busy && <Lock aria-label="正被别的进程使用" className="size-4 shrink-0 text-muted-foreground" />}
           {picked && <Check className="size-4 shrink-0 text-running" />}
         </span>
         <span className="flex min-w-0 items-center gap-3 overflow-hidden text-xs whitespace-nowrap text-muted-foreground tabular-nums">
@@ -531,10 +534,12 @@ function ImportItem({ row, picked, all, words, pick, children }: { row: ImportRo
           ) : (
             <>
               <span className="shrink-0">{ago(row.at)}</span>
-              <span className="inline-flex shrink-0 items-center gap-1" aria-label="消息条数">
-                <MessageSquare className={icon} />
-                {row.count}
-              </span>
+              {row.count !== undefined && (
+                <span className="inline-flex shrink-0 items-center gap-1" aria-label="消息条数">
+                  <MessageSquare className={icon} />
+                  {row.count}
+                </span>
+              )}
               {row.branch && (
                 <span className="inline-flex min-w-0 items-center gap-1">
                   <GitBranch className={icon} />

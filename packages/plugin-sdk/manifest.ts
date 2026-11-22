@@ -62,6 +62,8 @@ export type AgentPluginManifest = ManifestBase & {
   protocol: "rh-agent/1";
   program: string;
   capabilities: AgentCapabilitiesStatic;
+  /** Answers the one-shot import query (spec §3.5). */
+  import?: boolean;
 };
 
 export type ImPluginManifest = ManifestBase & {
@@ -467,6 +469,9 @@ export function validateManifest(
       errors.push("program references forbidden claude executable");
     }
     validateAgentCapabilitiesStatic(json.capabilities, errors);
+    if (json.import !== undefined && typeof json.import !== "boolean") {
+      errors.push("import must be a boolean");
+    }
     if (json.wizard !== undefined) {
       errors.push("wizard is only valid for IM plugins");
     }
@@ -482,6 +487,9 @@ export function validateManifest(
     }
     if (json.program !== undefined) {
       errors.push("program is only valid for agent plugins");
+    }
+    if (json.import !== undefined) {
+      errors.push("import is only valid for agent plugins");
     }
     if (json.wizard !== undefined && typeof json.wizard !== "boolean") {
       errors.push("wizard must be a boolean");
