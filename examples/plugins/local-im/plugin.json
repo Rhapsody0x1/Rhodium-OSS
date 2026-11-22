@@ -32,5 +32,6 @@
     }
   },
   "requiredConfig": [],
-  "optionalConfig": ["endpoint"]
+  "optionalConfig": ["endpoint"],
+  "icon": "icon.svg"
 }

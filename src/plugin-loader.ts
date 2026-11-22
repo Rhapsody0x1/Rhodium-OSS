@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   AGENT_RESERVED_IDS,
+  checkPluginIcon,
   compareSemver,
   expandPluginCommand,
   IM_RESERVED_IDS,
@@ -19,17 +20,23 @@ import { isBuiltinPlatform, registerPlatformPlugin, resetPlatformPlugins } from 
 
 export type { PluginConfigEntry } from "./config";
 
+// icon: the real path of a usable icon; iconError: why the manifest's icon is unusable (spec §4.6).
 export type LoadedPlugin = {
   id: string;
   dir: string;
   manifest: PluginManifest;
   command: string[];
+  icon?: string;
+  iconError?: string;
 };
 
-export type PluginRecord =
-  | { id: string; status: "loaded"; dir: string; manifest: PluginManifest; command: string[] }
-  | { id: string; status: "disabled"; dir: string }
-  | { id: string; status: "failed"; dir: string; error: string };
+type Source = { source: "scan" | "config" };
+export type PluginRecord = Source &
+  (
+    | ({ status: "loaded" } & LoadedPlugin)
+    | { id: string; status: "disabled"; dir: string }
+    | { id: string; status: "failed"; dir: string; error: string }
+  );
 
 export type PluginRegistry = {
   plugins: Record<string, PluginRecord>;
@@ -135,7 +142,9 @@ function loadOne(
   const cfgErr = checkRequiredConfig(id, manifest, entry, opts.bots);
   if (cfgErr) return { ok: false, error: cfgErr };
 
-  return { ok: true, plugin: { id, dir, manifest, command } };
+  if (manifest.icon === undefined) return { ok: true, plugin: { id, dir, manifest, command } };
+  const icon = checkPluginIcon(dir, manifest.icon);
+  return { ok: true, plugin: { id, dir, manifest, command, ...(icon.ok ? { icon: icon.path } : { iconError: icon.error }) } };
 }
 
 function registerAgentFromManifest(m: AgentPluginManifest): void {
@@ -198,30 +207,28 @@ export function loadPlugins(
   const disabled: string[] = [];
 
   for (const [id, entry] of Object.entries(entries)) {
+    const source = entry.source ?? "config";
     if (!entry.enabled) {
       disabled.push(id);
-      records.push([id, { id, status: "disabled", dir: entry.path }]);
+      records.push([id, { id, status: "disabled", dir: entry.path, source }]);
       continue;
     }
+    const fail = (error: string) => {
+      failed.push({ id, error });
+      records.push([id, { id, status: "failed", dir: entry.path ? resolve(entry.path) : "", error, source }]);
+    };
     if (entry.configError) {
-      const dir = entry.path ? resolve(entry.path) : "";
-      failed.push({ id, error: entry.configError });
-      records.push([id, { id, status: "failed", dir, error: entry.configError }]);
+      fail(entry.configError);
       continue;
     }
     try {
       const res = loadOne(id, entry, resolvedOpts);
       if (res.ok) {
         loaded.push(res.plugin);
-        records.push([id, { id, status: "loaded", dir: res.plugin.dir, manifest: res.plugin.manifest, command: res.plugin.command }]);
-      } else {
-        failed.push({ id, error: res.error });
-        records.push([id, { id, status: "failed", dir: entry.path ? resolve(entry.path) : "", error: res.error }]);
-      }
+        records.push([id, { ...res.plugin, status: "loaded", source }]);
+      } else fail(res.error);
     } catch (err) {
-      const error = (err as Error).message || String(err);
-      failed.push({ id, error });
-      records.push([id, { id, status: "failed", dir: entry.path ? resolve(entry.path) : "", error }]);
+      fail((err as Error).message || String(err));
     }
   }
 

@@ -397,12 +397,15 @@ export function pluginFindings(
   const info: string[] = [];
   const findings: Finding[] = [];
   for (const rec of Object.values(registry?.plugins ?? {})) {
+    const from = rec.source === "scan" ? "扫描到" : "配置登记";
     if (rec.status === "loaded") {
-      info.push(`插件 ${rec.id}（${rec.manifest.kind} ${rec.manifest.version}）已加载`);
+      info.push(`插件 ${rec.id}（${rec.manifest.kind} ${rec.manifest.version}，${from}）已加载`);
+      if (rec.iconError) findings.push({ level: "告警", text: `插件 ${rec.id} 的图标不可用：${rec.iconError}` });
     } else if (rec.status === "disabled") {
-      info.push(`插件 ${rec.id}：已禁用`);
+      info.push(`插件 ${rec.id}（${from}）已禁用`);
     } else {
-      findings.push({ level: "错误", text: `插件 ${rec.id} 加载失败：${rec.error}` });
+      const where = rec.source === "scan" ? `扫描到 plugins/${rec.id}` : from;
+      findings.push({ level: "错误", text: `插件 ${rec.id}（${where}）加载失败：${rec.error}` });
     }
   }
   for (const err of registry?.configErrors ?? []) {

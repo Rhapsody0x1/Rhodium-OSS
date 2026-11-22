@@ -21,11 +21,23 @@ test("the board, slot and service report the selectable plugins and load failure
     const id = board.workspaces.flatMap(w => Object.values(w.groups).flat()).find(s => s.name === "echo")!.id;
     for (const { metadata } of [board, await get<SlotData>("/api/slot?id=" + id), await get<RhodiumData>("/api/rhodium")]) {
       expect(metadata?.agents.map(a => a.id)).toEqual(["claude", "pi", "codex", "echo-agent"]);
-      expect(metadata?.agents.at(-1)).toMatchObject({ name: "Echo Agent", tui: false, importable: false });
-      expect(metadata?.platforms).toContainEqual({ id: "local-im", label: "Local IM" });
+      expect(metadata?.agents.at(-1)).toMatchObject({ name: "Echo Agent", tui: false, importable: false, icon: "api/plugin-icon?id=echo-agent&v=0.1.0" });
+      expect(metadata?.agents[0]).not.toHaveProperty("icon");
+      expect(metadata?.platforms).toContainEqual({ id: "local-im", label: "Local IM", icon: "api/plugin-icon?id=local-im&v=0.1.0" });
+      expect(metadata?.platforms.find(p => p.id === "qq")).not.toHaveProperty("icon");
       expect(metadata?.plugins).toContainEqual({ id: "offline", status: "disabled" });
       expect(metadata?.plugins).toContainEqual({ id: "broken", status: "failed", error: expect.stringContaining("missing-dir") });
       expect(JSON.stringify(metadata)).not.toContain("private-test-value");
+    }
+    const icon = await fetch(base + "/api/plugin-icon?id=echo-agent&v=0.1.0", { headers: { "Tailscale-User-Login": BOARD_LOGIN } });
+    expect(icon.status).toBe(200);
+    expect(icon.headers.get("content-type")).toBe("image/svg+xml");
+    expect(icon.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(icon.headers.get("content-security-policy")).toBe("sandbox");
+    expect(icon.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
+    expect(await icon.text()).toBe(readFileSync(resolve(import.meta.dir, "../examples/plugins/echo-agent/icon.svg"), "utf8"));
+    for (const id of ["nope", "offline", "broken", "claude"]) {
+      expect((await fetch(base + "/api/plugin-icon?id=" + id, { headers: { "Tailscale-User-Login": BOARD_LOGIN } })).status).toBe(404);
     }
   } finally { await r.cleanup(); }
 }, 20_000);

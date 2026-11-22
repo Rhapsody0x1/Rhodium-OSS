@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createPrivateWindows, windows } from "../src/windows";
 import { join, resolve } from "node:path";
@@ -143,11 +143,13 @@ describe("config.ts plugin support", () => {
       path: resolve(root, "./plugins with spaces/dsh"),
       enabled: true,
       config: { fixture: "./fixtures/dsh.jsonl" },
+      source: "config",
     });
     expect(cfg.plugins.weixin).toEqual({
       path: join(root, "missing-weixin-not-read-by-loadConfig"),
       enabled: false,
       config: {},
+      source: "config",
     });
     expect(cfg.bots["my-weixin"]?.platform).toBe("weixin");
     // Pure config load must not mutate global registries.
@@ -198,7 +200,7 @@ describe("config.ts plugin support", () => {
       {
         name: "missing path",
         toml: `[plugins.dsh]\nenabled = true\n`,
-        match: /plugins\.dsh\.path/,
+        match: /plugins\.dsh 没有 path/,
       },
       {
         name: "unknown key inside plugin entry",
@@ -447,7 +449,7 @@ describe("plugin-loader.ts manifest validation and failure isolation", () => {
 
     expect(reg.loaded.map((p) => p.id)).toEqual(["ok"]);
     expect(reg.disabled).toEqual(["disabled"]);
-    expect(reg.plugins.disabled).toEqual({ id: "disabled", status: "disabled", dir: badJsonDir });
+    expect(reg.plugins.disabled).toEqual({ id: "disabled", status: "disabled", dir: badJsonDir, source: "config" });
 
     const expectedFailed = [
       "missing-dir",
@@ -760,7 +762,7 @@ describe("commands, router, and transcript guards for plugin agents", () => {
       ...reg,
       plugins: {
         ...reg.plugins,
-        claude: { id: "claude", status: "disabled", dir: "/tmp/shadow-claude" },
+        claude: { id: "claude", status: "disabled", dir: "/tmp/shadow-claude", source: "config" },
       },
     });
     expect(rhReply(route(makeState("claude"), { kind: "rh", id: "r-builtin-new", caller: AT_BOARD, argv: ["new", "work/c2", "--agent", "claude"] }, shadowedCtx))?.ok).toBe(true);
@@ -852,5 +854,125 @@ describe("commands, router, and transcript guards for plugin agents", () => {
     const died = route(state, { kind: "agent", event: { type: "exit", from: "agent", conv: "c1", proc: 1, code: 1, signal: null, why: "bad config", retryable: false } }, ctx);
     expect(slotPatch(died).state).toBe("off");
     expect(died.effects.some((e) => e.kind === "start")).toBe(false);
+  });
+});
+
+describe("plugins/ scan beside config.toml (spec §4.5)", () => {
+  const load = (cfg: ReturnType<typeof loadConfig>) =>
+    loadPlugins(cfg.plugins, { coreVersion: "1.5.0", agentPath: process.env.PATH ?? "", bots: cfg.bots, programs: cfg.programs });
+
+  test("loads what it finds, merges [plugins.<id>], skips symlinks, dot and manifest-less folders, and isolates bad ones", () => {
+    const root = tempDir();
+    const scan = join(root, "plugins");
+    writePluginDir(scan, "found", dshManifest({ id: "found" }));
+    writePluginDir(scan, "weixin", weixinManifest());
+    writePluginDir(scan, "off", dshManifest({ id: "off" }));
+    writePluginDir(scan, "tuned", dshManifest({ id: "tuned" }));
+    writePluginDir(scan, "moved", dshManifest({ id: "moved" }));
+    const elsewhere = writePluginDir(join(root, "elsewhere"), "moved", dshManifest({ id: "moved", version: "0.2.0" }));
+    writePluginDir(scan, "broken", "{ not json");
+    writePluginDir(scan, "wrong", dshManifest({ id: "other" }));
+    writePluginDir(scan, ".hidden", dshManifest({ id: "hidden" }));
+    mkdirSync(join(scan, "notes"));
+    writeFileSync(join(scan, "README.txt"), "not a plugin");
+    const linked = writePluginDir(join(root, "outside"), "linked", dshManifest({ id: "linked" }));
+    symlinkSync(linked, join(scan, "linked"), "junction");
+    const cfgPath = join(root, "config.toml");
+    writeFileSync(
+      cfgPath,
+      [
+        `stateDir = ${JSON.stringify(join(root, "state"))}`,
+        "[programs]",
+        `found = "found-cli"`,
+        "[plugins.off]",
+        "enabled = false",
+        "[plugins.tuned.config]",
+        `fixture = "x.jsonl"`,
+        "[plugins.moved]",
+        `path = "./elsewhere/moved"`,
+        "[plugins.ghost]",
+        "enabled = true",
+        "[bots.wx]",
+        `platform = "weixin"`,
+        `token = "t"`,
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+
+    const cfg = loadConfig(cfgPath);
+    expect(Object.keys(cfg.plugins).sort()).toEqual(["broken", "found", "ghost", "moved", "off", "tuned", "weixin", "wrong"]);
+    expect(cfg.plugins.found).toEqual({ path: join(scan, "found"), enabled: true, config: {}, source: "scan" });
+    expect(cfg.plugins.off).toMatchObject({ enabled: false, source: "scan" });
+    expect(cfg.plugins.tuned).toEqual({ path: join(scan, "tuned"), enabled: true, config: { fixture: "x.jsonl" }, source: "scan" });
+    expect(cfg.plugins.moved).toMatchObject({ path: elsewhere, source: "config" });
+    expect(cfg.plugins.ghost?.source).toBe("config");
+    expect(cfg.programs.found).toBe("found-cli");
+    expect(cfg.pluginScanSkipped).toEqual([join(scan, "linked")]);
+
+    const reg = load(cfg);
+    expect(reg.loaded.map((p) => p.id).sort()).toEqual(["found", "moved", "tuned", "weixin"]);
+    expect(reg.disabled).toEqual(["off"]);
+    expect(reg.plugins.moved?.status === "loaded" && reg.plugins.moved.manifest.version).toBe("0.2.0");
+    const error = (id: string) => (reg.plugins[id]?.status === "failed" ? reg.plugins[id].error : "");
+    expect(error("broken")).toContain("invalid plugin.json");
+    expect(error("wrong")).toContain("other");
+    expect(error("ghost")).toContain("plugins/ 里也没有 ghost");
+
+    const { info, findings } = pluginFindings(reg);
+    expect(info).toContain("插件 found（agent 0.1.0，扫描到）已加载");
+    expect(info).toContain("插件 moved（agent 0.2.0，配置登记）已加载");
+    expect(info).toContain("插件 off（扫描到）已禁用");
+    expect(findings.map((f) => f.text)).toContainEqual(expect.stringMatching(/^插件 broken（扫描到 plugins\/broken）加载失败：invalid plugin\.json/));
+    expect(findings.map((f) => f.text)).toContainEqual(expect.stringMatching(/^插件 ghost（配置登记）加载失败：/));
+  });
+
+  test("a plugins/ that is itself a symlink, or not there, scans nothing", () => {
+    const root = tempDir();
+    writePluginDir(join(root, "real"), "found", dshManifest({ id: "found" }));
+    symlinkSync(join(root, "real"), join(root, "plugins"), "junction");
+    const cfgPath = join(root, "config.toml");
+    writeFileSync(cfgPath, `stateDir = ${JSON.stringify(join(root, "state"))}\n`, { mode: 0o600 });
+    expect(loadConfig(cfgPath).plugins).toEqual({});
+    rmSync(join(root, "plugins"));
+    expect(loadConfig(cfgPath).plugins).toEqual({});
+  });
+});
+
+describe("plugin icons (spec §4.6)", () => {
+  test("a usable SVG or PNG is kept; any unusable icon drops only the icon, with a doctor warning", () => {
+    const root = tempDir();
+    const outside = join(root, "outside.svg");
+    writeFileSync(outside, "<svg/>");
+    const plugin = (id: string, icon: unknown, setup?: (dir: string) => void) => {
+      const dir = writePluginDir(root, id, dshManifest({ id, icon }));
+      setup?.(dir);
+      return [id, { path: dir, enabled: true, config: {} }] as const;
+    };
+    const entries = Object.fromEntries([
+      plugin("svg", "icon.svg", (d) => writeFileSync(join(d, "icon.svg"), "<svg/>")),
+      plugin("png", "img/Icon.PNG", (d) => (mkdirSync(join(d, "img")), writeFileSync(join(d, "img/Icon.PNG"), "png"))),
+      plugin("absolute", outside),
+      plugin("escapes", "../outside.svg"),
+      plugin("linked", "icon.svg", (d) => symlinkSync(outside, join(d, "icon.svg"))),
+      plugin("gif", "icon.gif", (d) => writeFileSync(join(d, "icon.gif"), "gif")),
+      plugin("big", "icon.svg", (d) => writeFileSync(join(d, "icon.svg"), "x".repeat(256 * 1024 + 1))),
+      plugin("missing", "icon.svg"),
+      plugin("folder", "icon.svg", (d) => mkdirSync(join(d, "icon.svg"))),
+      plugin("number", 7),
+    ]);
+    const reg = loadPlugins(entries, { coreVersion: "1.5.0", agentPath: process.env.PATH ?? "" });
+    expect(reg.loaded.map((p) => p.id).sort()).toEqual(Object.keys(entries).sort());
+    const rec = (id: string) => reg.plugins[id]!;
+    expect(rec("svg")).toMatchObject({ icon: realpathSync(join(entries.svg!.path, "icon.svg")) });
+    expect(rec("png")).toMatchObject({ icon: realpathSync(join(entries.png!.path, "img/Icon.PNG")) });
+    expect(rec("svg")).not.toHaveProperty("iconError");
+    const bad = ["absolute", "escapes", "linked", "gif", "big", "missing", "folder", "number"];
+    for (const id of bad) {
+      expect(rec(id)).not.toHaveProperty("icon");
+      expect(rec(id)).toHaveProperty("iconError");
+    }
+    const warnings = pluginFindings(reg).findings.filter((f) => f.level === "告警").map((f) => f.text);
+    expect(warnings.length).toBe(bad.length);
+    expect(warnings).toContainEqual(expect.stringMatching(/^插件 big 的图标不可用：.*256KB/));
   });
 });

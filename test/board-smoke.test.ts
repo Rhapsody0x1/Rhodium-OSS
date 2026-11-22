@@ -8514,11 +8514,14 @@ smoke("story 650: on a wide screen ↑ from the message box's first line brings 
 });
 
 smoke("the board offers a loaded agent for creation and switching, keeps import and terminal controls scoped, and explains a failed plugin", async () => {
-  const plugin = { id: "echo-agent", name: "Echo Agent", statusName: "Echo", tui: false, importable: false };
+  const plugin = { id: "echo-agent", name: "Echo Agent", statusName: "Echo", tui: false, importable: false, icon: "api/plugin-icon?id=echo-agent&v=0.1.0" };
+  // Spec §4.6: an icon that does not load falls back to the generic badge.
+  const dead = { id: "dead-agent", name: "Dead Agent", statusName: "Dead", tui: false, importable: false, icon: "api/plugin-icon?id=dead-agent&v=0.1.0" };
   const page = await open("", async p => {
+    await p.route("**/api/plugin-icon?id=echo-agent*", route => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>' }));
     await p.route("**/api/board", async route => {
       const data = await (await route.fetch()).json();
-      data.metadata.agents.push(plugin);
+      data.metadata.agents.push(plugin, dead);
       data.metadata.plugins.push({ id: "broken", status: "failed", error: "missing manifest" });
       await route.fulfill({ json: data });
     });
@@ -8534,6 +8537,10 @@ smoke("the board offers a loaded agent for creation and switching, keeps import 
   await page.getByRole("menuitem", { name: "新建槽位" }).click();
   const dialog = page.getByRole("dialog");
   const echo = dialog.getByRole("radio", { name: "Echo Agent", exact: true });
+  await echo.locator('img[src="api/plugin-icon?id=echo-agent&v=0.1.0"]').waitFor();
+  const deadOne = dialog.getByRole("radio", { name: "Dead Agent", exact: true });
+  await deadOne.locator("svg").waitFor();
+  expect(await deadOne.locator("img").count()).toBe(0);
   await echo.click();
   expect(await echo.getAttribute("aria-checked")).toBe("true");
   await page.keyboard.press("Escape");

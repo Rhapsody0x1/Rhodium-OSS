@@ -66,9 +66,14 @@ export function ModelName({ name }: { name: string }) {
 
 /** The agent's logo, as tall as the text around it, named for screen readers. */
 export function AgentLogo({ agent, className }: { agent: AgentKind; className?: string }) {
-  const { name } = useAgent(agent);
+  const def = useAgent(agent);
+  const { name } = def;
+  // A plugin's own icon (spec §4.6), only ever by <img>, so no script in an SVG runs; the badge if it fails.
+  const icon = "icon" in def ? def.icon : undefined;
+  const [broken, setBroken] = useState<string>();
   const logo = LOGO[agent as BuiltinAgentKind];
   const size = cn("inline-block size-[1em] shrink-0 align-[-0.125em]", className);
+  if (!logo && icon && broken !== icon) return <img src={icon} alt={name} title={name} onError={() => setBroken(icon)} className={cn(size, "object-contain")} />;
   if (!logo) return <Bot role="img" aria-label={name} className={size}><title>{name}</title></Bot>;
   if ("mask" in logo) return <span role="img" aria-label={logo.name} className={cn(size, "bg-current")} style={{ mask: `url(${logo.mask}) center / contain no-repeat` }} />;
   return (
