@@ -221,9 +221,11 @@ export class FixtureTransport implements DshTransport {
     }
   }
 
-  respond(id: JsonRpcId, result: unknown): void {
+  respond(id: JsonRpcId, result: unknown): boolean {
+    if (!this.generationAlive) return false;
     this.peer.responses.push({ id, frame: result });
     this.resumeIfPaused(id);
+    return true;
   }
 
   respondError(id: JsonRpcId, error: { code: number; message: string }): void {

@@ -117,8 +117,8 @@ export interface DshTransport {
   readonly dshVersion: string;
   /** 发一个 JSON-RPC 请求并等待响应;响应为 error 或对端中断时 reject。 */
   request(method: string, params: unknown, timeoutMs?: number): Promise<unknown>;
-  /** 应答 dsh 发来的服务端请求。 */
-  respond(id: JsonRpcId, result: unknown): void;
+  /** 应答 dsh 发来的服务端请求;对端已退出或写入失败时返回 false(§3.2:交付失败不得确认)。 */
+  respond(id: JsonRpcId, result: unknown): boolean;
   /** 以错误应答 dsh 发来的服务端请求。 */
   respondError(id: JsonRpcId, error: { code: number; message: string }): void;
   /** 注册入站帧(通知与服务端请求)处理器。 */

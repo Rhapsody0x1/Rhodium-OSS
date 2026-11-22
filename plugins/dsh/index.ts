@@ -451,8 +451,8 @@ export class DshAgentPlugin implements AgentPlugin {
     const answer = await pending.answer.promise;
     if (answer === null) return; // ask_cancel/进程退出:不回 dsh,等待中的审批随进程断开按拒绝处理
     const allow = answer.kind === "permission" && answer.allow;
-    this.transport?.respond(rpcId, { outcome: allow ? "allowed-once" : "rejected" }); // dsh 的审批不收附言,message 丢弃
-    pending.delivered.resolve();
+    // dsh 的审批不收附言,message 丢弃
+    this.settleDelivery(pending, this.transport?.respond(rpcId, { outcome: allow ? "allowed-once" : "rejected" }));
   }
 
   private async handleUserQuestion(ctx: AgentContext, rpcId: JsonRpcId, params: DshUserQuestionParams): Promise<void> {
@@ -489,8 +489,13 @@ export class DshAgentPlugin implements AgentPlugin {
         if (option !== undefined) return { id: question.id as string, selected: [option] };
         return { id: question.id as string, selected: [] as string[], custom: given };
       });
-    this.transport?.respond(rpcId, { answers });
-    pending.delivered.resolve();
+    this.settleDelivery(pending, this.transport?.respond(rpcId, { answers }));
+  }
+
+  /** 写回成功才确认交付;失败时 answer() 抛错,SDK 发 ask_cancel 而不是 ask_resolved(§3.2)。 */
+  private settleDelivery(pending: PendingAsk, written: boolean | undefined): void {
+    if (written) pending.delivered.resolve();
+    else pending.delivered.reject(new Error("答案未能写回 dsh(进程已退出或写入失败)"));
   }
 
   // ---------------------------------------------------------------------------

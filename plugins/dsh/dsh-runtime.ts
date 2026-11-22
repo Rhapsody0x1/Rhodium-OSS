@@ -147,12 +147,14 @@ export class DshProcessTransport implements DshTransport {
     this.proc.stdin.flush();
   }
 
-  respond(id: JsonRpcId, result: unknown): void {
-    if (!this.alive) return;
+  respond(id: JsonRpcId, result: unknown): boolean {
+    if (!this.alive) return false;
     try {
       this.writeFrame({ jsonrpc: "2.0", id, result });
+      return true;
     } catch {
-      // 对端已断开:等待中的审批随进程断开按拒绝处理(dsh 自己处理)。
+      // 对端已断开:由调用方按交付失败处理,不发 ask_resolved。
+      return false;
     }
   }
 

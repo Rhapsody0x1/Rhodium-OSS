@@ -160,6 +160,20 @@ describe("dsh agent 插件(离线回放)", () => {
     await io.expectCleanExit();
   }, 15000);
 
+  test("答案写回 dsh 失败 → ask_cancel 而不是 ask_resolved(§3.2)", async () => {
+    const io = await readyHarness({ approval: true });
+    io.write({ type: "send", id: "in-5", text: "帮我删除 plugins 下的临时文件", human: true, mode: "turn" });
+    const ask = await io.waitFor((f) => f.type === "ask", "ask");
+    const transport = (io.plugin as unknown as { transport: { respond: () => boolean } }).transport;
+    transport.respond = () => false; // 模拟写入失败
+    io.write({ type: "answer", requestId: ask.requestId, answer: { kind: "permission", allow: true } });
+    await io.waitFor((f) => f.type === "ask_cancel" && f.requestId === ask.requestId, "ask_cancel");
+    await io.waitFor((f) => f.type === "turn_end", "turn_end");
+    expect(io.outgoing.some((f) => f.type === "ask_resolved")).toBe(false);
+    io.write({ type: "close" });
+    await io.expectCleanExit();
+  }, 15000);
+
   test("审批关闭时自动放行,不惊动核心", async () => {
     const io = await readyHarness({ approval: false });
     io.write({ type: "send", id: "in-6", text: "帮我删除 plugins 下的临时文件", human: true, mode: "turn" });
