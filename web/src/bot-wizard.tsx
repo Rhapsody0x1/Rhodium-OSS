@@ -57,7 +57,9 @@ export function BotWizard({ open, close }: { open: boolean; close: () => void })
   const board = useQuery({ queryKey: ["board"], queryFn: () => json<BoardData>("api/board"), enabled: open }).data;
   const topology = useQuery({ queryKey: ["topology"], queryFn: () => json<TopologyData>("api/topology"), enabled: open }).data;
   const slots = (board?.workspaces ?? []).flatMap((w) => Object.values(w.groups).flat()).sort((a, b) => a.ref.localeCompare(b.ref));
-  const [platform, setPlatform] = useState<Made>("qq");
+  const [platform, setPlatform] = useState("qq");
+  const plugins = board?.metadata?.platforms.filter(entry => entry.wizard) ?? [];
+  const plugin = plugins.find(entry => entry.id === platform);
   // null: as yet untouched, the default.
   const [typed, setName] = useState<string | null>(null);
   const [picked, setTarget] = useState<string | null>(null);
@@ -128,6 +130,17 @@ export function BotWizard({ open, close }: { open: boolean; close: () => void })
             <Field.Control value={name} onValueChange={setName} autoCapitalize="off" autoComplete="off" spellCheck={false} className={FIELD} />
           </Field.Root>
         </div>
+        {plugins.length > 0 && (
+          <div role="radiogroup" aria-label="插件平台" className="flex flex-wrap gap-2">
+            {plugins.map(entry => (
+              <button key={entry.id} type="button" role="radio" aria-label={entry.label} aria-checked={platform === entry.id} onClick={() => setPlatform(entry.id)}
+                className={cn("focus-child flex min-h-11 items-center gap-2 rounded-lg border px-3 text-sm", platform === entry.id && "bg-secondary")}>
+                <Mark p={entry.id} size={20} />
+                {entry.label}
+              </button>
+            ))}
+          </div>
+        )}
         {name && !NAME.test(name) && <p className="-mt-1 text-sm text-destructive">名称只能用英文字母、数字和 _ -</p>}
         <Field.Root className="grid gap-1">
           <Field.Label className="text-xs text-muted-foreground">投递给</Field.Label>
@@ -139,10 +152,14 @@ export function BotWizard({ open, close }: { open: boolean; close: () => void })
       </Form>
     );
 
-  if (state === "scan" || (state === "writing" && !paste))
+  if (flow.prompt && state === "paste") {
+    return <PluginInput key={flow.id} flow={flow} prompt={flow.prompt} form={form} back={back} of={of} />;
+  }
+
+  if (state === "scan" || (state === "writing" && !paste) || (plugin && state === "checking"))
     return (
       <Form {...form} title="扫码" step={`第 2 / ${of} 步`} back={back}>
-        <Scan flow={flow} />
+        <Scan flow={flow} plugin={Boolean(plugin)} />
         {platform === "feishu" && (
           <button type="button" onClick={() => (cancel(), void start(true))} className="mx-auto -mt-1 h-9 px-2 text-sm text-muted-foreground transition-colors hover:text-foreground">
             改为粘贴 App ID 和密钥
@@ -227,21 +244,22 @@ function SlotSelect({ slots, value, pick }: { slots: Card[]; value: string | nul
 }
 
 /** The scan (story 674): 在 QQ 里打开 and its link to copy on top, the QR code and 等你扫码 under them. */
-function Scan({ flow }: { flow: FlowView }) {
-  const open = flow.platform === "feishu" ? "在飞书里打开" : "在 QQ 里打开";
+function Scan({ flow, plugin }: { flow: FlowView; plugin: boolean }) {
+  const open = plugin ? "打开绑定链接" : flow.platform === "feishu" ? "在飞书里打开" : "在 QQ 里打开";
+  const url = !plugin || (flow.url && /^https?:\/\//i.test(flow.url)) ? flow.url : undefined;
   return (
     <>
-      <div className="flex gap-2">
+      {(!plugin || url) && <div className="flex gap-2">
         {/* Greyed till the first QR code comes with its link. */}
-        <a href={flow.url} aria-disabled={!flow.url} target="_blank" rel="noreferrer" className={buttonVariants({ size: "lg", className: cn("h-11 flex-1 text-base", !flow.url && "pointer-events-none opacity-50") })}>
+        <a href={url} aria-disabled={!url} target="_blank" rel="noreferrer" className={buttonVariants({ size: "lg", className: cn("h-11 flex-1 text-base", !url && "pointer-events-none opacity-50") })}>
           {open}
         </a>
-        <CopyKey text={flow.url ?? ""} disabled={!flow.url} className={buttonVariants({ variant: "outline", size: "icon-lg", className: "size-11 shrink-0" })} icon="size-4" />
-      </div>
+        <CopyKey text={url ?? ""} disabled={!url} className={buttonVariants({ variant: "outline", size: "icon-lg", className: "size-11 shrink-0" })} icon="size-4" />
+      </div>}
       {flow.svg && <img alt="二维码" src={`data:image/svg+xml;utf8,${encodeURIComponent(flow.svg)}`} className="mx-auto size-56 rounded-md" />}
       <p className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
         <LoaderCircle className="size-4 animate-spin" />
-        {flow.state === "writing" ? "正在写入" : "等你扫码"}
+        {flow.state === "writing" ? "正在写入" : flow.state === "checking" ? "等待平台确认" : flow.statusText ?? "等你扫码"}
       </p>
     </>
   );
@@ -266,6 +284,33 @@ function Secret({ label, value, set, error }: { label: string; value: string; se
 
 /** What is pasted (story 676): Telegram's token, or Feishu's App ID and secret, checked by rhodium; why
  *  not under the box. */
+function PluginInput({ flow, prompt, form, back, of }: { flow: FlowView; prompt: NonNullable<FlowView["prompt"]>; form: { open: boolean; close: () => void }; back: () => void; of: number }) {
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    if (busy || !value.trim()) return;
+    setBusy(true);
+    setError(null);
+    const reply = await call("POST", "api/bots/flow/credentials", { id: flow.id, value });
+    if (reply.ok) setValue("");
+    else setError(reply.error);
+    setBusy(false);
+    void queryClient.invalidateQueries({ queryKey: ["bot-flow", flow.id] });
+  };
+  return (
+    <Form {...form} error={error} title="验证" step={`第 2 / ${of} 步`} back={back} submit={() => void submit()}>
+      {prompt.secret ? <Secret label={prompt.label} value={value} set={setValue} /> : (
+        <Field.Root className="grid gap-1">
+          <Field.Label className="text-xs text-muted-foreground">{prompt.label}</Field.Label>
+          <Field.Control value={value} onValueChange={setValue} autoComplete="off" spellCheck={false} className={FIELD} />
+        </Field.Root>
+      )}
+      <Submit busy={busy} disabled={!value.trim()}>下一步</Submit>
+    </Form>
+  );
+}
+
 function Paste({ flow, form, back, of }: { flow: FlowView; form: { open: boolean; close: () => void }; back: () => void; of: number }) {
   const feishu = flow.platform === "feishu";
   const [token, setToken] = useState("");

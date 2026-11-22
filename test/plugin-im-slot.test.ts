@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { join, resolve } from "node:path";
 import { readFileSync, writeFileSync } from "node:fs";
-import { newInstance, recorded, until, type InstanceOptions } from "./instance";
+import { BOARD_LOGIN, newInstance, recorded, until, type InstanceOptions } from "./instance";
 
 type Update = { sender: string; channel: string; messageId: string; text: string; at: number; attachments?: { id: string; kind: "file"; name: string }[] };
 
@@ -46,6 +46,50 @@ function platform(beforeReply?: (method: string, text: string) => Promise<Respon
 }
 const dm = (messageId: string, text: string, sender = "user-1", channel = "dm-channel-99"): Update =>
   ({ sender, channel, text, messageId, at: Date.now() });
+
+test("the board runs an IM plugin wizard and pairs the bot without exposing credentials", async () => {
+  const mock = platform();
+  const instance = newInstance({ toml: [
+    "[plugins.local-im]", "path = " + JSON.stringify(resolve(import.meta.dir, "../examples/plugins/local-im")),
+    "[plugins.local-im.config]", "endpoint = " + JSON.stringify(mock.http.url.origin),
+  ].join("\n") });
+  const secret = "test-only-web-wizard-token";
+  try {
+    const daemon = await instance.start();
+    await instance.slots("a");
+    const address = daemon.logs.find(line => line.msg === "ready")?.board;
+    const headers = { "Tailscale-User-Login": BOARD_LOGIN, "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json" };
+    const request = async (path: string, body?: object) => {
+      const response = await fetch(`http://${address}/api/${path}`, {
+        headers, ...(body && { method: "POST", body: JSON.stringify(body) }),
+      });
+      expect(response.status).toBe(200);
+      const data = await response.text();
+      expect(data).not.toContain(secret);
+      return JSON.parse(data);
+    };
+    const board = await request("board");
+    expect(board.metadata.platforms).toContainEqual(expect.objectContaining({ id: "local-im", wizard: true }));
+    const begun = await request("bots/flow", { name: "from-board", platform: "local-im", target: "w/a" });
+    expect(begun.ok).toBe(true);
+    const id = begun.flow.id;
+    const read = async () => (await request(`bots/flow?id=${id}`)).flow;
+    await until(async () => (await read()).state === "paste");
+    expect((await read()).prompt).toEqual({ label: "本地平台的 token", secret: true });
+    expect((await request("bots/flow/credentials", { id, value: secret })).ok).toBe(true);
+    await until(async () => (await read()).state === "pairing");
+    const pair = await read();
+    expect(pair.code).toBeTruthy();
+    expect(pair.target).toBe("w/a");
+    mock.batches.push([dm("web-pair", pair.code)]);
+    await until(async () => (await read()).state === "done");
+    expect((await instance.ok("pair", "from-board", "--list"))).toContain("user-1");
+    expect(readFileSync(instance.config, "utf8")).toContain(secret);
+  } finally {
+    await instance.cleanup();
+    mock.http.stop(true);
+  }
+}, 20_000);
 
 test("pairing a plugin DM binds its sender, and a fresh plugin sends to its saved platform channel", async () => {
   const p = platform();
