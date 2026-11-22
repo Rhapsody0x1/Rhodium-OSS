@@ -47,7 +47,7 @@ function writeFakeProgram(dir: string, env: Record<string, string>): string {
   return p;
 }
 
-function runtimeInit(program: string): { type: "init"; [k: string]: unknown } {
+function runtimeInit(program: string, approval = false): { type: "init"; [k: string]: unknown } {
   return {
     type: "init",
     proto: 1,
@@ -56,7 +56,7 @@ function runtimeInit(program: string): { type: "init"; [k: string]: unknown } {
     cwd: makeTempDir(),
     systemPromptFile: "",
     program,
-    approval: false,
+    approval,
     model: "deepseek-chat",
     effort: null,
     resumed: false,
@@ -169,6 +169,30 @@ describe("dsh 真实传输层(假 dsh)", () => {
     expect(String(error.detail)).toContain("invalid api key (fake)");
     const end = await io.waitFor((f) => f.type === "turn_end", "turn_end", 15000);
     expect(String(end.reply)).toContain("dsh 出错");
+    await cleanup(io);
+    rmSync(dir, { recursive: true, force: true });
+  }, 25000);
+
+  test("等待审批时中断:旧 dsh 退出后才发 turn_end,紧接的下一条消息能正常续接", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dsh-rt-"));
+    const lockFile = join(dir, "session.lock");
+    const program = writeFakeProgram(dir, { FAKE_DSH_LOCK_FILE: lockFile });
+    const io = new Harness(new DshAgentPlugin());
+    io.write(runtimeInit(program, true));
+    await io.waitFor((f) => f.type === "ready", "ready", 15000);
+    io.write({ type: "send", id: "in-1", text: "need approval to delete", human: true, mode: "turn" });
+    const ask = await io.waitFor((f) => f.type === "ask", "ask", 15000);
+    const oldPid = Number(readFileSync(lockFile, "utf8").trim());
+
+    io.write({ type: "interrupt" });
+    await io.waitFor((f) => f.type === "ask_cancel" && f.requestId === ask.requestId, "ask_cancel", 15000);
+    await io.waitFor((f) => f.type === "turn_end", "interrupted turn_end", 15000);
+    expect(processAlive(oldPid)).toBe(false); // 旧进程(收到 SIGTERM 后 400ms 才退出)已退出
+
+    // 核心收到 turn_end 后立刻投递下一条:新 dsh 的 session/resume 不应被旧进程的会话锁拒绝
+    io.write({ type: "send", id: "in-2", text: "next one", human: true, mode: "turn" });
+    const end = await io.waitFor((f) => f.type === "turn_end" && typeof f.reply === "string", "resumed turn_end", 15000);
+    expect(String(end.reply)).toContain("Echo: next one");
     await cleanup(io);
     rmSync(dir, { recursive: true, force: true });
   }, 25000);

@@ -101,6 +101,8 @@ export class DshAgentPlugin implements AgentPlugin {
   private fixturePeer: FixturePeer | null = null;
   private transport: DshTransport | null = null;
   private launching: Promise<void> | null = null;
+  /** 中断时正在退出的旧 dsh;新一代必须等它退出再拉起,否则 session/resume 会被会话锁拒绝。 */
+  private dying: Promise<void> | null = null;
   private closing = false;
   private activeTurn = false;
   private currentInputId: string | null = null;
@@ -237,6 +239,7 @@ export class DshAgentPlugin implements AgentPlugin {
 
   private async relaunch(): Promise<void> {
     if (this.closing) return;
+    await this.dying;
     await this.launchTransport();
     await this.handshake();
     if (this.sessionWritten) await this.resumeSession();
@@ -549,8 +552,14 @@ export class DshAgentPlugin implements AgentPlugin {
     this.currentInputId = null;
     const transport = this.transport;
     this.transport = null;
-    if (transport && !hadPending) await transport.kill();
-    else transport?.kill().catch(() => {});
+    // 不论有没有等待中的提问,都等旧 dsh 退出后再发 turn_end:核心收到 turn_end 可能立刻投递下一条,
+    // 新 dsh 的 session/resume 会被还没退出的旧进程的会话锁拒绝,槽位因此 fatal。
+    if (transport) {
+      const dying = transport.kill().catch((err) => ctx.log(`[dsh] 终止旧进程失败:${(err as Error).message}`));
+      this.dying = dying;
+      await dying;
+      if (this.dying === dying) this.dying = null;
+    }
     this.pendingToolCalls.clear();
     ctx.turnEnd(); // 不带 reply,槽位回到空闲
     const done = this.turnDone;
