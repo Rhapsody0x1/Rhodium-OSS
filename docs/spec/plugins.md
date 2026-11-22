@@ -177,7 +177,7 @@ Agent 插件由 `rh-hold` 直接作为子进程拉起。进程内通过 stdin（
 
 ```json
 {"type":"init","proto":1,"conv":"01JXYZ0001","session":{"new":"conv-uuid-1"},"cwd":"/tmp/demo","systemPromptFile":"/tmp/state/prompt/slot1.md","program":"dsh","approval":false,"model":null,"effort":null,"resumed":false,"config":{"fixture":"/tmp/dsh-sample.jsonl"}}
-{"type":"ready","proto":1,"session":"conv-uuid-1","capabilities":{"liveApproval":false,"steer":false,"commands":["model","status","context"]}}
+{"type":"ready","proto":1,"session":"conv-uuid-1","capabilities":{"liveApproval":true,"steer":false,"commands":["compact"]}}
 {"type":"send","id":"in-001","text":"[来自 网页]\n列出当前目录","human":true,"mode":"turn"}
 {"type":"taken","inputId":"in-001"}
 {"type":"turn_start","input":"in-001"}
@@ -584,12 +584,12 @@ runImPlugin(new WeixinImPlugin());
     "win32": ["bun.exe", "run", "${PLUGIN_DIR}/dist/index.js"]
   },
   "capabilities": {
-    "liveApproval": false,
+    "liveApproval": true,
     "steer": false,
-    "commands": ["model", "status", "context"]
+    "commands": ["compact"]
   },
   "requiredConfig": [],
-  "optionalConfig": ["fixture"],
+  "optionalConfig": ["provider", "model", "fixture"],
   "icon": "icon.svg"
 }
 ```
@@ -906,7 +906,8 @@ target = "work/main"
 
 - **对接途径**：插件常驻，拉起一个 `dsh --profile sdk`（等价写法 `dsh sdk`），在它的 stdio 上讲 dsh 原生的 SDK JSON-RPC 协议。
   - 协议是 JSON-RPC 2.0，一行一帧，以 `\n` 结尾。dsh 的 stdout 只放协议帧，诊断写 stderr，插件把它转进自己的 stderr。
-  - 一个插件进程对应一个槽位，只开一个 dsh 会话。dsh 的 `session.event` 会推送运行时里所有会话（含子 agent 的子会话），插件只认 `sessionId` 等于本槽位会话的那些。
+  - 一个插件进程对应一个槽位，只开一个 dsh 会话。dsh 的 `session.event` 和 `session.status` 都会推送运行时里所有会话（含进程内子 agent 的子会话，带的是子会话 ID），插件对这两种通知只认 `sessionId` 等于本槽位会话的那些。否则一个子 agent 停下就会让插件提前发 `turn_end`：`reply` 被截断，核心还会在回合中途投递排队的消息。
+  - `approval/request` 和 `user-question/ask` 不按会话过滤：子 agent 的审批和提问也交给这个客户端，插件照样转成 `ask`。
   - 被否掉的另两条路：`dsh acp`（2026-11-22 前的方案）多套一层通用协议，dsh 自己的审批、提问和恢复语义要再翻一遍；`dsh headless --json` 每个任务起一个进程、跑完就退，审批只能预设 `ask`/`never`，没有回传通道，提问和中断都接不上。
 - **启动与握手（`init` → `initialize` → `ready`）**：
   - 插件用 `init.program`（`[programs.dsh]` 覆盖值，默认 `"dsh"`）拉起 `dsh --profile sdk`，然后发 `initialize`：
