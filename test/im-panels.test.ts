@@ -443,6 +443,14 @@ test("a buttonless /rh_help offers numbered commands and accepts a choice", asyn
   await reads("q", 2, "这里的消息改交给 w/b。");
 }, 30_000);
 
+test("a buttonless /rh_help: picking 改名… sends /rh_rename, which answers with its example", async () => {
+  await start(["a"], { bots: { q: { like: "qq", owner: ME, target: "w/a", buttons: "false", markdown: "false" } } });
+  await say("q", "/rh_help");
+  expect((await shown("q", 1))[0]!.text).toContain("5. 改名…");
+  await say("q", "5");
+  await reads("q", 1, "/rh_rename 后面写新名字，例如 /rh_rename new-name；改别的槽位，先写槽位，例如 /rh_rename w/a new-name。");
+}, 30_000);
+
 test("stories 328, 329 on QQ: /rh_help is Rhodium's home: who this chat goes to, then a button for each function on one page, unnumbered; 改名… fills the input box", async () => {
   await start(["a"]);
   await say("q", "/rh_help");
