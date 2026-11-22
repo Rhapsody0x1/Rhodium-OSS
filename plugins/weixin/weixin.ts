@@ -165,8 +165,8 @@ export class Weixin implements ImPlugin {
     if (!this.session || !attachment) throw new Error("Unknown Weixin attachment");
     try {
       return await download(this.session.cdn, attachment, dest, this.stop.signal);
-    } catch {
-      throw new Error("Weixin attachment download failed");
+    } catch (error) {
+      throw new Error(error instanceof Error && error.message ? error.message : "Weixin attachment download failed");
     }
   }
 

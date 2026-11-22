@@ -17,6 +17,7 @@ export function startMock({ port = 0, seed = false, wizardRedirectHost }: {
   const uploads = new Map<string, MockUpload>();
   const blobs = new Map<string, ArrayBuffer>();
   const qrPolls = new Map<string, number>();
+  const downloadFailures: number[] = [];
   let qrCount = 0, loseReceipt = false;
   const queue = (inputs: MockInput[]) => batches.push(inputs.map(input => ({
     from_user_id: input.sender ?? mockChat, message_id: input.id, message_type: 1, message_state: 2,
@@ -46,6 +47,8 @@ export function startMock({ port = 0, seed = false, wizardRedirectHost }: {
       return new Response(null, { headers: { "x-encrypted-param": upload.param } });
     }
     if (route === "/c2c/download" && req.method === "GET") {
+      const failure = downloadFailures.shift();
+      if (failure) return reject(failure);
       const bytes = blobs.get(url.searchParams.get("encrypted_query_param") ?? "");
       return bytes ? new Response(bytes) : reject(404);
     }
@@ -116,6 +119,8 @@ export function startMock({ port = 0, seed = false, wizardRedirectHost }: {
   return { server, queue, sent, cursors, chat: mockChat, contextToken: mockContext,
     config: { token: mockToken, baseUrl: server.url.origin, cdnBaseUrl: `${server.url.origin}/c2c` },
     loseNextReceipt() { loseReceipt = true; },
+    failDownloads(...statuses: number[]) { downloadFailures.push(...statuses); },
+    putBlob(param: string, bytes: Uint8Array) { blobs.set(param, bytes.slice().buffer); },
   };
 }
 

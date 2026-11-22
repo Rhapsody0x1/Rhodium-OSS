@@ -50,6 +50,8 @@ export class HttpError extends Error {
 
 export class HttpTimeout extends Error {}
 
+export class HttpInterrupted extends Error {}
+
 export async function request(url: URL, options: RequestInit, signal: AbortSignal, timeout: number) {
   const deadline = AbortSignal.timeout(timeout);
   try {
@@ -60,7 +62,7 @@ export async function request(url: URL, options: RequestInit, signal: AbortSigna
     if (!signal.aborted && (deadline.aborted || (error instanceof DOMException && error.name === "TimeoutError"))) {
       throw new HttpTimeout("Weixin HTTP request timed out");
     }
-    throw new Error("Weixin HTTP request interrupted");
+    throw new HttpInterrupted("Weixin HTTP request interrupted");
   }
 }
 
@@ -70,6 +72,7 @@ export async function json<T>(url: URL, options: RequestInit, signal: AbortSigna
   let result: unknown;
   try {
     const body = await response.text();
+    // Mirrors Tencent/openclaw-weixin@ffc7ae16 src/api/api.ts LOSSLESS_ID_FIELDS / parseWeixinApiJson.
     result = JSON.parse(body.replace(
       /("(?:message_id|msg_id|svr_id)"\s*:\s*)(\d+)(?=\s*[,}])|"(?:[^"\\]|\\[\s\S])*"/g,
       (token, field?: string, digits?: string) => field === undefined ? token : field + JSON.stringify(digits),

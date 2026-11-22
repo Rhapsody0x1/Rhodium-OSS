@@ -1,13 +1,18 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type { OutboundMessageWire } from "../../packages/plugin-sdk";
-import { endpoint, HttpError, ILink, type Item, type Media, replyCode, type Reply, request } from "./api";
+import {
+  endpoint, HttpError, HttpInterrupted, HttpTimeout, ILink, type Item, type Media, replyCode, type Reply, request, serviceUrl,
+} from "./api";
 
 export const maxFileBytes = { image: 10 * 1024 * 1024, file: 25 * 1024 * 1024 };
 
 export type Attachment = { media: Media; key?: string; kind: "image" | "file" };
 
 function cdnUrl(root: string, path: string, full?: string, query?: string, filekey?: string) {
-  if (full) return new URL(full);
+  if (full) {
+    // Never echo the address: it may carry tokens.
+    try { return serviceUrl(full); } catch { throw new Error("Invalid Weixin media address"); }
+  }
   if (!query) throw new Error("Weixin media address missing");
   const url = endpoint(root, path);
   url.searchParams.set("encrypted_query_param", query);
@@ -27,11 +32,30 @@ function decodeKey(attachment: Attachment) {
   throw new Error("Invalid Weixin media key");
 }
 
+class TooLarge extends Error {
+  constructor() { super("Weixin attachment exceeds the size limit"); }
+}
+
+const transient = (error: unknown) => error instanceof HttpTimeout || error instanceof HttpInterrupted ||
+  (error instanceof HttpError && error.status >= 500);
+
 export async function download(root: string, attachment: Attachment, dest: string, signal: AbortSignal) {
+  try {
+    return await downloadOnce(root, attachment, dest, signal);
+  } catch (error) {
+    if (signal.aborted || !transient(error)) throw error;
+    await Bun.sleep(1_000);
+    return downloadOnce(root, attachment, dest, signal);
+  }
+}
+
+async function downloadOnce(root: string, attachment: Attachment, dest: string, signal: AbortSignal) {
   const { media, kind } = attachment;
   const key = decodeKey(attachment);
   if (!key && kind !== "image") throw new Error("Weixin media key missing");
-  const response = await request(cdnUrl(root, "download", media.full_url, media.encrypt_query_param), {}, signal, 20_000);
+  // The deadline covers the body too: 20 s plus about 100 KB/s up to the size limit.
+  const timeout = 20_000 + maxFileBytes[kind] / 100;
+  const response = await request(cdnUrl(root, "download", media.full_url, media.encrypt_query_param), {}, signal, timeout);
   if (!response.ok) throw new HttpError(response.status);
   const max = maxFileBytes[kind];
   const reader = response.body?.getReader();
@@ -43,19 +67,21 @@ export async function download(root: string, attachment: Attachment, dest: strin
       const { value, done } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > max + (key ? 16 : 0)) throw new Error("Weixin attachment exceeds the size limit");
+      if (total > max + (key ? 16 : 0)) throw new TooLarge();
       chunks.push(value);
     }
   } catch (error) {
     await reader.cancel().catch(() => {});
-    throw error;
+    if (error instanceof TooLarge) throw error;
+    if (error instanceof DOMException && error.name === "TimeoutError") throw new HttpTimeout("Weixin HTTP request timed out");
+    throw new HttpInterrupted("Weixin HTTP request interrupted");
   } finally { reader.releaseLock(); }
   let bytes = Buffer.concat(chunks);
   if (key) {
     const cipher = createDecipheriv("aes-128-ecb", key, null);
     bytes = Buffer.concat([cipher.update(bytes), cipher.final()]);
   }
-  if (bytes.length > max) throw new Error("Weixin attachment exceeds the size limit");
+  if (bytes.length > max) throw new TooLarge();
   await Bun.write(dest, bytes);
   return { ok: true as const, size: bytes.length };
 }

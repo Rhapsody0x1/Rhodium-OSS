@@ -225,3 +225,46 @@ test("uploads encrypted media and downloads it only on attachment request", asyn
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function withImage(full: (cdn: string) => string, verify: (
+  fetchIt: () => Promise<unknown>, mock: ReturnType<typeof startMock>,
+) => Promise<void>) {
+  const root = await mkdtemp(join(tmpdir(), "rhodium-weixin-fetch-"));
+  const mock = startMock({ seed: true });
+  const state = core();
+  const plugin = new Weixin();
+  try {
+    await plugin.init({ proto: 1, botId: "test", botName: "test", config: mock.config }, state.ctx);
+    mock.putBlob("plain", Buffer.from("plain image"));
+    mock.queue([{ id: 2, items: [{ type: 2, image_item: { media: { full_url: full(mock.config.cdnBaseUrl) } } }] }]);
+    await until(() => state.seen.has("2"));
+    const id = state.seen.get("2")!.attachments![0]!.id;
+    await verify(() => plugin.fetchAttachment(id, join(root, "dest.png")), mock);
+  } finally {
+    await plugin.shutdown();
+    await mock.server.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("retries an attachment download once after a server error", async () => {
+  await withImage(cdn => `${cdn}/download?encrypted_query_param=plain`, async (fetchIt, mock) => {
+    mock.failDownloads(503);
+    expect(await fetchIt()).toEqual({ ok: true, size: 11 });
+  });
+});
+
+test("does not retry a rejected attachment download and reports why", async () => {
+  await withImage(cdn => `${cdn}/download?encrypted_query_param=plain`, async (fetchIt, mock) => {
+    mock.failDownloads(403);
+    await expect(fetchIt()).rejects.toThrow("Weixin HTTP 403");
+  });
+});
+
+test("never echoes a malformed attachment URL in the error", async () => {
+  await withImage(() => "http://[secret-token", async fetchIt => {
+    const error = await fetchIt().catch((e: Error) => e) as Error;
+    expect(error.message).not.toContain("secret-token");
+    expect(error.message).toBe("Invalid Weixin media address");
+  });
+});
