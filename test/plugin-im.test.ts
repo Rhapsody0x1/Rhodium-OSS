@@ -163,22 +163,24 @@ test("a rejected inbound transaction gets an RPC error while the next request st
   } finally { await f.close(); }
 });
 
-test("a plugin reporting consecutive platform failures trips the breaker even while its process is alive", async () => {
+test("a live plugin reporting platform failures past the bot failure limit keeps running and recovers when it reports up", async () => {
   const f = fixture(`
     if (m.method === "init") {
       send({id:m.id,result:{proto:1,capabilities:caps}});
-      for (const up of [false,true,false,false]) send({method:"connected",params:{up,error:"test-credential"}});
+      for (let i = 0; i < 4; i++) send({method:"connected",params:{up:false,error:"test-credential"}});
+      setTimeout(() => send({method:"connected",params:{up:true}}), 200);
     }
+    if (m.method === "send") send({id:m.id,result:{status:"sent",messageId:"after-" + process.pid}});
   `, { botFailures: 2 });
   try {
-    const status: boolean[] = [];
-    for await (const _ of f.adapter.messages((up, why) => {
-      expect(why).toBe("[redacted]");
-      status.push(up);
-    }, f.stop.signal)) {}
-    expect(status).toEqual([false,true,false,false]);
-    expect(f.adapter.faulted).toBe(true);
-    expect(f.adapter.initFailed).toBe(false);
+    const status: (boolean | string | undefined)[] = [];
+    let pid: number | null = null;
+    f.adapter.messages((up, why) => { pid ??= f.adapter.pid; status.push(up ? up : why); }, f.stop.signal);
+    await until(() => status.includes(true));
+    expect(status).toEqual(["[redacted]", "[redacted]", "[redacted]", "[redacted]", true]);
+    expect(f.adapter.faulted).toBe(false);
+    expect(f.adapter.pid).toBe(pid);
+    expect(await f.adapter.send("u", { text: "back" })).toEqual({ status: "sent", messageId: "after-" + pid });
   } finally { await f.close(); }
 });
 
