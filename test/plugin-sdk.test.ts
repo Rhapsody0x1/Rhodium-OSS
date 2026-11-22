@@ -1561,7 +1561,7 @@ process.stdin.resume();
     const imRes = await runConformance(join(REPO_ROOT, "examples", "plugins", "local-im", "plugin.json"));
     expect(imRes.stderr).toBe("");
     expect(imRes.code).toBe(0);
-    expect(imRes.stdout.match(/^ok \d+ - /gm)).toHaveLength(7);
+    expect(imRes.stdout.match(/^ok \d+ - /gm)).toHaveLength(8); // local-im declares the bot wizard: one more group
   }, 20_000);
 
   test.skipIf(process.platform !== "win32")("conformance launches a .cmd wrapper in a directory with spaces on Windows", async () => {
@@ -1652,7 +1652,7 @@ process.stdin.resume();
     const example = JSON.parse(readFileSync(join(REPO_ROOT, "examples/plugins/local-im/plugin.json"), "utf8"));
     const caps = { ...example.capabilities, buttons: "markdown", maxTextLength: 8,
       sendLimit: {kind:"rate",perChatPerSecond:100}, menu: {scope:"per_chat", maxItems:1, row:"reply_keyboard"} };
-    writeFileSync(file, JSON.stringify({ ...example, icon: undefined, capabilities: caps }));
+    writeFileSync(file, JSON.stringify({ ...example, icon: undefined, wizard: undefined, capabilities: caps }));
     writeFileSync(join(dir, "conformance.json"), JSON.stringify({ stateless:true, failureChat:"refused" }));
     writeFileSync(join(dir, "index.ts"), `
       import { appendFileSync } from "node:fs";
@@ -1712,7 +1712,7 @@ process.stdin.resume();
       markdown: null, sendLimit: {kind:"rate", perChatPerSecond:10}, maxFileBytes:{file:100,image:100} };
     const keys = { "dm:conf-user-1": "channel-99", sync_buf: "cursor-1", "ctx:conf-user-1": "context-123" };
     const file = join(dir, "plugin.json");
-    writeFileSync(file, JSON.stringify({ ...example, icon: undefined, id: "plain-im", capabilities: caps }));
+    writeFileSync(file, JSON.stringify({ ...example, icon: undefined, wizard: undefined, id: "plain-im", capabilities: caps }));
     writeFileSync(join(dir, "conformance.json"), JSON.stringify({ kept: keys, normalText: "hi", failureChat: "missing" }));
     writeFileSync(join(dir, "index.ts"), `
       import { runImPlugin } from ${JSON.stringify(join(REPO_ROOT, "packages/plugin-sdk/index.ts"))};

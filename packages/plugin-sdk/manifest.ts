@@ -69,6 +69,8 @@ export type ImPluginManifest = ManifestBase & {
   label: string;
   protocol: "rh-im/1";
   capabilities: Capabilities;
+  /** Runs the rh bot wizard (spec §3.6). */
+  wizard?: boolean;
 };
 
 export type PluginManifest = AgentPluginManifest | ImPluginManifest;
@@ -465,6 +467,9 @@ export function validateManifest(
       errors.push("program references forbidden claude executable");
     }
     validateAgentCapabilitiesStatic(json.capabilities, errors);
+    if (json.wizard !== undefined) {
+      errors.push("wizard is only valid for IM plugins");
+    }
   } else if (kind === "im") {
     if (json.protocol !== "rh-im/1") {
       errors.push('protocol must be "rh-im/1" for IM plugins');
@@ -477,6 +482,9 @@ export function validateManifest(
     }
     if (json.program !== undefined) {
       errors.push("program is only valid for agent plugins");
+    }
+    if (json.wizard !== undefined && typeof json.wizard !== "boolean") {
+      errors.push("wizard must be a boolean");
     }
     const capsRes = validateImCapabilities(json.capabilities);
     if (!capsRes.ok) {

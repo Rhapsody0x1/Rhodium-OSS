@@ -129,6 +129,21 @@ export interface ImContext {
   log(message: string): void;
 }
 
+/** The bot wizard's request (spec §3.6): config is the plugin's [plugins.<id>.config] alone. */
+export type ImWizardParams = { botName: string; config: Record<string, string> };
+
+/** What a wizard reports, step by step; input waits for the user's answer. signal: the user cancelled. */
+export interface ImWizardContext {
+  qr(data: string, text?: string): void;
+  link(url: string, text?: string): void;
+  waiting(text: string): void;
+  input(label: string, opts?: { secret?: boolean }): Promise<string>;
+  signal: AbortSignal;
+}
+
+/** The wizard's done step: the fields written into [bots.<name>]. */
+export type ImWizardDone = { config: Record<string, string>; text?: string };
+
 export interface ImPlugin {
   init(params: ImInitParams, ctx: ImContext): Promise<Capabilities>;
   send(chat: string, message: OutboundMessageWire, ctx: ImContext): Promise<SendResult>;
@@ -139,6 +154,7 @@ export interface ImPlugin {
   setMenu?(items: MenuItem[], chat: string | undefined, ctx: ImContext): Promise<void>;
   setRow?(row: RowButton[], chat: string | undefined, ctx: ImContext): Promise<void>;
   profile?(you: string | null, ctx: ImContext): Promise<ImProfile>;
+  wizard?(params: ImWizardParams, ctx: ImWizardContext): Promise<ImWizardDone>;
   shutdown?(): Promise<void>;
 }
 
@@ -258,6 +274,19 @@ export async function runImPlugin(
     log(message) {
       logStderr(message, stderr);
     },
+  };
+
+  const step = (params: Record<string, string>) => writeRpc({ jsonrpc: "2.0", method: "wizard_step", params });
+  const wizardCtx: ImWizardContext = {
+    qr: (data, text) => step({ kind: "qr", data, ...(text !== undefined && { text }) }),
+    link: (url, text) => step({ kind: "link", url, ...(text !== undefined && { text }) }),
+    waiting: (text) => step({ kind: "waiting", text }),
+    async input(label, opts) {
+      const res = await callCore<{ value?: unknown }>("wizard_input", { label, ...(opts?.secret !== undefined && { secret: opts.secret }) });
+      if (typeof res?.value !== "string") throw new Error("Core answered wizard_input without a string value");
+      return res.value;
+    },
+    signal: stopController.signal,
   };
 
   const runBoundedShutdown = (): Promise<void> => {
@@ -464,6 +493,26 @@ export async function runImPlugin(
         } catch (err) {
           logStderr(`plugin.profile() failed: ${formatError(err)}`, stderr);
           respondResult(req.id, {});
+        }
+        return;
+      }
+      case "wizard": {
+        // A process run for one wizard (spec §3.6): it never inits, and exits once the wizard is done.
+        if (!plugin.wizard) {
+          respondError(req.id, -32601, "Method wizard is not supported");
+          await terminate(1, false);
+          return;
+        }
+        try {
+          const done = await plugin.wizard({ botName: params.botName as string, config: (params.config ?? {}) as Record<string, string> }, wizardCtx);
+          if (stopController.signal.aborted || finished) return;
+          respondResult(req.id, done);
+          await terminate(0, false);
+        } catch (err) {
+          if (stopController.signal.aborted || finished) return;
+          logStderr(`plugin.wizard() failed: ${formatError(err)}`, stderr);
+          respondError(req.id, -32000, errorMessage(err));
+          await terminate(1, false);
         }
         return;
       }

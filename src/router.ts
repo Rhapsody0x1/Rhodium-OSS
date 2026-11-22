@@ -4483,8 +4483,14 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
       if (!BOT_NAME.test(name)) refuse(`Bot 名字只能由英文字母、数字和 _ - 组成，不超过 64 个字符：${name}`);
       if (name === "me") refuse("Bot 不能叫 me：rh send me 另有用处。");
       if (name === "web") refuse("Bot 不能叫 web：还在跑的 agent 可能照旧写 rh send web。");
-      if (!Object.hasOwn(MADE, platform)) refuse(`平台只能是 ${series(Object.keys(MADE), "或")}：${platform}`);
-      const how = MADE[platform as Made];
+      // A loaded IM plugin that declares the wizard makes its bots too (spec plugins §3.6), at the terminal only.
+      const rec = ctx.plugins?.plugins[platform];
+      const im = rec?.status === "loaded" && rec.manifest.kind === "im" ? rec.manifest : undefined;
+      if (!Object.hasOwn(MADE, platform) && !im) refuse(`平台只能是 ${series(Object.keys(MADE), "或")}：${platform}`);
+      if (im && !im.wizard) refuse(`插件 ${platform} 没有建 Bot 向导：在配置文件里手写 [bots.${name}]，再用 rh pair ${name} 配对。`);
+      if (im && who.kind === "you" && who.board === true) refuse(`插件 ${platform} 的 Bot 只能在终端用 rh bot 建。`);
+      if (im && (values["api-root"] !== undefined || values.paste)) refuse(`插件平台不收 --api-root 和 --paste：要指向本地模拟服务，写在 [plugins.${platform}.config] 里。`);
+      const how: BotDef = im ? { needed: im.requiredConfig ?? [], optional: im.optionalConfig ?? [], how: "", another: "再走一次向导，换一个账号" } : MADE[platform as Made];
       // Not the row of one rh bot rm took out, which a bot of its name takes over (architecture §14.8).
       if (Object.hasOwn(ctx.config.bots, name)) refuse(`已经有 Bot ${name}。`);
       const apiRoot = values["api-root"];
@@ -4498,17 +4504,25 @@ function rh(state: State, input: RhInput, who: Caller, ctx: Ctx, d: Decision): s
         refuse(`没有主 Bot 的默认目标可以照搬。写明绑定到哪个槽位：rh bot ${name} ${platform} <工作区/槽位>`);
       const bound = slotView(state, slot).ref;
       const creds = input.credentials;
-      if (!creds) return `建${amid(PLATFORMS[platform as Made].label).trimEnd()} Bot ${name}，建完绑定到 ${bound}。`;
+      if (!creds) return `建${amid(im ? im.label : PLATFORMS[platform as Made].label).trimEnd()} Bot ${name}，建完绑定到 ${bound}。`;
       // Only the keys the platform's credentials have, so they cannot stand in for platform or target.
       const { needed, optional } = how;
       const keys = Object.keys(creds);
-      if (!needed.every((k) => creds[k]) || !keys.every((k) => needed.includes(k) || optional.includes(k))) {
+      if (im) {
+        // The wizard's done fields (spec plugins §3.6): declared keys only, never the owner, and with
+        // the plugin's own config every required key.
+        const bad = keys.find((k) => ["platform", "target", "owner"].includes(k) || !(needed.includes(k) || optional.includes(k)));
+        if (bad) refuse(`插件 ${platform} 的向导给的字段不对：${["platform", "target", "owner"].includes(bad) ? `不收 ${bad}` : `清单里没有 ${bad}`}。`);
+        const shared = ctx.config.plugins[platform]?.config ?? {};
+        const missing = needed.find((k) => !(creds[k] || shared[k]));
+        if (missing) refuse(`插件 ${platform} 的向导给的字段不对：缺 ${missing}。`);
+      } else if (!needed.every((k) => creds[k]) || !keys.every((k) => needed.includes(k) || optional.includes(k))) {
         refuse(`Bot ${name} 的凭据不对：要有 ${needed.join(" 和 ")}。`);
       }
       // A bot already in use here: a second connection to it would push the first off, and back; on
       // Feishu, each message goes to one of the two at random.
-      const key = needed[0]!;
-      const twin = Object.keys(ctx.config.bots).find((b) => ctx.config.bots[b]![key] === creds[key]);
+      const key = needed[0];
+      const twin = key !== undefined && creds[key] !== undefined && Object.keys(ctx.config.bots).find((b) => ctx.config.bots[b]![key] === creds[key]);
       if (twin) refuse(`配置里已经有这个 Bot 了，叫 ${twin}。要再建一个，${how.another}。`);
       d.effects.push({ kind: "add_bot", id: input.id, name, table: { platform, ...creds, ...(apiRoot !== undefined && { apiRoot }), target: bound } });
       return `已把 Bot ${name} 写进配置文件并启用，绑定到 ${bound}。`;

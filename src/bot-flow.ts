@@ -3,12 +3,16 @@
 // Feishu), a new QR code when one expires, the check of what you paste (Telegram's getMe, Feishu's
 // tenant token), writing the bot in through the router, as rh bot did, and its pairing code. A flow
 // lives in memory alone: a restart drops one unfinished. Credentials stay in memory only till the
-// config has them: never in a reply, an event, a log line or the database.
+// config has them: never in a reply, an event, a log line or the database. An IM plugin that declares
+// the wizard runs its own steps (spec plugins §3.6, pluginWizard below); the rest is the same.
 import type * as Lark from "@larksuiteoapi/node-sdk";
+import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
+import { readJsonLines, writeJsonLine } from "@rhodium-oss/plugin-sdk";
 import { Api } from "grammy";
 import type { RhCaller } from "./contracts";
-import { amid, PLATFORMS, type Made } from "./platforms";
+import { amid, platformLabel, type Made } from "./platforms";
+import type { LoadedPlugin } from "./plugin-loader";
 import type { RhReply } from "./router";
 import type { Store } from "./store";
 
@@ -19,11 +23,12 @@ export type Said = { text: string } | { qr: string };
 /** A flow as rh and the board see it. scan: url, the QR code's link; svg, it as a picture; expires,
  *  when it does, where the platform says (Feishu). paste: error, why the last paste was turned down.
  *  failed: error, why. pairing: the code and when it stops working. pairing, done: target, the slot the
- *  bot was bound to. log: what rh bot shows; the board leaves it out. */
+ *  bot was bound to. log: what rh bot shows; the board leaves it out. prompt: what a plugin's wizard
+ *  asks for in paste, and whether it is secret. platform: a built-in one, or an IM plugin's id. */
 export type FlowView = {
   id: string;
   name: string;
-  platform: Made;
+  platform: string;
   state: FlowState;
   url?: string;
   svg?: string;
@@ -32,12 +37,17 @@ export type FlowView = {
   code?: string;
   until?: number;
   target?: string;
+  prompt?: { label: string; secret: boolean };
   log: Said[];
 };
 
 /** How a scan or check tells the flow what it does: say, a line for the terminal; qr, a QR code to
- *  scan, which expires at expires (ms) where the platform says. signal: the flow was cancelled. */
-export type Tell = { say(text: string): void; qr(url: string, expires?: number): void; signal: AbortSignal };
+ *  scan, which expires at expires (ms) where the platform says; input, a line a plugin's wizard waits
+ *  for. signal: the flow was cancelled. */
+export type Tell = { say(text: string): void; qr(url: string, expires?: number): void; input?(label: string, secret: boolean): Promise<string>; signal: AbortSignal };
+
+/** A plugin platform's wizard, run for the bot name; what it gives is written as a scan's credentials. */
+export type PluginWizard = (platform: string, name: string, tell: Tell) => Promise<Record<string, string>>;
 
 /** How a platform's credentials are had (apiRoot: --api-root): by a scan, or by checking what was
  *  pasted; then what is said once the bot is in. afterPaste: what to set up, said before the pairing
@@ -78,11 +88,11 @@ const NO_FLOW: RhReply = { ok: false, error: "没有这个建 Bot 的流程：�
 const UNFINISHED = 30 * 60_000; // a flow not written in by then is dropped, as one whose page closed without a word would scan on
 const KEPT = 10 * 60_000; // an ended flow is kept this long, for a page or rh to read how it ended
 
-type Flow = { view: FlowView; caller: RhCaller; argv: string[]; apiRoot?: string; paste: boolean; abort: AbortController; unwatch?: () => void };
+type Flow = { view: FlowView; caller: RhCaller; argv: string[]; apiRoot?: string; paste: boolean; abort: AbortController; unwatch?: () => void; answer?: (value: string) => void };
 
 /** The flows rhodium runs. ask: the main loop, which checks and writes the bot as rh bot's call; store:
  *  the bot's pairing code and its bot_paired event; target: the slot a bot in the config is bound to. */
-export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => string | undefined) {
+export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => string | undefined, wizard?: PluginWizard) {
   const flows = new Map<string, Flow>();
   const watchers = new Set<(id: string) => void>();
   const changed = (f: Flow) => watchers.forEach((w) => w(f.view.id));
@@ -111,6 +121,13 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
       f.view.log.push({ qr: url });
       set(f, { state: "scan", url, svg: qrSvg(url), ...(expires !== undefined && { expires }) });
     },
+    input(label, secret) {
+      return new Promise((resolve) => {
+        if (f.abort.signal.aborted) return;
+        f.answer = resolve;
+        set(f, { state: "paste", prompt: { label, secret } });
+      });
+    },
     signal: f.abort.signal,
   });
 
@@ -126,10 +143,10 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
     t.say(added.text);
     const bound = target(name);
     let pairing: Partial<FlowView> | undefined;
-    if (credentials.owner) t.say(`扫码的${amid(PLATFORMS[platform].label)}账号已记为你，Bot ${name} 不用再配对。`);
+    if (credentials.owner) t.say(`扫码的${amid(platformLabel(platform))}账号已记为你，Bot ${name} 不用再配对。`);
     else {
       // Only now: Feishu's console saves the long connection only once a program holds one.
-      const setup = f.paste && ONBOARD[platform].afterPaste;
+      const setup = f.paste && ONBOARD[platform as Made]?.afterPaste;
       if (setup) t.say(setup);
       const after = store.lastSeq();
       const pair = await ask(f.caller, ["pair", name]);
@@ -144,7 +161,7 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
       const timer = setTimeout(() => end(f, "failed", "配对码过期了。"), Math.max(0, (row?.pairUntil ?? 0) - Date.now()));
       f.unwatch = () => (off(), clearTimeout(timer));
     }
-    await ONBOARD[platform].done?.(credentials, f.apiRoot, t);
+    await ONBOARD[platform as Made]?.done?.(credentials, f.apiRoot, t);
     if (ended(f)) return;
     // Last, so rh has every line before it sees the flow through.
     f.view.target = bound;
@@ -164,10 +181,10 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
       const first = await ask(caller, ["bot", ...argv]);
       if (!first.ok) return first;
       const { values, positionals } = parseArgs({ args: argv, options: { "api-root": { type: "string" }, paste: { type: "boolean" } }, allowPositionals: true });
-      // The router took them: a name and a platform rh bot makes.
-      const [name, platform] = positionals as [string, Made];
+      // The router took them: a name and a platform rh bot makes, built in or a plugin's with a wizard.
+      const [name, platform] = positionals as [string, string];
       if ([...flows.values()].some((f) => f.view.name === name && !ended(f))) return { ok: false, error: `Bot ${name} 正在建：同一个名字同时只能建一个。` };
-      const how = ONBOARD[platform];
+      const how: Onboard = ONBOARD[platform as Made] ?? { scan: (_, t) => (wizard ? wizard(platform, name, t) : Promise.reject(new Error("这里不能跑插件的建 Bot 向导。"))) };
       const paste = !how.scan || values.paste === true;
       const f: Flow = { view: { id: crypto.randomUUID(), name, platform, state: paste ? "paste" : "scan", log: [] }, caller, argv, apiRoot: values["api-root"], paste, abort: new AbortController() };
       flows.set(f.view.id, f);
@@ -191,8 +208,15 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
       if (!f) return NO_FLOW;
       if (f.view.state !== "paste") return { ok: false, error: "这个流程现在不收粘贴的凭据。" };
       set(f, { state: "checking" });
+      // A plugin's wizard waits for this one line: it goes on from there.
+      const answer = f.answer;
+      if (answer) {
+        f.answer = undefined;
+        answer(pasted.value ?? "");
+        return { ok: true, text: "", flow: f.view };
+      }
       try {
-        await finish(f, await ONBOARD[f.view.platform].check!(pasted, f.apiRoot, tell(f)));
+        await finish(f, await ONBOARD[f.view.platform as Made].check!(pasted, f.apiRoot, tell(f)));
       } catch (err) {
         const error = (err as Error).message;
         if (!ended(f)) set(f, { state: "paste", error });
@@ -211,6 +235,102 @@ export function botFlows(ask: AskLoop, store: Store, target: (bot: string) => st
   };
 }
 export type BotFlows = ReturnType<typeof botFlows>;
+
+const object = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const str = (v: unknown): v is string => typeof v === "string";
+
+/** An IM plugin's bot wizard (spec plugins §3.6): the plugin is started for this alone and asked
+ *  wizard; its steps go to tell, each input it asks for is tell's, and its done fields come back.
+ *  Throws why not: no first step in handshakeMs, its error, a step not understood, its exit before
+ *  done, or the flow cancelled. Whichever way it ends, the plugin is asked to shut down, then TERM and
+ *  KILL a stopGrace apart. What was typed and the done fields never go into a reason. */
+export function pluginWizard(
+  p: LoadedPlugin,
+  o: { botName: string; config: Record<string, string>; env: Record<string, string>; handshakeMs: number; stopGrace: number },
+  tell: Tell,
+): Promise<Record<string, string>> {
+  const [program, ...args] = p.command;
+  const child = spawn(program!, args, { cwd: p.dir, windowsHide: true, env: { ...o.env, RHODIUM_PLUGIN_DIR: p.dir, PYTHONUTF8: "1" }, stdio: "pipe" });
+  let err = "";
+  child.stderr.on("data", (c) => (err = (err + c).slice(-8192)));
+  child.stdin.on("error", () => {});
+  const exited = new Promise<number | null>((resolve) => child.once("close", (code) => resolve(code)));
+  child.once("error", () => {}); // close follows, as an exit before done
+  const typed: string[] = [];
+  const redact = (text: string) => {
+    for (const v of [...typed, ...Object.values(o.config)].sort((a, b) => b.length - a.length)) if (v) text = text.replaceAll(v, "[redacted]");
+    return text.slice(0, 500);
+  };
+  const write = (m: object) => {
+    try {
+      writeJsonLine(child.stdin, { jsonrpc: "2.0", ...m });
+    } catch {} // gone: its close says so
+  };
+  const stop = async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    write({ id: 2, method: "shutdown", params: {} });
+    child.stdin.end();
+    for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+      if (await Promise.race([exited.then(() => true), Bun.sleep(o.stopGrace).then(() => false)])) return;
+      child.kill(signal);
+    }
+  };
+  const its = `插件 ${p.id} 的向导`;
+  return new Promise((resolve, reject) => {
+    let over = false;
+    const end = (e: Error | undefined, config?: Record<string, string>) => {
+      if (over) return;
+      over = true;
+      clearTimeout(first);
+      tell.signal.removeEventListener("abort", cancelled);
+      void stop();
+      if (e) reject(e);
+      else resolve(config!);
+    };
+    const first = setTimeout(() => end(new Error(`${its}没有响应。`)), o.handshakeMs);
+    const cancelled = () => end(new Error("已取消。"));
+    tell.signal.addEventListener("abort", cancelled, { once: true });
+    const bad = () => end(new Error(`${its}报了看不懂的一步。`));
+    const onMessage = (m: unknown) => {
+      if (over) return;
+      if (!object(m)) return bad();
+      const v = m.params;
+      if (m.method === "wizard_step") {
+        if (!object(v) || !(v.text === undefined || str(v.text))) return bad();
+        if (v.kind === "qr" && str(v.data)) {
+          tell.qr(v.data);
+          if (v.text) tell.say(v.text);
+        } else if (v.kind === "link" && str(v.url)) tell.say(v.text ? `${v.text}：${v.url}` : v.url);
+        else if (v.kind === "waiting" && str(v.text)) tell.say(v.text);
+        else return bad();
+        clearTimeout(first);
+      } else if (m.method === "wizard_input") {
+        if ((!str(m.id) && typeof m.id !== "number") || !object(v) || !str(v.label) || !(v.secret === undefined || typeof v.secret === "boolean")) return bad();
+        clearTimeout(first); // from here on, only the flow's 30 minutes: you may take your time
+        if (!tell.input) return bad();
+        void tell.input(v.label, v.secret === true).then((value) => {
+          typed.push(value);
+          write({ id: m.id, result: { value } });
+        });
+      } else if (m.method !== undefined) {
+        if (m.id !== undefined) write({ id: m.id, error: { code: -32601, message: `Method not found: ${String(m.method)}` } });
+      } else if (m.id === 1) {
+        const r = m.result;
+        if ("error" in m) return end(new Error(redact(object(m.error) && str(m.error.message) && m.error.message ? m.error.message : `${its}出错了。`)));
+        if (!object(r) || !object(r.config) || !Object.values(r.config).every(str) || !(r.text === undefined || str(r.text))) return bad();
+        if (r.text) tell.say(r.text);
+        end(undefined, { ...(r.config as Record<string, string>) });
+      }
+    };
+    const reading = readJsonLines(child.stdout, { onMessage, onError: bad }).catch(bad);
+    void exited.then(async (code) => {
+      await reading; // its last lines first: an error it answered before exiting is its reason
+      const last = redact(err.trim().split(/\r?\n/).at(-1) ?? "");
+      end(new Error(`${its}中途退出（退出码 ${code}）${last ? `：${last}` : ""}`));
+    });
+    write({ id: 1, method: "wizard", params: { proto: 1, botName: o.botName, config: o.config } });
+  });
+}
 
 /** text's QR code as an SVG picture, drawn by the encoder qrcode-terminal draws rh's with: a dark
  *  square per dark module, in a light border 4 modules wide. */
