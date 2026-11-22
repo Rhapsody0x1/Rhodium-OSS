@@ -18,6 +18,7 @@ flowchart TD
   A["docs/architecture.md<br/>架构：怎么实现"]:::doc
   S["docs/spec/v1.md<br/>v1 规格：做什么、怎么验收"]:::doc
   SP["docs/spec/plugins.md<br/>插件化规格"]:::doc
+  PG["docs/plugin-guide.md<br/>插件开发指南"]:::doc
   SW["docs/spec/web-chat.md<br/>网页对话界面规格"]:::doc
   ST["docs/spec/web-topology.md<br/>网页拓扑图规格"]:::doc
   S2["docs/spec/bot-programs.md<br/>Bot 程序规格"]:::doc
@@ -46,6 +47,7 @@ flowchart TD
   SW --> ST
   S --> S2
   S --> SP
+  SP --> PG
   ST --> SR
   SR --> TE
   S --> SI
@@ -77,6 +79,7 @@ flowchart TD
 | [docs/im-style.md](im-style.md) | Rhodium 在 QQ、Telegram 里的每类话、工具行、选择面板和按钮具体怎么写 |
 | [docs/spec/v1.md](spec/v1.md) | v1 做什么、不做什么、怎么测试、分几个里程碑 |
 | [docs/spec/plugins.md](spec/plugins.md) | Rhodium-OSS 插件化（agent 驱动与 IM 适配器插件）的形态、协议、加载失败行为、跨平台、测试与 CI、演示路径和实现拆解 |
+| [docs/plugin-guide.md](plugin-guide.md) | 组员怎么编写、本地调试、测试和提交 agent / IM 插件（含清单、契约检查、离线样例、审查要求与红线） |
 | [docs/spec/web-chat.md](spec/web-chat.md) | 网页第 2 步的对话页做什么、不做什么、怎么测试、怎么验收 |
 | [docs/spec/web-topology.md](spec/web-topology.md) | 网页拓扑图的只读部分和对话页的头像做什么、不做什么、怎么测试、怎么验收 |
 | [docs/spec/bot-programs.md](spec/bot-programs.md) | Bot 程序这一期做什么、不做什么、怎么测试、分哪两段 |
@@ -97,6 +100,8 @@ flowchart TD
 [AGENTS.md](../AGENTS.md) 和 [docs/agents/](agents/) 是给 AI agent 看的工作约定，不在阅读路径上。`CLAUDE.md` 只引用 `AGENTS.md`。
 
 [deploy/README.md](../deploy/README.md) 讲怎么部署一个实例、怎么升级和回滚、怎么打安装包，也不在阅读路径上。
+
+[plugins/README.md](../plugins/README.md) 说明 `plugins/` 目录的放法与自动扫描边界，详细步骤指向 [docs/plugin-guide.md](plugin-guide.md)。
 
 ## 约定
 
