@@ -4,6 +4,8 @@
 // pairing code, or 创建成功. The page reads the flow again as the event stream says it changed. Closed,
 // the flow is cancelled.
 import { Field } from "@base-ui/react/field";
+import { Radio } from "@base-ui/react/radio";
+import { RadioGroup } from "@base-ui/react/radio-group";
 import { Select } from "@base-ui/react/select";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "cn";
@@ -118,29 +120,19 @@ export function BotWizard({ open, close }: { open: boolean; close: () => void })
     return (
       <Form {...form} title="新建 Bot" step={`第 1 / ${steps(platform === "telegram", undefined)} 步`} submit={() => void (NAME.test(name) && target && start(platform === "telegram"))}>
         <div className="flex items-end gap-2">
-          <div role="radiogroup" aria-label="平台" className="flex shrink-0 overflow-hidden rounded-lg border">
-            {PLATFORMS.map(({ p, label }) => (
-              <button key={p} type="button" role="radio" aria-label={label} aria-checked={platform === p} onClick={() => setPlatform(p)} className={cn("focus-child grid size-11 place-items-center transition focus-visible:opacity-100", platform === p ? "bg-secondary" : "opacity-40 grayscale hover:opacity-70")}>
+          {/* Built-ins and wizard plugins in one group: arrow keys move through all of them. */}
+          <RadioGroup aria-label="平台" value={platform} onValueChange={(v) => setPlatform(v as string)} className="flex shrink-0 overflow-hidden rounded-lg border">
+            {[...PLATFORMS, ...plugins.map((entry) => ({ p: entry.id, label: entry.label }))].map(({ p, label }) => (
+              <Radio.Root key={p} value={p} aria-label={label} className="focus-child grid size-11 place-items-center transition focus-visible:opacity-100 data-checked:bg-secondary data-unchecked:opacity-40 data-unchecked:grayscale data-unchecked:hover:opacity-70">
                 <Mark p={p} size={22} />
-              </button>
+              </Radio.Root>
             ))}
-          </div>
+          </RadioGroup>
           <Field.Root invalid={!!name && !NAME.test(name)} className="grid min-w-0 flex-1 gap-1">
             <Field.Label className="text-xs text-muted-foreground">名称</Field.Label>
             <Field.Control value={name} onValueChange={setName} autoCapitalize="off" autoComplete="off" spellCheck={false} className={FIELD} />
           </Field.Root>
         </div>
-        {plugins.length > 0 && (
-          <div role="radiogroup" aria-label="插件平台" className="flex flex-wrap gap-2">
-            {plugins.map(entry => (
-              <button key={entry.id} type="button" role="radio" aria-label={entry.label} aria-checked={platform === entry.id} onClick={() => setPlatform(entry.id)}
-                className={cn("focus-child flex min-h-11 items-center gap-2 rounded-lg border px-3 text-sm", platform === entry.id && "bg-secondary")}>
-                <Mark p={entry.id} size={20} />
-                {entry.label}
-              </button>
-            ))}
-          </div>
-        )}
         {name && !NAME.test(name) && <p className="-mt-1 text-sm text-destructive">名称只能用英文字母、数字和 _ -</p>}
         <Field.Root className="grid gap-1">
           <Field.Label className="text-xs text-muted-foreground">投递给</Field.Label>
@@ -158,7 +150,7 @@ export function BotWizard({ open, close }: { open: boolean; close: () => void })
 
   if (state === "scan" || (state === "writing" && !paste) || (plugin && state === "checking"))
     return (
-      <Form {...form} title="扫码" step={`第 2 / ${of} 步`} back={back}>
+      <Form {...form} title={plugin && !flow.svg ? "绑定" : "扫码"} step={`第 2 / ${of} 步`} back={back}>
         <Scan flow={flow} plugin={Boolean(plugin)} />
         {platform === "feishu" && (
           <button type="button" onClick={() => (cancel(), void start(true))} className="mx-auto -mt-1 h-9 px-2 text-sm text-muted-foreground transition-colors hover:text-foreground">
@@ -282,8 +274,7 @@ function Secret({ label, value, set, error }: { label: string; value: string; se
   );
 }
 
-/** What is pasted (story 676): Telegram's token, or Feishu's App ID and secret, checked by rhodium; why
- *  not under the box. */
+/** The one line a plugin's wizard asks for (spec plugins §3.6), a secret's box where it says so. */
 function PluginInput({ flow, prompt, form, back, of }: { flow: FlowView; prompt: NonNullable<FlowView["prompt"]>; form: { open: boolean; close: () => void }; back: () => void; of: number }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -311,6 +302,8 @@ function PluginInput({ flow, prompt, form, back, of }: { flow: FlowView; prompt:
   );
 }
 
+/** What is pasted (story 676): Telegram's token, or Feishu's App ID and secret, checked by rhodium; why
+ *  not under the box. */
 function Paste({ flow, form, back, of }: { flow: FlowView; form: { open: boolean; close: () => void }; back: () => void; of: number }) {
   const feishu = flow.platform === "feishu";
   const [token, setToken] = useState("");
