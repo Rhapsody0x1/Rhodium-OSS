@@ -8578,7 +8578,10 @@ smoke("spec plugins §3.5: the import dialog lists an agent plugin's conversatio
   await page.getByRole("button", { name: "新建", exact: true }).click();
   await page.getByRole("menuitem", { name: "导入" }).click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByRole("radio", { name: "Echo Agent", exact: true }).click();
+  const echo = dialog.getByRole("radio", { name: "Echo Agent", exact: true });
+  await echo.click();
+  // The plugin shows by its logo alone, as the built-in ones do: on a phone its name would squeeze the slot name beside it.
+  expect([await echo.innerText(), await echo.getAttribute("title")]).toEqual(["", "Echo Agent"]);
   const rows = dialog.getByRole("radiogroup", { name: "导入哪一段" }).getByRole("radio");
   const free = rows.filter({ hasText: "整理 README" });
   const busy = rows.filter({ hasText: "修登录页" });

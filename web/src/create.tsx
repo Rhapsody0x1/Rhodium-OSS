@@ -410,7 +410,8 @@ function AgentPick({ agent, pick, importing = false }: { agent: AgentKind; pick:
           <span className="grid size-9 place-items-center rounded-md">
             <AgentLogo agent={a} className="size-5" />
           </span>
-          {!isBuiltinAgent(a) && <span className="truncate pr-2 text-sm">{name}</span>}
+          {/* In the import dialog a plugin is its logo alone, as the built-in ones are: its name would squeeze the slot name on a phone. */}
+          {!importing && !isBuiltinAgent(a) && <span className="truncate pr-2 text-sm">{name}</span>}
         </button>
       ))}
     </div>
