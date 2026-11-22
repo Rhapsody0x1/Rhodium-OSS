@@ -1,6 +1,6 @@
 # 插件化规格
 
-这篇回答：Rhodium-OSS 怎么把 agent 驱动和 IM 适配器做成插件体系、插件协议与加载失败行为怎么定、怎么支持跨平台和 CI、如何零 Key 演示、三个组员插件对核心有什么要求、实现怎么拆 PR，以及已拍板的选型决策记录。
+这篇回答：Rhodium-OSS 怎么把 agent 驱动和 IM 适配器做成插件体系、插件协议与加载失败行为怎么定、插件图标、插件目录扫描、插件对话导入和插件建 Bot 向导怎么做、怎么支持跨平台和 CI、如何零 Key 演示、三个组员插件对核心有什么要求、实现怎么拆 PR，以及已拍板的选型决策记录。
 
 前置阅读：[术语表](../../GLOSSARY.md)、[产品说明](../product.md)、[ADR-0002](../adr/0002-one-daemon-plus-holders.md)、[ADR-0007](../adr/0007-satori-for-bot-apps.md)、[ADR-0008](../adr/0008-own-im-adapters.md)、[ADR-0009](../adr/0009-no-acp.md)、[ADR-0011](../adr/0011-codex-private-app-server.md)、[ADR-0015](../adr/0015-out-of-process-plugins.md)、[架构](../architecture.md)、[IM 文字与交互规范](../im-style.md)、[v1 规格](v1.md)
 
@@ -13,7 +13,8 @@
 ### 1.2 本期做什么
 
 - **两类扩展点**：支持接入新的 agent 种类（经 `rh-agent/1` 协议）和新的 IM 平台（经 `rh-im/1` 协议），内置三家 agent（Claude、pi、Codex）与内置 IM（QQ、Telegram、飞书、fake）保持原生实现不变。
-- **显式清单加载与失败隔离**：在 `config.toml` 中通过 `[plugins.<id>]` 登记插件目录，读取并校验 `plugin.json` [插件清单](../../GLOSSARY.md)与版本要求；配置失败、清单损坏、运行崩溃均隔离在单个插件内。
+- **目录扫描、显式登记与失败隔离**：核心扫描 `config.toml` 旁的 `plugins/` 目录，扫到的插件默认加载；`[plugins.<id>]` 可禁用某个插件，也可用 `path` 从别处登记插件（§4.5）。核心读取并校验 `plugin.json` [插件清单](../../GLOSSARY.md)与版本要求；配置失败、清单损坏、运行崩溃均隔离在单个插件内。
+- **插件图标、对话导入与建 Bot 向导**：插件可在清单里带图标，看板在内置图标出现的地方显示它（§4.6）；agent 插件可声明支持导入本机已有的对话（§3.5）；IM 插件可声明支持 `rh bot` 建 Bot 向导（§3.6）。
 - **核心内部表开放化**：放开 `AgentKind` 与 `Platform` 联合类型限制，为非内置种类在对话记录、终端切换、设置带回、看板图标等查找表提供安全默认值。
 - **公开契约、运行时 SDK 与契约测试器**：提供零内部依赖的 TypeScript 契约与运行时 SDK（`packages/plugin-sdk/`，含 `AgentPlugin`/`ImPlugin` 接口与 `runAgentPlugin`/`runImPlugin` 运行时辅助）及语言无关的黑盒[契约测试](../../GLOSSARY.md)脚本，随仓库附带两个基于 SDK 实现的最小示例插件（`echo-agent` 与 `local-im`）。
 - **跨平台支持、自动化 CI 与零 Key 演示**：确保 Linux、Windows、macOS 可用；补全 GitHub Actions 构建与测试流程；提供不依赖任何真实 API Key 和真实 IM 账号的完整可重复演示路径。
@@ -22,8 +23,9 @@
 
 - 不做插件市场、远程在线下载、热加载或运行时免重启动态插拔插件代码（启用、禁用或升级插件需要重启 `rhodium`）。
 - 不做插件 agent 的 Herdr TUI 模式切换与网页终端嵌入（插件槽位的 `tui` 能力为 `false`）。
-- 不做插件 agent 的外部磁盘历史扫描和 Herdr pane 导入（`rh import` 与自动扫描仅对内置三家生效）。
-- 不做插件 IM 的交互式扫码建 Bot 向导（`rh bot` 创建向导保持内置三家，插件 IM Bot 在 `config.toml` 中填写 `[bots.<name>]` 后配合 `rh pair` 配对主人）。
+- 不做插件 agent 的 Herdr pane 导入。插件对话只能按对话 ID 导入（§3.5）。
+- 不做插件 IM 的网页和 IM 里的建 Bot 向导。插件向导第一版只在终端 `rh bot` 里跑（§3.6）；不声明向导的插件 IM，Bot 仍在 `config.toml` 中手写 `[bots.<name>]` 后配合 `rh pair` 配对主人。
+- 不扫描家目录或全局目录里的插件，扫描 `plugins/` 时不跟随符号链接（§4.5）。
 - 不做插件 IM 的 QQ 专属被动回复窗口与额度重投模型（仅保留内置 `qq` 自己用 `qq_quota`）。
 - 不做跨插件版本热兼容或操作系统级容器沙箱。
 
@@ -130,9 +132,9 @@ sequenceDiagram
 |---|---|---|---|
 | 进程与重启托管 | `rh-hold` 保活、`out.log` 落盘与重启重放、`taken`/`written` 投递状态跟踪、`pending_asks` 重建与对账 | 按行消费 stdin、按行写 stdout；对同一 `requestId` 的重复 `answer` 须幂等去重（至多向下游交付一次），首次交付成功后发出 `ask_resolved`（交付进行中不得提前发出） | 不要求插件实现日志重放或连接恢复服务端 |
 | 槽位生命周期 | 空闲回收（`idleReap`）、崩溃自动续跑、连续崩溃熔断、并发上限（`maxRunning`）、定时任务、`interrupt` 超时回收 | 在 `close` 时正常清理下游进程并退出 | — |
-| 对话记录与展示 | 按幂等键写入[托管对话记录](../../GLOSSARY.md)，驱动网页对话页、`rh read`、槽位时间线 `/resume` | 通过 `turn_start` / `item` / `tool_start` / `turn_end` 报出标准事件 | 不支持 `rh import` 扫盘导入；不接管已有外部进程 |
+| 对话记录与展示 | 按幂等键写入[托管对话记录](../../GLOSSARY.md)，驱动网页对话页、`rh read`、槽位时间线 `/resume`；导入时把插件转好的标准块写在托管对话记录开头 | 通过 `turn_start` / `item` / `tool_start` / `turn_end` 报出标准事件；声明 `import` 的插件回答一次性查询，列出本机对话并把已有内容转成标准块（§3.5） | 不支持 Herdr pane 导入；不接管已有外部进程 |
 | 合规与安全 | 保留内置名称（含 `herdr`）、清洗环境变量（含 Windows 混合大小写过滤）、集中执行配对、主人校验（`owners.includes(m.sender)`）与投递决定、`rh doctor` 巡检插件进程子树 | IM 插件承担平台账号身份认证并原样上报发送者 ID（私聊归一为用户 ID）；Agent 插件读取 `init.systemPromptFile`，遵守三条红线（不得拉起 `claude` 或包装 Claude Code、不得用 Claude 订阅、仅本人触发） | 插件属于用户显式信任代码；不允许任何非内置 `claude` 驱动获取 Claude 订阅凭据 |
-| 路由与渲染降级 | 消息排队、分段截断、Markdown 降级纯文本、工具折叠、`/rh_*` 命令、按钮分页、发送限流与超时记 `unknown` | 如实声明 `Capabilities`（agent 能力或 IM 平台能力） | 插件 IM 不支持 `qq_quota`、不支持 `rh bot` 扫码建 Bot |
+| 路由与渲染降级 | 消息排队、分段截断、Markdown 降级纯文本、工具折叠、`/rh_*` 命令、按钮分页、发送限流与超时记 `unknown` | 如实声明 `Capabilities`（agent 能力或 IM 平台能力） | 插件 IM 不支持 `qq_quota`；建 Bot 向导只在终端 `rh bot` 里跑，且只对声明 `wizard` 的插件（§3.6） |
 | 终端与专属特性 | 统一拒绝提示（切 TUI、`/ultracode` 等） | — | 不支持切 Herdr TUI；不支持 Claude 订阅额度窗口自动续跑 |
 
 ### 3.2 Agent 插件协议：`rh-agent/1`
@@ -390,13 +392,177 @@ class WeixinImPlugin implements ImPlugin {
 runImPlugin(new WeixinImPlugin());
 ```
 
+### 3.5 Agent 插件对话导入：一次性查询
+
+声明支持导入的 agent 插件，能把本机已有的对话交给 Rhodium 接管成槽位（[导入](../../GLOSSARY.md)）。核心用一次性查询问插件：本机有哪些对话、某段对话说过什么。一次性查询不开回合，也不进托管进程。
+
+#### 清单字段
+
+- agent 清单新增可选字段 `"import": true`。缺省为 `false`。
+- 只有 `import` 为 `true` 的插件才进 `rh import` 的列表和网页导入对话框（看板元数据里 `importable` 取这个值）。
+- `paneImport` 对插件始终为 `false`：插件对话只按对话 ID 导入，不从 Herdr pane 导入。
+
+#### 一次性查询怎么跑
+
+1. `rhodium` 直接拉起插件（不经 `rh-hold`），命令、`${PLUGIN_DIR}` 展开、环境清洗、`RHODIUM_PLUGIN_DIR` 与 `PYTHONUTF8=1` 都和正常启动一样，但不带槽位变量（`RHODIUM_SOCKET`、`RHODIUM_SLOT`、`RHODIUM_TOKEN`）；工作目录是查询的 `dir`，没有 `dir` 时是插件目录。
+2. 核心写入的第一行是 `query`，不是 `init`。一个进程只答一次查询。
+3. 插件写出一行 `query_result`，然后以退出码 `0` 退出。
+4. 核心等 `query_result` 最多 `durations.pluginRpc`（默认 `30s`）。超时或进程先退出，都算这次查询失败：核心关掉 stdin，等 `durations.stopGrace` 后依次发 `TERM`、`KILL`，并取 `stderr` 末行作原因。
+5. 查询失败只影响这一次列表或导入，不计入槽位崩溃次数，也不改插件的加载状态。
+
+#### 消息
+
+| 方向 | 消息 | 字段 |
+|---|---|---|
+| 核心 -> 插件 | `query`（`query: "list"`） | `proto: 1`、`id`、`dir: string \| null`（只列在这个目录开的对话；`null` 列全部）、`program`、`config`（同 `init` 的同名字段） |
+| 核心 -> 插件 | `query`（`query: "read"`） | `proto: 1`、`id`、`session`（要读的对话 ID）、`program`、`config` |
+| 插件 -> 核心 | `query_result`（答 `list`） | `id`、`ok: true`、`conversations: { id: string; dir: string; title: string; updatedAt: number; busy?: boolean }[]` |
+| 插件 -> 核心 | `query_result`（答 `read`） | `id`、`ok: true`、`blocks: ImportBlock[]` |
+| 插件 -> 核心 | `query_result`（失败） | `id`、`ok: false`、`error: string` |
+
+- `conversations[].dir` 是对话开在的绝对目录。插件找不到目录的对话不列出，因为槽位要有目录。
+- `title` 是对话的标题，没有就取第一句用户消息的开头。`updatedAt` 是毫秒时间戳。
+- `busy: true`：别的进程正占着这段对话（例如用户在另一个终端开着它）。怎么判断由插件自己决定。
+- `ImportBlock` 是核心的标准块，和 `item` 事件同构，外加用户消息：
+  - `{ kind: "user"; text: string; at?: number }`
+  - `{ kind: "assistant"; text: string; at?: number }`
+  - `{ kind: "tool"; id?: string; name: string; input: unknown; result?: { text: string; error?: boolean }; at?: number }`
+- 插件不认识的内容（思考过程、系统消息、图片）直接略过，不报错。
+- 单行上限仍是 64MB。
+
+```json
+{"type":"query","proto":1,"id":"q-1","query":"list","dir":"/home/u/proj","program":"agy","config":{}}
+{"type":"query_result","id":"q-1","ok":true,"conversations":[{"id":"3f2a9c1e","dir":"/home/u/proj","title":"整理 README","updatedAt":1763690000000},{"id":"77b0d4aa","dir":"/home/u/proj","title":"修登录页","updatedAt":1763600000000,"busy":true}]}
+{"type":"query","proto":1,"id":"q-2","query":"read","session":"3f2a9c1e","program":"agy","config":{}}
+{"type":"query_result","id":"q-2","ok":true,"blocks":[{"kind":"user","text":"整理 README","at":1763680000000},{"kind":"tool","id":"t1","name":"read_file","input":{"path":"README.md"},"result":{"text":"# Demo"}},{"kind":"assistant","text":"已整理。"}]}
+```
+
+#### 列表和导入在核心里怎么走
+
+- **`rh import`、`rh import --dir <目录>` 与 IM 的 `/rh_import`**：核心照旧列出内置三家的对话，再对每个声明 `import` 的已加载插件发一次 `list`（`dir` 为要列的目录）。
+  - 已有槽位用过的对话（同一 agent、同一会话 ID）照旧不列。
+  - `busy` 的对话列出，后面标“正被别的进程使用”。
+  - 某个插件的查询失败：其余照常列出，末尾加一行“插件 `<id>` 列不出对话：<原因>”。
+- **`rh import <对话 ID>`**：先照旧在内置三家的磁盘记录里按前缀找；找不到，再对每个声明 `import` 的插件发 `list`（`dir: null`），按前缀匹配 `conversations[].id`。
+  - 匹配到多段（含跨插件），照旧报“写长一点”。
+  - 匹配到的对话 `busy`：拒绝，“对话 `<id>` 正被别的进程使用，先关掉它再导入”。
+  - 一段都没找到，而有插件查询失败：报“磁盘上没有对话 `<id>`”，并附上失败插件的原因。
+- **网页导入对话框**：`GET /api/importable?agent=<插件 ID>` 对插件发 `list`。
+  - 按 `dir` 由插件过滤，按 `q` 由核心只比对标题（插件对话不做全文搜索），不分页，一次返回全部。
+  - `ImportRow` 新增 `busy?: true`；对话框把这一行显示成不能选。
+  - `GET /api/importable/messages` 对插件发 `read`，只取 `user` 与 `assistant` 块做预览。
+  - 查询失败返回 `502` 和中文原因，对话框照常显示错误。
+- **导入一段插件对话**：
+  1. 核心对插件发 `read`，拿到标准块。`read` 失败就整个导入失败，什么都不建。
+  2. 路由照旧建槽位（`state: "off"`、`session` 为对话 ID），不启动它。
+  3. 核心把标准块写在这个对话的托管对话记录开头（`<stateDir>/transcripts/<agentKind>/<convId>.jsonl`），转法和运行时写 `item` 相同，幂等键为 `"import:" + 序号`，时间取块的 `at`，没有就取导入时刻。
+  4. 之后槽位第一次启动，照旧发 `init.session = { resume: "<对话 ID>" }`，由插件接着下游的这段对话。
+  - 已知上限：第 2、3 步之间 `rhodium` 崩溃，槽位留下但托管记录没有导入的历史；接着对话不受影响。真碰上再加“导入未完成”标记重写。
+  - 已知上限：`busy` 只在列表和导入时看一次；之后有别的进程打开同一段对话，由插件在 `init` 时自己报 `fatal`。
+
+#### SDK 与契约测试
+
+- `AgentPlugin` 新增两个可选方法：
+  - `listConversations?(params: AgentQueryParams): Promise<ImportConversation[]>`，`params` 为 `{ dir: string | null; program: string | null; config: Record<string, string> }`；
+  - `readConversation?(session: string, params: AgentQueryParams): Promise<ImportBlock[]>`。
+- `runAgentPlugin` 读到第一行是 `query` 时，不调 `init`：
+  - 调对应方法，把返回值包成 `query_result` 写出后以 `0` 退出；
+  - 方法没实现，写 `ok: false`、`error: "该插件不支持导入"`；
+  - 方法抛错，写 `ok: false` 与错误消息，堆栈记 `stderr`。
+- 契约测试器对声明 `import` 的插件加一项：
+  - 发 `list`（`dir: null`），要求超时内收到合法 `query_result`，并且进程退出；
+  - `conformance.json` 给了 `importSession` 时，再发 `read`，要求 `blocks` 非空且每块合法。
+- 没声明 `import` 的插件不测这一项。
+
+---
+
+### 3.6 IM 插件建 Bot 向导：`rh bot <名字> <插件平台>`
+
+声明支持向导的 IM 插件，可以像内置 QQ、飞书那样，在终端里由 `rh bot` 走完建 Bot 的流程（[建 Bot 向导](../../GLOSSARY.md)）。插件报出一步步要做什么，核心负责显示、读输入、写配置和配对。第一版只在终端 `rh bot` 里跑，网页和 IM 里的建 Bot 向导不列插件平台。
+
+#### 清单字段
+
+- IM 清单新增可选字段 `"wizard": true`。缺省为 `false`。
+- `rh bot <名字> <平台>` 的平台可以是声明了 `wizard` 的已加载 IM 插件 ID；没声明的，路由照旧拒绝，并提示手写 `[bots.<名字>]`。
+- 插件平台不收 `--api-root` 与 `--paste`。要指向本地模拟服务，写在 `[plugins.<id>.config]` 里。
+
+#### 向导怎么跑
+
+1. `rh bot` 照旧先由路由检查名字和绑定的槽位，再在 `rhodium` 里开一个建 Bot 流程（`src/bot-flow.ts`）。
+2. `rhodium` 拉起插件（命令、环境清洗与 IM 插件正常启动相同），第一个请求是 `wizard`，不是 `init`。插件进程只为这一次向导存在。
+3. 插件按顺序报出步骤，核心把它们记进流程的日志；`rh bot` 照旧每秒取一次流程状态并显示。
+4. 插件以 `wizard` 的返回值报“完成”，带上要写进配置的字段，然后退出。
+5. 核心检查字段，照旧经路由写进 `config.toml` 的 `[bots.<名字>]`（`add_bot`），再走已有的配对流程（`rh pair`，显示配对码，等主人发码）。
+
+#### 消息
+
+| 方向 | 名称 | 类型 | 载荷 |
+|---|---|---|---|
+| 核心 -> 插件 | `wizard` | 请求 | 参数：`{ proto: 1, botName, config }`（`config` 只有 `[plugins.<id>.config]`）；返回：`{ config: Record<string, string>, text?: string }`，即“完成”这一步 |
+| 插件 -> 核心 | `wizard_step` | 通知 | `{ kind: "qr", data: string, text?: string }`：把 `data` 画成二维码，下面印 `text` |
+| 插件 -> 核心 | `wizard_step` | 通知 | `{ kind: "link", url: string, text?: string }`：印出链接 |
+| 插件 -> 核心 | `wizard_step` | 通知 | `{ kind: "waiting", text: string }`：印一行等待中的状态 |
+| 插件 -> 核心 | `wizard_input` | 请求 | 参数：`{ label: string, secret?: boolean }`；返回：`{ value: string }`。`secret` 为真时终端不回显 |
+| 核心 -> 插件 | `shutdown` | 请求 | 用户取消（Ctrl-C、终端断开）或流程超时；插件停下并退出 |
+
+- 步骤按到达顺序显示，同一种步骤可以出现多次（例如二维码过期后换一张新的）。
+- `wizard_input` 期间流程进入 `paste` 状态，流程视图带上 `prompt: { label, secret }`；`rh bot` 照旧经 `credentials` 操作把输入交回，核心再作为 `wizard_input` 的返回值交给插件。
+- 输入的值和完成字段只留在内存里，直到写进配置，不进回复、事件、日志和数据库（同内置向导）。
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"wizard","params":{"proto":1,"botName":"my-weixin","config":{}}}
+{"jsonrpc":"2.0","method":"wizard_step","params":{"kind":"qr","data":"https://liteapp.weixin.qq.com/q/xxxx","text":"用手机微信扫码"}}
+{"jsonrpc":"2.0","method":"wizard_step","params":{"kind":"waiting","text":"已扫码，请在手机上确认"}}
+{"jsonrpc":"2.0","id":7,"method":"wizard_input","params":{"label":"输入手机上显示的数字","secret":false}}
+{"jsonrpc":"2.0","id":7,"result":{"value":"123456"}}
+{"jsonrpc":"2.0","id":1,"result":{"config":{"token":"redacted-at-runtime","baseUrl":"https://ilinkai.weixin.qq.com","accountId":"bot-1"},"text":"微信 Bot 已绑定"}}
+```
+
+#### 完成字段的检查
+
+- 每个值都必须是字符串。
+- 键只能是清单 `requiredConfig` 与 `optionalConfig` 里的；`platform`、`target`、`owner` 一律不收，主人只经配对产生。
+- `requiredConfig` 里的键在完成字段与 `[plugins.<id>.config]` 合起来后必须齐全。
+- 不合格：流程失败，原因写明哪个键不对，配置不改。
+- 第一个 `requiredConfig` 键的值与已有 Bot 相同：照旧拒绝“配置里已经有这个 Bot 了”。
+
+#### 失败与超时
+
+| 情况 | 核心行为 | `rh bot` 看到的 |
+|---|---|---|
+| 插件 `durations.pluginHandshake`（默认 `10s`）内没报出第一步 | 发 `shutdown`，等 `durations.stopGrace` 后 `TERM`、`KILL` | 失败，“插件 `<id>` 的向导没有响应” |
+| `wizard` 返回 JSON-RPC 错误 | 进程退出后流程失败 | 失败，原因是错误消息 |
+| 插件在报“完成”前退出（中途退出） | 流程失败，配置不改 | 失败，“插件 `<id>` 的向导中途退出（退出码 N）：<stderr 末行>” |
+| 用户 Ctrl-C 或终端断开 | 照旧取消流程，发 `shutdown`，随后 `TERM`、`KILL` | 退出，配置不改 |
+| 30 分钟没建完 | 照旧作废流程，同取消 | 失败，“30 分钟内没有建完，这次作废了” |
+| 收到不认识的 `kind` 或残缺的步骤 | 当作中途失败，发 `shutdown` | 失败，“插件 `<id>` 的向导报了看不懂的一步” |
+
+写进配置以后的事（配对码过期、配对完成）和内置向导完全一样。
+
+#### SDK 与契约测试
+
+- `ImPlugin` 新增可选方法 `wizard?(params: ImWizardParams, ctx: ImWizardContext): Promise<ImWizardDone>`：
+  - `ImWizardParams` 为 `{ botName: string; config: Record<string, string> }`；
+  - `ImWizardContext` 提供 `qr(data, text?)`、`link(url, text?)`、`waiting(text)`、`input(label, { secret? }): Promise<string>` 与 `signal: AbortSignal`；
+  - `ImWizardDone` 为 `{ config: Record<string, string>; text?: string }`。
+- `runImPlugin` 收到的第一个请求是 `wizard` 时，不调 `init`：
+  - 调 `plugin.wizard()`，把返回值作为 `wizard` 的结果回传后以 `0` 退出；
+  - 方法没实现，回 JSON-RPC 错误 `-32601`；
+  - 方法抛错，回 JSON-RPC 错误并以非零码退出；
+  - 期间收到 `shutdown`、stdin EOF 或信号，触发 `signal`，回 `{ ok: true }` 后退出。
+- 契约测试器对声明 `wizard` 的插件加一项：
+  - 按 `conformance.json` 的 `wizardInputs`（按 `label` 给值）回答每个 `wizard_input`；
+  - 要求第一步在握手时限内到达，每一步合法，最后收到的完成字段通过上面的检查；
+  - 再跑一次，在第一步后发 `shutdown`，要求进程在 `stopGrace` 内退出。
+- 没声明 `wizard` 的插件不测这一项。
+
 ---
 
 ## 4. 加载、配置、版本校验与失败行为
 
 ### 4.1 插件目录、清单 `plugin.json` 与启动契约
 
-核心不自动扫描 `$HOME` 或全局目录来“猜测加载”未知代码。每个插件以目录形式放在用户显式配置的本地位置（如 `plugins/<id>/`），目录根下必须有一个 `plugin.json` 清单文件：
+每个插件是一个目录，目录根下必须有一个 `plugin.json` 清单文件。插件目录放在 `config.toml` 旁的 `plugins/<id>/` 下由核心扫描到（§4.5），或放在别处由 `[plugins.<id>].path` 显式登记。核心不扫描 `$HOME` 或全局目录。
 
 ```json
 {
@@ -419,7 +585,8 @@ runImPlugin(new WeixinImPlugin());
     "commands": ["model", "status", "context"]
   },
   "requiredConfig": [],
-  "optionalConfig": ["fixture"]
+  "optionalConfig": ["fixture"],
+  "icon": "icon.svg"
 }
 ```
 
@@ -438,7 +605,10 @@ runImPlugin(new WeixinImPlugin());
 | `command` / `commandByPlatform` | 通用 | 启动参数数组（至少 1 项）；支持占位符 `${PLUGIN_DIR}` 展开为清单所在目录的规范绝对路径；按 `process.platform` 优先取 `commandByPlatform`；禁止指向 `claude` |
 | `program` | 仅 `agent` | 默认下游可执行程序名，可被 `config.toml` 的 `[programs]` 覆盖；禁止写为 `claude` |
 | `capabilities` | 通用 | 静态能力声明：agent 声明支持的命令和 `liveApproval`；IM 声明默认 `Capabilities` 供 `config` 检查，运行期以握手回传为准 |
-| `requiredConfig` / `optionalConfig` | 通用 | 声明插件期望在 `[plugins.<id>.config]` 或 `[bots.<name>]` 中提供的键名列表；核心用于启动前检查与脱敏提示 |
+| `requiredConfig` / `optionalConfig` | 通用 | 声明插件期望在 `[plugins.<id>.config]` 或 `[bots.<name>]` 中提供的键名列表；核心用于启动前检查与脱敏提示；建 Bot 向导的完成字段也只能用这些键（§3.6） |
+| `icon` | 通用，可选 | 插件目录里一个 SVG 或 PNG 的相对路径；检查不过只丢图标（§4.6） |
+| `import` | 仅 `agent`，可选 | 为 `true` 时插件回答一次性查询，支持导入本机对话（§3.5） |
+| `wizard` | 仅 `im`，可选 | 为 `true` 时插件支持 `rh bot` 建 Bot 向导（§3.6） |
 
 #### 保留内置名称与合规禁止项
 
@@ -458,7 +628,7 @@ runImPlugin(new WeixinImPlugin());
 
 ### 4.2 配置文件 `config.toml`
 
-在 `config.toml` 中显式登记要加载的插件：
+`plugins/` 下扫到的插件不用写任何配置。要禁用扫到的插件、给它配置，或从别处登记插件，写 `[plugins.<id>]`：
 
 ```toml
 [durations]
@@ -479,8 +649,11 @@ enabled = true
 fixture = "./fixtures/dsh-acp.jsonl"
 
 [plugins.weixin]
-path = "./plugins/weixin"
+# 扫到的 plugins/weixin 不用写 path；写了 path 就改用那个目录
 enabled = true
+
+[plugins.old-agent]
+enabled = false  # 禁用 plugins/old-agent
 
 [bots.my-weixin]
 platform = "weixin"
@@ -493,14 +666,14 @@ target = "work/main"
 ```
 
 规则说明：
-- `[plugins.<id>].path` 支持绝对路径，也支持**相对于 `config.toml` 所在目录**的相对路径（读取配置后由核心统一 `resolve` 为规范绝对路径，方便课程演示包在任意解压目录直接运行，无需脚本改写配置；生产环境仍推荐使用绝对路径）。
-- `enabled` 默认为 `true`；设为 `false` 时核心不加载该插件，视为显式禁用。
+- `[plugins.<id>].path` 可省略：省略时用扫到的 `plugins/<id>/`（合并规则见 §4.5）。写了时支持绝对路径，也支持**相对于 `config.toml` 所在目录**的相对路径（读取配置后由核心统一 `resolve` 为规范绝对路径，方便课程演示包在任意解压目录直接运行，无需脚本改写配置；生产环境仍推荐使用绝对路径）。
+- `enabled` 默认为 `true`；设为 `false` 时核心不加载该插件，视为显式禁用，扫到的插件也一样。
 - IM 插件 Bot 所需的密钥放在 `0600`（Windows 为本人私有 ACL）保护的 `config.toml` `[bots.<name>]` 表中，沿用既有安全模型。
 - 每次启用、禁用、修改清单或修改插件配置均需重启 `rhodium` 生效（与 `config.toml` 其他配置修改约定一致）。
 
 ### 4.3 两阶段版本与契约校验
 
-1. **阶段 1（启动期静态校验）**：`rhodium` 读取 `config.toml` 后，对每条启用的 `[plugins.<id>]` 读取 `<path>/plugin.json`。校验 JSON 合法性、`manifestVersion === 1`、`kind`、`id` 与配置键名一致、非保留名（含 `herdr`）、非重复 ID、`protocol` 匹配、`minRhodium <= 当前核心版本`、不指向 `claude`、启动命令第 0 项可定位，以及 `requiredConfig` 项是否齐全。
+1. **阶段 1（启动期静态校验）**：`rhodium` 读取 `config.toml` 并扫描 `plugins/` 后，对每个启用的插件（扫到的和登记的）读取 `<目录>/plugin.json`。校验 JSON 合法性、`manifestVersion === 1`、`kind`、`id` 与配置键名或扫到的目录名一致、非保留名（含 `herdr`）、非重复 ID、`protocol` 匹配、`minRhodium <= 当前核心版本`、不指向 `claude`、启动命令第 0 项可定位，以及 `requiredConfig` 项是否齐全。
 2. **阶段 2（运行期握手校验）**：拉起插件进程后，核心在 `durations.pluginHandshake`（默认 `10s`）内等待 `ready`（agent）或 `init` 结果（IM），强制校验返回 `proto === 1`；对于 IM 插件，还必须用结构检查函数核验其 `capabilities`（如 `progress` 仅允许 `"append" | "edit"`、`markdown` 允许为 `null` 或合法结构、`sendLimit`、`maxTextLength`、`maxFileBytes` 等必选字段类型合法，既保证纯文本平台如微信官方 Bot 通过校验，又防止残缺能力表让渲染器崩溃）。
 3. **演进兼容策略**：在 `/1` 协议家族内只允许新增可选字段，通信双方必须忽略不认识的字段；不兼容的破坏性变更升级到 `rh-agent/2` 或 `rh-im/2`，当前版本不要求同时运行多代协议。
 
@@ -511,11 +684,80 @@ target = "work/main"
 | 场景 | 触发条件 | 核心行为与日志 | 对用户与槽位/Bot 的外显表现 |
 |---|---|---|---|
 | 显式禁用 | `[plugins.<id>]` 设 `enabled = false` | 不读取入口、不注册到可用列表、不启动进程；记 `info` 日志 `plugin disabled` | `rh doctor` 标注 `已禁用`；对应新建槽位拒绝并提示“插件 `<id>` 已禁用”；若旧槽位历史对话用了该插件，发消息时提示“插件 `<id>` 已禁用，请启用或切换对话”；若 `[bots.<name>]` 引用它，跳过连接并标出原因 |
-| 清单或静态校验失败 | 路径不存在、`plugin.json` 缺失或损坏、字段非法、保留名冲突、指向 `claude`、`minRhodium` 不满足、缺 `requiredConfig` | 隔离该插件，核心继续正常启动；`pluginRegistry` 记录状态 `failed` 与脱敏错误；记 `error` 日志 `plugin load failed` | 看板顶部与 `rh doctor` 列出该插件及具体原因；向依赖它的槽位或 `rh new --agent <id>` 返回明确中文错误“插件 `<id>` 加载失败：<具体原因>” |
+| 清单或静态校验失败 | 路径不存在、`plugin.json` 缺失或损坏、字段非法、保留名冲突、指向 `claude`、`minRhodium` 不满足、缺 `requiredConfig`；扫到的插件同样适用（另有 `id` 与目录名不一致） | 隔离该插件，核心继续正常启动；`pluginRegistry` 记录状态 `failed` 与脱敏错误；记 `error` 日志 `plugin load failed` | 看板顶部与 `rh doctor` 列出该插件及具体原因；向依赖它的槽位或 `rh new --agent <id>` 返回明确中文错误“插件 `<id>` 加载失败：<具体原因>” |
 | Agent 插件握手超时 / `fatal` / 坏输出 | 超出 `pluginHandshake` 未回 `ready`、`ready.proto !== 1`、收到 `fatal` 或非法 JSON 行 | 终止该子进程（`TERM`->`KILL`）；`retryable: false` 时直接落为未运行并停止无意义续跑；非法 JSON 行触发 `protocol_error` 并按协议异常上报 | 槽位回到 `off`/`crashed`，向联系窗口与看板事件发送脱敏故障通知（附 `err.log` 末行） |
 | Agent 插件回合中崩溃或中断卡死 | 进程意外非零退出，或收到 `interrupt` 超过 `pluginInterrupt`（10s）仍不回 `turn_end` | 经托管进程写出 `exit`；意外退出走核心现有崩溃续跑逻辑，10 分钟内连续崩溃 3 次触发熔断；中断卡死先升为 `close` 再 `TERM`/`KILL` 后重启投递排队消息 | 触发续跑时发状态提示；达熔断上限后停在未运行状态并告知用户需手动恢复 |
 | IM 插件握手失败 / 能力表非法 | 找不到命令、`init` 超时、能力表校验不通过 | 中止启动该 Bot 的适配器，不计入在线适配器，核心其余 Bot 与看板正常服务；记 `error` 日志 `plugin im init failed` | 该 Bot 状态标为 `faulted`（故障），在看板拓扑图/列表亮故障点，并在主窗口（若有）发出通知 |
+| 图标不可用 | `icon` 不是插件目录里的 SVG/PNG、越界、不存在或超 256KB（§4.6） | 插件照常加载，丢掉图标；记 `warn` 日志 `plugin icon unusable` | `rh doctor` 一条警告；看板显示通用徽章 |
+| 导入查询失败或超时 | `query` 超过 `pluginRpc`（30s）没回 `query_result`、进程先退出、回 `ok: false` 或不合法的结果（§3.5） | 收掉查询进程（关 stdin、`TERM`、`KILL`）；不计崩溃，不改插件状态 | 列表照常给出其余对话并写明这个插件列不出的原因；按 ID 导入或读历史失败时整个导入失败，不建槽位 |
+| 建 Bot 向导失败或中途退出 | 首步超过 `pluginHandshake` 未到、`wizard` 报错、报“完成”前退出、完成字段不合格（§3.6） | 收掉向导进程，流程失败，配置不改 | `rh bot` 打印失败原因并以非零码退出 |
 | IM 插件运行期崩溃、结局不明或 RPC 超时 | 运行中退出，`send`/`edit` 因回执丢失或未捕获异常返回 `unknown`，或超过 `pluginRpc`（30s）未响应 | 运行崩溃按退避重连，连续失败达 `limits.botFailures`（5 次）熔断标 `faulted`；返回 `unknown` 或单次 RPC 超时均将出站记录标为 `unknown`，绝不重发 | 看板显示重连中或故障，主窗口收一条故障通知；`rh send` 回执写明“不知道发出去没有” |
+
+### 4.5 插件目录扫描
+
+核心启动时扫描 `config.toml` 所在目录下的 `plugins/`（[插件目录](../../GLOSSARY.md)），扫到的插件默认加载。用户不用为每个插件写 `[plugins.<id>]`。
+
+#### 扫哪里、怎么扫
+
+- 只扫 `<config.toml 所在目录>/plugins/` 这一层的子目录，不往下递归。
+- 不扫家目录、`~/.config`、系统全局目录或别的任何地方。
+- 不跟随符号链接（Windows 上含目录联接）：`plugins/` 本身是符号链接就不扫；子目录是符号链接就跳过，记 `info` 日志 `plugin scan skipped symlink`。
+- 以 `.` 开头的子目录跳过。
+- 子目录里没有 `plugin.json`：不算插件，跳过，不报错。
+- `plugins/` 不存在：什么都不扫，不报错。
+- 子目录名就是插件 ID，清单 `id` 必须与它一致。
+- 扫描只读清单，不拉起任何进程。agent 插件到建槽位或槽位启动时才拉起，IM 插件到有 Bot 用它时才拉起，和登记的插件一样。
+- 扫描在读配置时做（`src/config.ts`），所以 `[bots.<名字>].platform` 与 `[programs]` 可以引用扫到的插件。
+
+#### 和 `[plugins.<id>]` 怎么合
+
+| `config.toml` 里的写法 | `plugins/<id>/` 存在 | 结果 | `rh doctor` 的来源 |
+|---|---|---|---|
+| 没有 `[plugins.<id>]` | 是 | 加载 `plugins/<id>/` | 扫描到 |
+| `[plugins.<id>]` 只有 `enabled = false` | 是 | 禁用，不读清单 | 扫描到 |
+| `[plugins.<id>]` 没有 `path`，有 `config` 表 | 是 | 加载 `plugins/<id>/`，用这份 `config` | 扫描到 |
+| `[plugins.<id>]` 有 `path` | 是或否 | 加载 `path` 指的目录，`plugins/<id>/` 不用 | 配置登记 |
+| `[plugins.<id>]` 启用、没有 `path` | 否 | 该插件失败：“`plugins.<id>` 没有 `path`，`plugins/` 里也没有 `<id>`” | 配置登记 |
+
+- `PluginConfigEntry` 新增 `source: "scan" | "config"`，加载器、`rh doctor` 和看板元数据都带上它。
+- `rh doctor` 每个插件一行，写明来源，例如“插件 `dsh`（agent 0.1.0，扫描到）已加载”“插件 `weixin`（配置登记）已禁用”。
+
+#### 扫到坏清单
+
+- 扫到的清单损坏、字段非法、`id` 与目录名不一致、保留名冲突、指向 `claude`、版本过低或缺 `requiredConfig`，处理和登记的插件完全一样（§4.4“清单或静态校验失败”）：这个插件失败并隔离，核心照常启动。
+- 原因前加上目录，例如“插件 `foo`（扫描到 `plugins/foo`）加载失败：invalid plugin.json: …”。
+- 不想加载它，就删掉这个目录，或写 `[plugins.foo] enabled = false`。
+
+#### 信任边界
+
+单用户、单机的威胁模型下，能往用户自己的 `plugins/` 里写东西的人，本来就能以这个用户的身份跑代码，扫描不扩大攻击面。边界由 [ADR-0015](../adr/0015-out-of-process-plugins.md) §2 写明：只信 `config.toml` 旁边这一个目录和 `path` 显式指的目录。
+
+### 4.6 插件图标
+
+插件可以带一个图标，看板在显示内置 agent 或内置 IM 平台图标的地方显示它。
+
+#### 清单字段
+
+- 通用可选字段 `"icon"`：插件目录里的一个 SVG 或 PNG 文件的相对路径，例如 `"icon": "icon.svg"`。
+- 加载时检查：
+  - 是相对路径，扩展名是 `.svg` 或 `.png`（不分大小写）；
+  - 解析真实路径后仍在插件目录里（不经 `..` 或符号链接跑到外面）；
+  - 是普通文件，不超过 256KB。
+- 检查不过：插件照常加载，只是没有图标；`rh doctor` 记一条警告“插件 `<id>` 的图标不可用：<原因>”。
+
+#### 看板怎么取、怎么画
+
+- 看板元数据 `agents[]` 与 `platforms[]` 新增 `icon?: string`，值为 `api/plugin-icon?id=<id>&v=<版本>`；没有可用图标时省略。
+- `GET /api/plugin-icon?id=<id>`：
+  - 只给已加载且图标可用的插件，否则 `404`；
+  - 从插件目录读文件，`content-type` 按扩展名为 `image/svg+xml` 或 `image/png`；
+  - 带 `x-content-type-options: nosniff` 与 `content-security-policy: sandbox`；
+  - 地址随插件版本变，所以 `cache-control: private, max-age=31536000, immutable`。
+- 前端只用 `<img>` 显示图标，从不把 SVG 内联进页面，所以 SVG 里的脚本不会跑。
+- 显示的地方只改两个公共组件，所有用到它们的地方自动跟上：
+  - agent 图标：`web/src/common.tsx` 的 `AgentLogo`（建槽位、切 agent、卡片、额度卡、时间线、拓扑图等）；
+  - IM 平台图标：`web/src/faces.tsx` 的 `Mark`（来源行、Bot 列表、拓扑图等）。
+- 没有图标，或图片加载失败（`onError`）：照旧显示通用徽章（agent 为 `Bot` 图标，IM 为对话气泡）。
 
 ---
 
@@ -526,7 +768,7 @@ target = "work/main"
 | 序号 | 核心文件 | 现状问题 | 改造内容与非内置默认值 |
 |---|---|---|---|
 | 1 | `src/contracts.ts` | `AgentKind = "claude" \| "pi" \| "codex"` 与 `Platform = "qq" \| "telegram" \| "feishu" \| "fake"` 为闭集联合 | 拆分为 `BuiltinAgentKind` / `AgentKind = BuiltinAgentKind \| (string & {})` 与 `BuiltinPlatform` / `Platform = BuiltinPlatform \| (string & {})`；既不丢内置三家的编译期静态检查，又允许任意已注册插件 ID |
-| 2 | `src/agents.ts` | 静态导出 `AGENTS`、`AGENT_KINDS`、`TYPING`、`headlessEnv()`、`terminalUnset()` | 增加 `builtin`、`tui`、`importable`、`steer`、`supportedCommands` 属性；保留内置定义不变，提供运行时插件注册函数 `registerAgentPlugin()` 与动态查询函数 `agentDef(kind)`；非内置插件默认 `claudeKeys: false`、`tui: false`、`importable: false`，确保 `headlessEnv` 自动剥离全部 Anthropic/Claude/Herdr 凭据 |
+| 2 | `src/agents.ts` | 静态导出 `AGENTS`、`AGENT_KINDS`、`TYPING`、`headlessEnv()`、`terminalUnset()` | 增加 `builtin`、`tui`、`importable`、`steer`、`supportedCommands` 属性；保留内置定义不变，提供运行时插件注册函数 `registerAgentPlugin()` 与动态查询函数 `agentDef(kind)`；非内置插件默认 `claudeKeys: false`、`tui: false`、`paneImport: false`，`importable` 取清单 `import`（§3.5），确保 `headlessEnv` 自动剥离全部 Anthropic/Claude/Herdr 凭据 |
 | 3 | `src/platforms.ts` | 静态导出 `PLATFORMS`、`MADE`（依赖 `Exclude<Platform, "fake">`） | 保留 `BUILTIN_PLATFORMS` 与 `MADE` 仅包含 `qq`、`telegram`、`feishu`（供 `rh bot` 向导使用）；提供 `registerPlatformPlugin()` 与 `platformDef(p)`，动态提供 `label` 与 `capabilities()` |
 | 4 | `src/config.ts` | `loadConfig` 在加载阶段硬校验 `programs` 键名与 `[bots.<name>].platform`，拒绝未知平台 | 新增 `[plugins.<id>]`（支持相对 `config.toml` 目录解析）与 `durations.pluginHandshake`、`durations.pluginInterrupt`、`durations.pluginRpc` 解析；先校验保留键与结构，再对照内置表与已解析插件清单校验 `[programs]` 和 `[bots.<name>].platform` |
 | 5 | `src/plugin-loader.ts`（新增） | 无清单加载与隔离机制 | 启动时按 `config.plugins` 读取并校验 `plugin.json`（含 `herdr` 保留名、禁止指向 `claude`、`${PLUGIN_DIR}` 展开），输出成功注册项与隔离失败表，绝不抛出未捕获异常中断主进程 |
@@ -535,7 +777,7 @@ target = "work/main"
 | 8 | `src/transcript.ts` | `FORMATS` 仅含内置三家，`listConversations` 只扫内置目录 | 内置三家保持原样；新增通用格式幂等读写 `<stateDir>/transcripts/<agentKind>/<convId>.jsonl`：首次打开扫描加载 `"k"` 并截断末尾残缺或损坏半行（若有）后统一 `fsync` 一次；命中已有 `"k"` 可跳过重复追加但须确认文件已同步后方可推进 `outOffset`；新追加同样先 `fsync` 后提交检查点；读取端按 `"k"` 去重并容忍末尾不完整半行，供插件对话读取、看板预览和 `/resume` 列表使用 |
 | 9 | `src/tui.ts` 与 `src/windows-tui-launch.ts` | `TERMINAL`、`RULES`、`packages` 为 `Record<AgentKind, ...>` | 改为 `Partial<Record<BuiltinAgentKind, ...>>`；在切换到终端入口先检查 `agentDef(kind).tui`，为 `false` 时友好拒绝（“该 agent 插件不支持终端模式”） |
 | 10 | `src/router.ts`、`src/commands.ts`、`src/im-commands.ts`、`src/feishu.ts` | `CARRY` 为 `Record<AgentKind, ...>`、`slashMenu` 与 `/rh_agent` 依赖静态 `AGENT_KINDS`、`router.ts` 隐含假设所有非 fake 平台在 `ONBOARD` 中 | `CARRY` 窄化为 `BuiltinAgentKind`；通用命令检查插件 `supportedCommands` 并在不支持时友好拒绝；`steer: false` 时排队等待回合结束；`/rh_agent` 与 `rh new --agent` 改读动态注册列表 |
-| 11 | `src/board.ts`、`web/src/*` 与 `src/doctor.ts` | `board.ts` 用静态 `THROUGH` 正则匹配来源行、用 `AGENT_KINDS` 查记录；前端多处持有 `Record<AgentKind, ...>` 或静态列表；`doctor.ts` 只检查内置 `claude` 进程参数 | `board.ts` 的 `THROUGH` 动态包含插件平台 `label`，在 `/api/board`、`/api/slot`、`/api/rhodium` 返回动态列表与插件状态；前端 `common.tsx`/`faces.tsx`/`tools.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`write.tsx` 改用通用徽章与隐藏 TUI/导入入口；`doctor.ts` 复用 `src/pi-pane-credentials.ts` 的 `doctorBare` 与 `anthropicSet` 巡检运行中插件进程子树是否拉起 `claude` 或带 `--bare`/Anthropic 凭据 |
+| 11 | `src/board.ts`、`web/src/*` 与 `src/doctor.ts` | `board.ts` 用静态 `THROUGH` 正则匹配来源行、用 `AGENT_KINDS` 查记录；前端多处持有 `Record<AgentKind, ...>` 或静态列表；`doctor.ts` 只检查内置 `claude` 进程参数 | `board.ts` 的 `THROUGH` 动态包含插件平台 `label`，在 `/api/board`、`/api/slot`、`/api/rhodium` 返回动态列表与插件状态；前端 `common.tsx`/`faces.tsx`/`tools.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`write.tsx` 改用通用徽章（插件带图标时改用图标，§4.6）、隐藏 TUI 入口，未声明 `import` 的插件隐藏导入入口；`doctor.ts` 复用 `src/pi-pane-credentials.ts` 的 `doctorBare` 与 `anthropicSet` 巡检运行中插件进程子树是否拉起 `claude` 或带 `--bare`/Anthropic 凭据 |
 | 12 | `src/detached.ts` 与 `holder/src/main.rs` | `detached = win32 \|\| darwin`；`holder/src/main.rs` 的 `probe` 命令仅对 Windows 和 macOS 编译 | 复用现有 `src/detached.ts`（增加仅测试生效开关 `process.env.RHODIUM_TEST_DETACHED === "1"`），并在 `holder/src/main.rs` 对 Linux 开放 `probe` 与 `live.lock`；生产环境 Linux 仍默认走 systemd |
 
 ---
@@ -585,6 +827,7 @@ target = "work/main"
   - **PR 1 提前交付最小可执行检查**：随公开契约与运行时 SDK 一起交付清单校验 + 环境变量防泄漏 + 握手 + 正常单回合/单消息往返 + 优雅退出检查，让三位组员在各自插件开工第一天就能基于 SDK 编写并运行自测；
   - **PR 6 扩展为完整 7+7 黑盒契约矩阵**（用法：`bun scripts/plugin-conformance.ts --manifest <path/to/plugin.json> [--config <json>] [--timeout 10000]`）：
     - **Agent 插件 7 项检查**：1) 清单字段与静态合规检查（非保留名、启动命令与 `program` 不得指向 `claude`）；2) 环境变量中无敏感凭据泄漏；3) 握手成功并在超时内回传 `ready`；4) 正常一轮问答；5) 提问、首次交付成功后发 `ask_resolved` 闭环与重复同一 `requestId` 的 `answer` 去重（处理中不提前确认），或不支持命令规范响应；6) 打断 `interrupt` 与优雅关闭 `close`（及子进程无残留）；7) 畸形/超限输入与模拟失败错误回报规范。
+    - **按声明加测的项**：声明 `import` 的 agent 插件加测一次性查询（§3.5），声明 `wizard` 的 IM 插件加测建 Bot 向导（§3.6），带 `icon` 的插件在清单检查里核对图标（§4.6）。
     - **IM 插件 7 项检查**：1) 清单与能力表校验；2) `init` 握手并在超时内发 `connected`；3) `send` 正常文本与超长/纯文本分片/Markdown（含 `markdown: null`）边界处理；4) `edit` / `drop_buttons` / `set_menu` 按能力声明一致表现（未声明支持的能力跳过对应调用，如纯文本追加型平台仅测 `send`）；5) `kept_get` / `kept_set` 读写闭环（含私聊通道映射、同步游标与上下文令牌持久化验证）；6) 模拟发送失败或缺少会话上下文时返回规范 `{ status: "failed" }` 而非进程崩溃；7) `shutdown` 优雅退出且无残留进程。
 - **核心内置最小示例插件（随仓库提交，供 CI 与演示复现，并作为组员参考样板）**：
   - `examples/plugins/echo-agent/`：基于 `packages/plugin-sdk/` 实现（`implements AgentPlugin` + `runAgentPlugin`，零第三方依赖），实现 `rh-agent/1`，包含正常回显、工具调用模拟、提问与复用 SDK 三态去重完成 `ask_resolved`、错误触发词（`/fail`）与延迟 `session` 模式。
@@ -626,7 +869,7 @@ target = "work/main"
      - 原生 holder 与跨平台烟测（`hold`、`windows-paths`、`session-processes`、`tui-process`、`windows-tui-launch`、`windows-native`、`native-holders`、`pi-pane-credentials`）
      - Windows 下的 `plugin-sdk`、`plugin-loader`、`plugin-agent`、`plugin-im`、`plugin-env` 与示例插件契约测试（实测带空格路径、混合大小写环境键过滤、`.cmd` / 隐藏窗口启动与 UTF-8 解析）
 3. **`macos-check`（`macos-15`）**：
-   - 已定为 `workflow_dispatch` 手动触发（见 §11 决策 4），不随普通 `push` 与 PR 自动运行。
+   - 已定为 `workflow_dispatch` 手动触发（见 §12 决策 4），不随普通 `push` 与 PR 自动运行。
 
 ---
 
@@ -676,8 +919,15 @@ target = "work/main"
   2. **迟到会话 ID 上报**：新建会话时 `agy` 可能在启动后、首轮开始甚至首轮结束后才给出 `<ID>`，核心支持 `ready.session` 为 `null`，并在收到 `turn_start.session`、独立 `session` 事件或 `turn_end.session` 时立刻落库，供下一轮和重启后以 `--conversation <ID>` 续接。
   3. **审批切换策略**：`agy` 主要通过启动参数控制权限跳过（如 `--dangerously-skip-permissions`），核心尊重其 `liveApproval: false`，改审批开关后等待槽位空闲自动重启生效。
   4. **托管对话记录（统一格式原因）**：`agy` 在本机除了保存未公开 protobuf 的会话 SQLite 库（禁止读写）外，也会在 `~/.gemini/antigravity-cli/brain/<ID>/.system_generated/logs/transcript.jsonl` 边跑边写明文 JSONL；但各家插件的记录路径与字段格式各不相同，核心仍然统一按幂等键写入 `<stateDir>/transcripts/agy/`，避免核心为每家插件单独写解析器，保证看板对话页与 `rh read` 对所有插件一致工作。
-  5. **环境变量隔离与不碰现有面板**：核心拉起插件时剥离 `HERDR_*` 与 Anthropic 凭据变量，插件在测试和运行时严格禁止读写用户正在使用的 Herdr 会话或系统守护进程，也不得拉起或包装 `claude`。
-  6. **支持单回合式或常驻式封装**：如果 `agy` 最终走的是单回合命令行模式，插件包装进程自己保持常驻并讲 `rh-agent/1`，在每次收到 `send` 时按保存的 `session` 续接外部命令，核心无需感知下游是否每次重建子进程。
+  5. **对话导入（§3.5）**：`agy` 插件可以在清单写 `"import": true`，靠同一份明文 `transcript.jsonl` 支持导入：
+     - `list`：每个 `brain/<ID>/` 是一段对话，`id` 为 `<ID>`，`updatedAt` 取 `transcript.jsonl` 的修改时间，`title` 取第一句用户消息的开头；`dir` 从记录里取工作目录，取不到的不列；
+     - `busy`：有 `agy` 进程正以 `--conversation <ID>` 跑着这段对话时为真；
+     - `read`：把 `transcript.jsonl` 里的用户消息、助手消息和工具调用转成标准块，其余跳过；
+     - 只读这些文件，不写 `brain/` 目录，也不碰会话 SQLite 库；
+     - 导入后槽位以 `init.session = { resume: "<ID>" }` 启动，插件照旧用 `--conversation <ID>` 续接；
+     - 记录格式随 `agy` 版本变化，插件要锁定版本并用录制的样例目录测 `list` 与 `read`。
+  6. **环境变量隔离与不碰现有面板**：核心拉起插件时剥离 `HERDR_*` 与 Anthropic 凭据变量，插件在测试和运行时严格禁止读写用户正在使用的 Herdr 会话或系统守护进程，也不得拉起或包装 `claude`。
+  7. **支持单回合式或常驻式封装**：如果 `agy` 最终走的是单回合命令行模式，插件包装进程自己保持常驻并讲 `rh-agent/1`，在每次收到 `send` 时按保存的 `session` 续接外部命令，核心无需感知下游是否每次重建子进程。
 
 ### 9.3 微信官方 Bot 插件（`weixin`）
 
@@ -690,7 +940,16 @@ target = "work/main"
     1. **获取绑定二维码**：调用 **`POST /ilink/bot/get_bot_qrcode?bot_type=3`**，请求体为 `{"local_token_list": []}`（可选附带至多 10 个本地旧令牌）；请求头携带 `Content-Type: application/json`、`AuthorizationType: ilink_bot_token`、`X-WECHAT-UIN`（随机 uint32 十进制串的 Base64 编码）、`iLink-App-Id: bot` 与 `iLink-App-ClientVersion`（`0x00MMNNPP` 编码十进制串，如 `3.0.1` -> `"196609"`），不带 `Authorization` 与 `base_info`。
     2. **长轮询扫码状态与验证码（PIN）**：调用 `GET /ilink/bot/get_qrcode_status?qrcode=<qrcode>`（35s 长轮询，仅携带应用头 `iLink-App-Id` 与 `iLink-App-ClientVersion`，不带 `Authorization`、`AuthorizationType`、`X-WECHAT-UIN`），按官方协议处理全部状态：`wait`、`scaned`、`confirmed`（保存 `bot_token`、`ilink_bot_id`、`baseurl`、`ilink_user_id`）、`expired`、`scaned_but_redirect`（切往 `https://<redirect_host>` 轮询）、`binded_redirect`（已绑定无新凭据）、含 `need_verifycode` 状态（终端提示输入手机展示的数字并在下次轮询带 `&verify_code=<digits>`，`scaned` 后清除）以及 `verify_code_blocked`（清除数字并重新 `POST` 取码，刷新计数超 3 次停止）。
   - **已鉴权业务请求公共头与 `base_info`**：`getupdates`、`sendmessage`、`getuploadurl` 统一携带 `Content-Type: application/json`、`Authorization: Bearer <bot_token>`、`AuthorizationType: ilink_bot_token`、`X-WECHAT-UIN`、`iLink-App-Id: bot`、`iLink-App-ClientVersion`；请求体均带 `base_info: { channel_version: "3.0.1/rhodium-weixin-0.1.0", bot_agent: "Rhodium" }`（将 `3.x.x` 版本号置于前三位，确保服务端识别）。
-  - **配置与启动分工**：插件提供独立的一次性终端扫码命令（如 `bun run plugins/weixin/login`），扫码成功后把 `token`（及可选 `baseUrl`、`cdnBaseUrl`、`accountId`）写入 `0600`（Windows 为本人私有 ACL）保护的 `config.toml` `[bots.<name>]`（清单声明 `requiredConfig: ["token"]`、`optionalConfig: ["baseUrl", "cdnBaseUrl", "accountId"]`）。启动时插件直接凭配置 `token` 在 `durations.pluginHandshake`（10s）内完成 `init` 握手，不阻塞等扫码；首次配对验收的配置保持**微信 Bot 未预填 `owner`、全局未设 `mainChat`**，以便完整运行 `rh pair my-weixin`。若运行中 `getupdates` 返回 `ret === -14` 或 `errcode === -14`（登录态过期），插件发送 `connected(up: false, error: "微信登录态已过期，请重新扫码更新 token")` 触发告警。
+  - **扫码登录走建 Bot 向导（§3.6）**：清单写 `"wizard": true`，用户运行 `rh bot my-weixin weixin [工作区/槽位]`，插件不再自带单独的登录命令，也不自己写配置文件：
+    1. 插件 `POST /ilink/bot/get_bot_qrcode` 取码，报 `wizard_step { kind: "qr", data: <二维码内容>, text: "用手机微信扫码" }`；
+    2. 轮询 `get_qrcode_status`：`wait` 时报 `waiting`（“等待扫码”）；`scaned` 时报 `waiting`（“已扫码，请在手机上确认”）；`scaned_but_redirect` 时换到新地址接着轮询，不报新步骤；
+    3. `need_verifycode` 时发 `wizard_input { label: "输入手机上显示的数字", secret: false }`，把回值带进下次轮询的 `verify_code`；
+    4. `expired` 或 `verify_code_blocked` 时重新取码，报一张新的 `qr`；刷新超过 3 次，`wizard` 返回错误“二维码过期太多次，请重新运行 rh bot”；
+    5. `binded_redirect` 时 `wizard` 返回错误“这个微信已经绑定过 Bot，没有新的凭据”；
+    6. `confirmed` 时 `wizard` 返回 `{ config: { token: <bot_token>, baseUrl: <baseurl>, accountId: <ilink_bot_id> } }`；`ilink_user_id` 不作为 `owner` 返回，主人照旧经配对产生；
+    7. 核心检查字段后写进 `0600`（Windows 为本人私有 ACL）保护的 `config.toml` `[bots.my-weixin]`（清单声明 `requiredConfig: ["token"]`、`optionalConfig: ["baseUrl", "cdnBaseUrl", "accountId"]`），随后显示配对码，用户在微信里发码完成配对并自动设主窗口；
+    8. 本地模拟时在 `[plugins.weixin.config]` 写 `baseUrl` 指向 `mock-weixin-server`，向导就对它取码与轮询。
+  - **配置与启动分工**：也可以跳过向导，手写 `[bots.<name>]` 的 `token`。启动时插件直接凭配置 `token` 在 `durations.pluginHandshake`（10s）内完成 `init` 握手，不阻塞等扫码；首次配对验收的配置保持**微信 Bot 未预填 `owner`、全局未设 `mainChat`**，以便完整运行 `rh pair my-weixin`。若运行中 `getupdates` 返回 `ret === -14` 或 `errcode === -14`（登录态过期），插件发送 `connected(up: false, error: "微信登录态已过期，请重新扫码更新 token")` 触发告警。
   - **运行期状态持久化**：增量同步游标 `get_updates_buf`（`kept` 键 `"sync_buf"`）与每位用户的最新 `context_token`（`kept` 键 `"ctx:<userId>"`）均经 `rh-im/1` 持久保存（核心按 `plugin:<botId>:` 自动隔离）。
 - **收发流程、批次游标推进与附件加解密**：
   - **入站长轮询与批次确认顺序**：持续调用 `POST /ilink/bot/getupdates`（请求体仅发送上次保存的 `get_updates_buf`，默认长轮询 `35s`）。当一次拉取返回同批多条消息 `[A, B, ...]` 与新游标 `nextBuf` 时，插件对批内每条消息依次：1) 先调 `kept_set("ctx:" + from_user_id, context_token)` 保存用户上下文（私聊天然满足 `inbound.chat === inbound.sender === from_user_id`；`item_list[]` 含文本/`ref_msg`、`voice_item.text` 转写或 `voice: true`、以及加密图片/文件/视频的 `attachmentId`）；2) 再通过 `ctx.inbound(msg)` **发出带回执的 `inbound` 请求并等待核心返回 `{ ok: true }`**。**只有当本批所有消息全部拿到核心 `{ ok: true }` 落库回执后，插件才调用 `kept_set("sync_buf", nextBuf)` 推进游标**，绝不越过核心尚未接收的消息。
@@ -722,9 +981,74 @@ target = "work/main"
 
 ---
 
-## 10. 实现拆解与课程交付分工
+## 10. 四项新能力的实现拆分
 
-### 10.1 PR 规划与依赖关系
+插件图标、目录扫描、对话导入与建 Bot 向导按下面的顺序分三个 PR 实现，每个 PR 单独审查、合并。三个 PR 都不碰 TUI：插件槽位的 `tui` 始终为 `false`，切终端照旧友好拒绝。
+
+### 10.1 PR (a)：目录扫描与插件图标
+
+- **范围**：§4.5 的扫描与合并规则、`rh doctor` 的来源说明；§4.6 的 `icon` 字段、图标接口与前端显示。
+- **改动文件**：
+  - `src/config.ts`：`parsePlugins` 扫 `plugins/`，`path` 在扫到同名目录时可省略，`PluginConfigEntry.source`；
+  - `src/plugin-loader.ts`：扫到时检查清单 `id` 与目录名一致；检查 `icon`，把可用的图标路径记进加载结果；
+  - `packages/plugin-sdk/manifest.ts`：`icon` 的类型与格式校验；
+  - `src/doctor.ts`：每个插件写明“扫描到”或“配置登记”，图标不可用的警告；
+  - `src/board.ts`：元数据的 `icon`，`GET /api/plugin-icon`；
+  - `web/src/common.tsx`（`AgentLogo`）、`web/src/faces.tsx`（`Mark`）：有 `icon` 时用 `<img>`，失败退回通用徽章；
+  - `examples/plugins/echo-agent/`、`examples/plugins/local-im/`：各加一个图标；
+  - `scripts/plugin-conformance.ts`：清单检查覆盖 `icon`。
+- **验收**：
+  - `test/plugin-loader.test.ts`：扫到即加载；`enabled = false` 禁用扫到的插件；`path` 优先于扫描；没有 `plugin.json` 的子目录跳过；符号链接子目录与 `.` 开头的子目录跳过；坏清单隔离且核心照常启动；`id` 与目录名不一致失败；启用但没有 `path` 也没扫到时失败；
+  - 同一文件：`icon` 的绝对路径、`..` 越界、符号链接越界、错扩展名、超 256KB 都只丢图标不丢插件；
+  - `rh doctor` 输出含“扫描到”和“配置登记”；
+  - 看板测试：`/api/plugin-icon` 对可用图标返回正确类型与安全头，对未知插件返回 `404`；页面用 `<img>` 显示插件图标，图片坏掉时显示通用徽章；
+  - 截图：建槽位、卡片、来源行与拓扑图上的插件图标，手机和宽屏、浅色和深色各一张。
+
+### 10.2 PR (b)：对话导入
+
+- **前置**：PR (a)。
+- **范围**：§3.5 的 `import` 字段、一次性查询协议、`rh import` / `/rh_import` / 网页导入对话框对插件对话的列表与导入、导入时写托管对话记录开头。
+- **改动文件**：
+  - `packages/plugin-sdk/agent.ts`、`index.ts`：`query` / `query_result` 类型、`ImportConversation`、`ImportBlock`、`AgentPlugin.listConversations` 与 `readConversation`，`runAgentPlugin` 的查询分支；`manifest.ts`：`import` 字段；
+  - `src/plugin-query.ts`（新增）：拉起插件答一次查询，限时、收尾、报失败原因；
+  - `src/tui.ts`（`rh import` 的列表与按 ID 查找）、`src/router.ts`（列表里的 `busy` 标注、导入插件对话）、`src/board.ts`（`/api/importable` 与 `/api/importable/messages` 的插件分支）、`web/src/create.tsx`（`busy` 行不能选）；
+  - `src/plugin-transcript.ts`：把标准块写在托管对话记录开头；
+  - `src/agents.ts`、`src/plugin-loader.ts`：`importable` 取清单 `import`；
+  - `examples/plugins/echo-agent/`：用一个本地样例目录实现 `list` 与 `read`；
+  - `scripts/plugin-conformance.ts`：§3.5 的导入检查。
+- **验收**：
+  - `test/plugin-sdk.test.ts`：`query` 不触发 `init`，答完以 `0` 退出；未实现与抛错都回 `ok: false`；
+  - `test/plugin-query.test.ts`：正常列表；超时后进程被收掉且报超时；进程先退出报 `stderr` 末行；不合法的 `query_result` 当失败；
+  - 导入用例（用 `echo-agent`）：`rh import --dir` 同时列出内置与插件对话，已有槽位用过的不列；`busy` 的标出且按 ID 导入被拒；前缀跨插件歧义报“写长一点”；一个插件查询失败不影响其余，并写明原因；
+  - 导入后 `rh read` 与网页对话页能读到导入的历史，接着发消息时插件收到 `init.session = { resume }`，新回合接在历史之后；重启 `rhodium` 后历史不重复（幂等键）；
+  - 网页：导入对话框列出插件对话，预览显示用户与助手消息，`busy` 行不能选；截图同 PR (a) 的要求；
+  - 契约测试器对 `echo-agent` 的导入检查通过，对未声明 `import` 的插件跳过。
+
+### 10.3 PR (c)：建 Bot 向导
+
+- **前置**：PR (a)。与 PR (b) 无依赖，但按顺序在它之后做。
+- **范围**：§3.6 的 `wizard` 字段、向导协议、`rh bot <名字> <插件平台>`、完成字段检查与写配置、接上配对流程；§9.3 微信扫码登录改走向导。
+- **改动文件**：
+  - `packages/plugin-sdk/im.ts`、`index.ts`：`wizard` / `wizard_step` / `wizard_input` 类型、`ImPlugin.wizard`、`ImWizardContext`，`runImPlugin` 的向导分支；`manifest.ts`：`wizard` 字段；
+  - `src/bot-flow.ts`：插件平台的建 Bot 流程（拉起插件、把步骤记进日志、`paste` 状态带 `prompt`、完成字段检查、`shutdown` 收尾），`FlowView.platform` 放宽到插件平台；
+  - `src/bot.ts`：`paste` 状态按 `prompt` 读一行，`secret` 时不回显；
+  - `src/router.ts`：`rh bot` 接受声明 `wizard` 的插件平台，按清单的 `requiredConfig` / `optionalConfig` 检查凭据，拒绝 `--api-root` 与 `--paste`；
+  - `src/daemon.ts`：`add_bot` 对插件平台起 `PluginImAdapter`；
+  - `examples/plugins/local-im/`：一个走完二维码、等待、输入、完成的假向导；
+  - `scripts/plugin-conformance.ts`：§3.6 的向导检查。
+- **验收**：
+  - `test/plugin-sdk.test.ts`：`wizard` 不触发 `init`；步骤按顺序发出；`input` 等到核心回值；`shutdown` 触发 `signal` 并退出；
+  - 向导用例（用 `local-im`，终端用假的输入）：二维码、链接、等待依次出现在 `rh bot` 输出里；`secret` 输入不回显；完成后 `config.toml` 里有新 `[bots.<名字>]` 且只含声明过的键，随后显示配对码，发码后流程 `done`；
+  - 失败用例：首步超时、`wizard` 报错、中途退出、未声明的键、带 `owner`、缺 `requiredConfig`，都失败且配置不变；Ctrl-C 后插件进程退出、配置不变；
+  - 没声明 `wizard` 的插件平台，`rh bot` 照旧拒绝并提示手写配置；网页建 Bot 向导不列插件平台；
+  - 契约测试器对 `local-im` 的向导检查通过，对未声明 `wizard` 的插件跳过；
+  - 组员的 `weixin` 插件随后按 §9.3 实现向导，并用 `mock-weixin-server` 跑通同一套契约检查。
+
+---
+
+## 11. 实现拆解与课程交付分工
+
+### 11.1 PR 规划与依赖关系
 
 按已拍板方案，将核心插件化与配套工具拆分为 6 个独立 PR。PR 1 不碰核心 `src/` 业务代码，先冻结公开契约、交付运行时 SDK 与最小可执行契约检查器，合入后三位组员即可直接实现 `AgentPlugin`/`ImPlugin` 同步开工各自插件，核心内部改造（PR 2 -> PR 3/4/5 -> PR 6）并行推进：
 
@@ -767,7 +1091,7 @@ flowchart LR
 | **PR 5** | **看板动态元数据与跨平台本地模拟**：更新 `src/board.ts`（动态 `THROUGH` 正则与插件元数据接口）、`web/src/*`（`common.tsx`/`create.tsx`/`palette.tsx`/`card.tsx`/`tools.tsx`/`write.tsx`/`faces.tsx` 通用渲染与隐藏插件 TUI/导入入口）、`src/fake-im.ts` 与 `src/dev.ts`（增加回环 TCP 与 Windows 打包路径修补） | PR 2 | 中（约 1.5 人日） | 与 PR 3、PR 4 并行 | 看板在未知 agent/platform 下正常展示徽章和托管对话记录；Windows/Linux 下 `rh dev --fake` 跑通 |
 | **PR 6** | **完整契约矩阵、跨平台 CI 与零 Key 演示**：扩展 `scripts/plugin-conformance.ts` 至完整 7+7 矩阵与文档示例校验；复用 `src/detached.ts`（`RHODIUM_TEST_DETACHED=1`）并开放 `holder/src/main.rs` Linux `probe`/`live.lock`；新增 `bunfig.ci.toml`、`scripts/ci-test.sh`、`.github/workflows/ci.yml`（迁移现有 Windows 必跑构建与 `smoke` 步骤并加入插件测试，保留预览打包与探针门控）并调整 `release.yml`；补全 `demo/` 无账号基线假 agent 与演示脚本 | PR 3, 4, 5 | 中（约 1.5 人日） | 汇聚收尾 | GitHub Actions 在 `main` 的 `push` 与 PR 上跑通 Linux 与 Windows 真实构建与测试并留有成功记录；阶段 A 零 Key 演示走通 |
 
-### 10.2 课程交付分工与验收节点
+### 11.2 课程交付分工与验收节点
 
 为确保满足大作业任务书对个人代码/测试贡献、真实交叉 Review、设计文档与最终制品交付的硬性要求，成员分工与关键验收节点如下：
 
@@ -787,7 +1111,7 @@ flowchart LR
 
 ---
 
-## 11. 已拍板的决策记录
+## 12. 已拍板的决策记录
 
 以下 4 项选型决策已于 2026-11-21 拍板定案，连同正文既定架构（两类插件独立进程、`agent` 插件跑在 `rh-hold` 内、插件配置 `path` 支持相对路径、核心写幂等托管对话记录、Linux CI 复用 `src/detached.ts`）一起作为实现与验收基线：
 
