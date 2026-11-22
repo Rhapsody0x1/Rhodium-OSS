@@ -1565,6 +1565,8 @@ process.stdin.resume();
     const { import: _, ...plain } = JSON.parse(readFileSync(join(example, "plugin.json"), "utf8"));
     writeFileSync(join(dir, "plugin.json"), JSON.stringify({ ...plain, command: ["bun", "run", join(example, "index.ts")] }));
     writeFileSync(join(dir, "icon.svg"), readFileSync(join(example, "icon.svg")));
+    // Its test inputs too: without interruptText the interrupt group races the echo's turn.
+    writeFileSync(join(dir, "conformance.json"), readFileSync(join(example, "conformance.json")));
     const plainRes = await runConformance(join(dir, "plugin.json"));
     expect(plainRes.code).toBe(0);
     expect(plainRes.stdout.match(/^ok \d+ - /gm)).toHaveLength(7);
