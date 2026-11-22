@@ -1,0 +1,20 @@
+{
+  "manifestVersion": 1,
+  "kind": "agent",
+  "id": "dsh",
+  "name": "DeepSeek Harness",
+  "statusName": "DeepSeek Harness",
+  "version": "0.1.0",
+  "protocol": "rh-agent/1",
+  "minRhodium": "1.5.0",
+  "program": "dsh",
+  "command": ["bun", "run", "${PLUGIN_DIR}/index.ts"],
+  "capabilities": {
+    "liveApproval": true,
+    "steer": false,
+    "commands": ["compact"]
+  },
+  "requiredConfig": [],
+  "optionalConfig": ["fixture", "provider", "model"],
+  "icon": "icon.svg"
+}
