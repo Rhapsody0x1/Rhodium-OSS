@@ -10,7 +10,7 @@ import { createServer, type Socket } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
 import { agentDef, allAgentKinds, headlessEnv } from "./agents";
 import { avatarDir, errorKind, refreshAvatars } from "./avatars";
-import { botFlows } from "./bot-flow";
+import { botFlows, pluginWizard } from "./bot-flow";
 import { inFront, serveBoard, type Fronts, type Hear } from "./board";
 import { version } from "../package.json";
 import { addBot, BUILD, COMMIT, fixedOwners, hasHerdr, locate, loadConfig, owners, paired, removeBot, renameTarget, setMainChat, type BotConfig, type Config } from "./config";
@@ -1198,6 +1198,13 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
       }),
     store,
     (name) => config.bots[name]?.target,
+    (platform, name, tell) => {
+      const rec = plugins.plugins[platform];
+      if (rec?.status !== "loaded") return Promise.reject(new Error(`插件 ${platform} 没有加载。`));
+      const { stopGrace, pluginHandshake } = config.durations;
+      const shared = config.plugins[platform]?.config ?? {};
+      return pluginWizard(rec, { botName: name, config: shared, env: headlessEnv(platform, agentBaseEnv(config)), handshakeMs: pluginHandshake, stopGrace }, tell);
+    },
   );
 
   const socket = join(config.socketDir, "rh.sock");

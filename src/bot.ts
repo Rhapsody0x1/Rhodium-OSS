@@ -51,7 +51,8 @@ export async function bot(args: string[], ask: Ask): Promise<number> {
       }
       let pasted: Record<string, string>;
       try {
-        pasted = await PASTE[platform]!();
+        // A plugin's wizard asks for its own line (spec plugins §3.6), unechoed when secret.
+        pasted = f.prompt ? { value: await readLine(`${f.prompt.label}${f.prompt.secret ? "（不回显）" : ""}：`, f.prompt.secret) } : await PASTE[platform as Made]!();
       } catch (err) {
         await op("cancel");
         return fail((err as Error).message);

@@ -14,6 +14,7 @@ type Fixture = {
   normalText?: string; interruptText?: string; askText?: string; deliveredText?: string; failureText?: string;
   chat?: string; replyTo?: string; failureChat?: string; kept?: Record<string, string>; stateless?: boolean; localPlatform?: boolean;
   importSession?: string;
+  wizardInputs?: Record<string, string>;
 };
 
 function fixtureAt(dir: string): Fixture {
@@ -28,6 +29,7 @@ function fixtureAt(dir: string): Fixture {
   check(f.askText === undefined || nonempty(f.deliveredText), "askText requires a downstream deliveredText marker");
   check(f.stateless === undefined || typeof f.stateless === "boolean", "Invalid stateless fixture flag");
   check(f.localPlatform === undefined || typeof f.localPlatform === "boolean", "Invalid localPlatform fixture flag");
+  check(f.wizardInputs === undefined || strings(f.wizardInputs), "Fixture wizardInputs must map labels to string values");
   return f as Fixture;
 }
 
@@ -357,6 +359,47 @@ async function testIm(o: Options, fixture: Fixture) {
   } finally {
     try { await p?.clean(); } finally { await server?.stop(true); }
   }
+  if (o.manifest.kind === "im" && o.manifest.wizard) {
+    await testWizard(o, fixture);
+    ok(8, "bot wizard steps, inputs, done fields and shutdown");
+  }
+}
+
+/** The bot wizard (spec §3.6): each wizard_input answered from wizardInputs by label, every step valid,
+ *  done fields the core would write; then a second run shut down after its first step. */
+async function testWizard(o: Options, fixture: Fixture) {
+  const peer = () => new Peer(o, (m, p) => {
+    const v = m.params;
+    if (m.method === "wizard_step") {
+      check(object(v) && (v.text === undefined || typeof v.text === "string")
+        && (v.kind === "qr" ? typeof v.data === "string" : v.kind === "link" ? typeof v.url === "string" : v.kind === "waiting" && typeof v.text === "string"), "Invalid wizard_step");
+    } else if (m.method === "wizard_input") {
+      check(object(v) && nonempty(v.label) && (v.secret === undefined || typeof v.secret === "boolean"), "Invalid wizard_input");
+      const value = fixture.wizardInputs?.[v.label];
+      check(value !== undefined, "No wizardInputs value for: " + v.label);
+      p.write({ jsonrpc: "2.0", id: m.id, result: { value } });
+    } else if (m.method !== undefined && m.id !== undefined) p.write({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "Unsupported reverse method" } });
+  });
+  const start = async (p: Peer) => {
+    p.write({ jsonrpc: "2.0", id: 1, method: "wizard", params: { proto: 1, botName: o.manifest.id, config: o.config } });
+    await p.wait(0, f => f.method === "wizard_step" || f.method === "wizard_input", "first wizard step");
+  };
+  let p = peer();
+  try {
+    await start(p);
+    const done = await p.wait(0, f => f.id === 1 && !("method" in f), "wizard done");
+    check(object(done.result) && strings(done.result.config) && (done.result.text === undefined || typeof done.result.text === "string"), "Invalid wizard done: " + JSON.stringify(done.error ?? done.result));
+    const fields = done.result.config, declared = [...o.manifest.requiredConfig ?? [], ...o.manifest.optionalConfig ?? []];
+    for (const key of Object.keys(fields)) check(!["platform", "target", "owner"].includes(key) && declared.includes(key), "Wizard done field not allowed: " + key);
+    for (const key of o.manifest.requiredConfig ?? []) check(nonempty(fields[key]) || nonempty(o.config[key]), "Wizard done misses requiredConfig key: " + key);
+    await p.exited();
+    await p.clean();
+    p = peer();
+    await start(p);
+    p.observeChildren();
+    p.write({ jsonrpc: "2.0", id: 2, method: "shutdown", params: {} });
+    await p.exited();
+  } finally { await p.clean(); }
 }
 
 /** Check the actual published manifest and wire conversations, so a stale copy in a test cannot pass. */
@@ -404,6 +447,7 @@ async function main() {
       "      that must be written and then read after restart, including DM, cursor or context keys as applicable.",
       "      Declare stateless:true only for platforms that use no persisted keys. localPlatform:true enables the",
       "      bundled example's loopback HTTP fixture if --config does not already specify an endpoint.",
+      "      wizardInputs maps each wizard_input label to the value typed, for a plugin that declares wizard.",
     ].join("\n"));
     return;
   }

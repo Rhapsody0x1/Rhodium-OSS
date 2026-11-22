@@ -190,7 +190,7 @@ export async function recorded(instance: Instance, sql: string, timeoutMs = 15_0
 
 /** A pseudo-terminal: slave is the terminal a program reads and writes; writing to master types
  *  into it, and reading master (it does not block) gives what showed on it. */
-function pty(): { master: number; slave: number } {
+export function pty(): { master: number; slave: number } {
   const { symbols: c } = dlopen("libc.so.6", {
     posix_openpt: { args: ["i32"], returns: "i32" },
     grantpt: { args: ["i32"], returns: "i32" },

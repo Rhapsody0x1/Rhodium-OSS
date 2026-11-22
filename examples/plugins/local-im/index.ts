@@ -1,6 +1,7 @@
 import {
   PluginSendFailedError, runImPlugin, type Capabilities, type ImContext, type ImInitParams,
-  type FetchAttachmentResult, type ImPlugin, type ImInboundMessage, type MenuItem, type OutboundMessageWire, type SendResult,
+  type FetchAttachmentResult, type ImPlugin, type ImInboundMessage, type ImWizardContext, type ImWizardDone, type ImWizardParams,
+  type MenuItem, type OutboundMessageWire, type SendResult,
 } from "@rhodium-oss/plugin-sdk";
 import manifest from "./plugin.json";
 
@@ -96,6 +97,15 @@ class LocalImPlugin implements ImPlugin {
 
   async setMenu(items: MenuItem[]): Promise<void> {
     if (this.endpoint) await this.call("/set_menu", { items });
+  }
+
+  /** A fake bind flow that shows every kind of wizard step: scan, link, wait, a secret input, done. */
+  async wizard(params: ImWizardParams, ctx: ImWizardContext): Promise<ImWizardDone> {
+    ctx.qr("local-im://bind/" + params.botName, "用本地平台扫码");
+    ctx.link("http://localhost/bind/" + params.botName, "或打开链接");
+    ctx.waiting("等待本地平台确认");
+    const token = await ctx.input("本地平台的 token", { secret: true });
+    return { config: { token }, text: "Local IM Bot 已绑定" };
   }
 
   async shutdown(): Promise<void> {

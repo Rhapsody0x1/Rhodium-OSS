@@ -1,5 +1,6 @@
 {
   "localPlatform": true,
   "kept": { "dm:conf-user-1": "dm-99", "sync_buf": "1" },
-  "failureText": "[simulate-fail]"
+  "failureText": "[simulate-fail]",
+  "wizardInputs": { "本地平台的 token": "conf-token" }
 }

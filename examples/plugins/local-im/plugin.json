@@ -32,6 +32,7 @@
     }
   },
   "requiredConfig": [],
-  "optionalConfig": ["endpoint"],
+  "optionalConfig": ["endpoint", "token"],
+  "wizard": true,
   "icon": "icon.svg"
 }
