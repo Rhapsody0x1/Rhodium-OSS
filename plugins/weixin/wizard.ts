@@ -1,5 +1,5 @@
 import type { ImWizardContext, ImWizardParams } from "../../packages/plugin-sdk";
-import { defaultBase, getQr, qrStatus, replyCode, serviceUrl } from "./api";
+import { defaultBase, getQr, HttpTimeout, qrStatus, replyCode, serviceUrl } from "./api";
 
 export const pinPrompt = "输入手机上显示的数字";
 
@@ -11,7 +11,10 @@ export async function wizard({ config }: ImWizardParams, ctx: ImWizardContext) {
     ctx.qr(qr.qrcode_img_content, "用手机微信扫码");
     let pollBase = base, pin = "", previous = "";
     while (!ctx.signal.aborted) {
-      const reply = await qrStatus(pollBase, qr.qrcode, pin, ctx.signal);
+      const reply = await qrStatus(pollBase, qr.qrcode, pin, ctx.signal).catch((error): Awaited<ReturnType<typeof qrStatus>> => {
+        if (error instanceof HttpTimeout) return { status: "wait" };
+        throw error;
+      });
       const status = reply.status;
       if (replyCode(reply) && !status) throw new Error("微信扫码状态查询失败");
       if (status === "expired" || status === "verify_code_blocked") break;
@@ -22,19 +25,18 @@ export async function wizard({ config }: ImWizardParams, ctx: ImWizardContext) {
         if (next.pathname !== "/" || next.search || next.hash) throw new Error("微信返回的跳转地址无效");
         pollBase = next.origin;
       } else if (status === "confirmed") {
-        if (!reply.bot_token || !reply.baseurl || !reply.ilink_bot_id) throw new Error("微信未返回完整的 Bot 凭据");
-        serviceUrl(reply.baseurl);
-        return { config: { token: reply.bot_token, baseUrl: reply.baseurl, accountId: reply.ilink_bot_id } };
+        if (!reply.bot_token || !reply.ilink_bot_id) throw new Error("微信未返回完整的 Bot 凭据");
+        const baseUrl = reply.baseurl || base;
+        serviceUrl(baseUrl);
+        return { config: { token: reply.bot_token, baseUrl, accountId: reply.ilink_bot_id } };
       } else if (status === "binded_redirect") {
         throw new Error("这个微信已经绑定过 Bot，没有新的凭据");
       } else if (status === "wait" || status === "scaned") {
         if (status === "scaned") pin = "";
         if (previous !== status) ctx.waiting(status === "wait" ? "等待扫码" : "已扫码，请在手机上确认");
-        await Bun.sleep(200);
-      } else {
-        throw new Error("微信返回未知扫码状态");
       }
-      previous = status;
+      await Bun.sleep(200);
+      previous = status ?? "";
     }
     ctx.signal.throwIfAborted();
   }

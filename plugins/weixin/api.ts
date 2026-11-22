@@ -6,6 +6,7 @@ const appHeaders = { "iLink-App-Id": "bot", "iLink-App-ClientVersion": "196609" 
 const baseInfo = { channel_version: "3.0.1/rhodium-weixin-0.1.0", bot_agent: "Rhodium" };
 
 export type Reply = { ret?: number; errcode?: number };
+export type SendReply = Reply & { message_id?: string };
 export type Media = { full_url?: string; encrypt_query_param?: string; aes_key?: string; encrypt_type?: number };
 export type Item = {
   type: number;
@@ -15,14 +16,14 @@ export type Item = {
   image_item?: { aeskey?: string; media?: Media; mid_size?: number };
   file_item?: { file_name?: string; len?: string; media?: Media };
   video_item?: { media?: Media; video_size?: number };
-  ref_msg?: { message_item?: Item; title?: string };
+  ref_msg?: { message_item?: Item; title?: string; svr_id?: string };
 };
 export type Incoming = {
   from_user_id?: string;
   group_id?: string;
   message_type?: number;
   message_state?: number;
-  message_id?: number | string;
+  message_id?: string;
   seq?: number;
   client_id?: string;
   context_token?: string;
@@ -47,12 +48,18 @@ export class HttpError extends Error {
   constructor(readonly status: number) { super(`Weixin HTTP ${status}`); }
 }
 
+export class HttpTimeout extends Error {}
+
 export async function request(url: URL, options: RequestInit, signal: AbortSignal, timeout: number) {
+  const deadline = AbortSignal.timeout(timeout);
   try {
     return await fetch(serviceUrl(url.href), {
-      ...options, redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
+      ...options, redirect: "error", signal: AbortSignal.any([signal, deadline]),
     });
-  } catch {
+  } catch (error) {
+    if (!signal.aborted && (deadline.aborted || (error instanceof DOMException && error.name === "TimeoutError"))) {
+      throw new HttpTimeout("Weixin HTTP request timed out");
+    }
     throw new Error("Weixin HTTP request interrupted");
   }
 }
@@ -60,7 +67,17 @@ export async function request(url: URL, options: RequestInit, signal: AbortSigna
 export async function json<T>(url: URL, options: RequestInit, signal: AbortSignal, timeout: number): Promise<T> {
   const response = await request(url, options, signal, timeout);
   if (!response.ok) throw new HttpError(response.status);
-  const result: unknown = await response.json().catch(() => null);
+  let result: unknown;
+  try {
+    const body = await response.text();
+    result = JSON.parse(body.replace(
+      /("(?:message_id|msg_id|svr_id)"\s*:\s*)(\d+)(?=\s*[,}])|"(?:[^"\\]|\\[\s\S])*"/g,
+      (token, field?: string, digits?: string) => field === undefined ? token : field + JSON.stringify(digits),
+    ));
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") throw new HttpTimeout("Weixin HTTP request timed out");
+    throw new Error("Invalid Weixin response");
+  }
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Invalid Weixin response");
   return result as T;
 }

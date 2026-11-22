@@ -8,8 +8,10 @@ type MockInput = { id: number; text?: string; sender?: string; items?: Item[] };
 type MockOutput = { to_user_id: string; context_token: string; item_list: Item[] };
 type MockUpload = { param: string; expected: number };
 
-export function startMock({ port = 0, seed = false } = {}) {
-  const batches: Incoming[][] = [];
+export function startMock({ port = 0, seed = false, wizardRedirectHost }: {
+  port?: number; seed?: boolean; wizardRedirectHost?: string;
+} = {}) {
+  const batches: (Omit<Incoming, "message_id"> & { message_id: number })[][] = [];
   const cursors: string[] = [];
   const sent: MockOutput[] = [];
   const uploads = new Map<string, MockUpload>();
@@ -56,11 +58,14 @@ export function startMock({ port = 0, seed = false } = {}) {
       if (polls === undefined) return reject(404);
       qrPolls.set(code, polls + 1);
       if (polls === 0) return Response.json({ status: "wait" });
+      if (wizardRedirectHost && code === "mock-qr-1") return Response.json({ status: "expired" });
       if (polls === 1 && url.searchParams.get("verify_code") !== "123456") {
         qrPolls.set(code, 1);
         return Response.json({ status: "need_verifycode" });
       }
       if (polls === 1) return Response.json({ status: "scaned" });
+      if (wizardRedirectHost && polls === 2) return Response.json({ status: "scaned_but_redirect", redirect_host: wizardRedirectHost });
+      if (wizardRedirectHost) return Response.json({ status: "confirmed", bot_token: mockToken, ilink_bot_id: "mock-bot" });
       return Response.json({ status: "confirmed", bot_token: mockToken, baseurl: server.url.origin, ilink_bot_id: "mock-bot" });
     }
     if (req.method !== "POST" || req.headers.get("authorizationtype") !== "ilink_bot_token" ||
@@ -94,7 +99,7 @@ export function startMock({ port = 0, seed = false } = {}) {
         loseReceipt = false;
         return new Response(null);
       }
-      return Response.json({ ret: 0 });
+      return Response.json({});
     }
     if (route === "/ilink/bot/getuploadurl") {
       const { filekey, rawsize, filesize, rawfilemd5, aeskey, media_type } = body;

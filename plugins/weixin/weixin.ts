@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Capabilities, ImContext, ImInboundMessage, ImInitParams, ImPlugin, OutboundMessageWire, SendResult } from "../../packages/plugin-sdk";
-import { defaultBase, defaultCdn, HttpError, ILink, type Incoming, type Item, replyCode, type Reply, serviceUrl, type Updates } from "./api";
+import { defaultBase, defaultCdn, HttpError, ILink, type Incoming, type Item, replyCode, type SendReply, serviceUrl, type Updates } from "./api";
 import { type Attachment, download, upload } from "./media";
 import manifest from "./plugin.json";
 import { wizard } from "./wizard";
 
 type Session = { api: ILink; cdn: string };
 const capabilities = manifest.capabilities as Capabilities;
+const offlineReportInterval = 180_000;
 
 export class Weixin implements ImPlugin {
   private readonly stop = new AbortController();
@@ -14,7 +15,6 @@ export class Weixin implements ImPlugin {
   private readonly attachments = new Map<string, Attachment>();
   private session?: Session;
   private polling?: Promise<void>;
-  private online = false;
   readonly wizard = wizard;
 
   async init({ config }: ImInitParams, ctx: ImContext) {
@@ -31,15 +31,14 @@ export class Weixin implements ImPlugin {
   private async poll(api: ILink, ctx: ImContext) {
     let cursor: string | undefined;
     let timeout = 35_000, retry = 1_000;
+    let online = false, nextOfflineReport = 0;
     const signal = api.signal;
     while (!signal.aborted) {
+      let expired = false;
       try {
         cursor ??= await ctx.keptGet("sync_buf") ?? "";
         const updates = await api.post<Updates>("getupdates", { get_updates_buf: cursor }, timeout + 3_000);
-        if (updates.ret === -14 || updates.errcode === -14) {
-          ctx.connected(false, "微信登录态已过期，请重新扫码更新 token");
-          return;
-        }
+        expired = updates.ret === -14 || updates.errcode === -14;
         if (replyCode(updates)) throw new Error("Weixin rejected updates");
         for (const msg of updates.msgs ?? []) await this.inbound(msg, ctx);
         const next = updates.get_updates_buf;
@@ -47,10 +46,11 @@ export class Weixin implements ImPlugin {
           await ctx.keptSet("sync_buf", next);
           cursor = next;
         }
-        if (!this.online) {
-          this.online = true;
+        if (!online) {
+          online = true;
           ctx.connected(true);
         }
+        nextOfflineReport = 0;
         if (Number.isFinite(updates.longpolling_timeout_ms)) {
           timeout = Math.min(60_000, Math.max(1_000, updates.longpolling_timeout_ms!));
         }
@@ -58,15 +58,18 @@ export class Weixin implements ImPlugin {
         if (!updates.msgs?.length) await Bun.sleep(100);
       } catch {
         if (signal.aborted) break;
-        this.online = false;
-        ctx.connected(false, "微信消息同步失败，正在重试");
+        online = false;
+        if (Date.now() >= nextOfflineReport) {
+          ctx.connected(false, expired ? "微信登录态已过期，请重新扫码更新 token" : "微信消息同步失败，正在重试");
+          nextOfflineReport = Date.now() + offlineReportInterval;
+        }
         await new Promise<void>(resolve => {
           const done = () => {
             clearTimeout(timer);
             signal.removeEventListener("abort", done);
             resolve();
           };
-          const timer = setTimeout(done, retry);
+          const timer = setTimeout(done, expired ? 60_000 : retry);
           signal.addEventListener("abort", done, { once: true });
         });
         retry = Math.min(retry * 2, 15_000);
@@ -76,10 +79,12 @@ export class Weixin implements ImPlugin {
 
   private async inbound(msg: Incoming, ctx: ImContext) {
     const sender = msg.from_user_id;
-    if (!sender || msg.group_id || msg.message_type !== 1 ||
-        (msg.message_state !== undefined && msg.message_state !== 2)) return;
+    if (!sender || msg.group_id || msg.message_type === 2) return;
     const messageId = msg.message_id ? String(msg.message_id) : msg.client_id || (msg.seq ? `seq:${msg.seq}` : "");
-    if (!messageId) throw new Error("Weixin user message has no stable ID");
+    if (!messageId) {
+      ctx.log("Skipping Weixin user message without a stable ID");
+      return;
+    }
     if (msg.context_token) {
       await ctx.keptSet(`ctx:${sender}`, msg.context_token);
       this.contexts.set(sender, msg.context_token);
@@ -96,7 +101,7 @@ export class Weixin implements ImPlugin {
       const referenceText = reference?.message_item?.text_item?.text || reference?.title;
       if (!input.quote && reference) {
         input.quote = {
-          ref: reference.message_item?.msg_id || `${messageId}:quote`,
+          ref: reference.svr_id || reference.message_item?.msg_id || `${messageId}:quote`,
           ...(referenceText && { text: referenceText }),
         };
       }
@@ -138,20 +143,19 @@ export class Weixin implements ImPlugin {
     for (const item of items) {
       const id = randomUUID();
       try {
-        const reply = await session.api.post<Reply>("sendmessage", { msg: {
+        const reply = await session.api.post<SendReply>("sendmessage", { msg: {
           from_user_id: "", to_user_id: chat, client_id: id, message_type: 2, message_state: 2,
           context_token: context, item_list: [item],
         } }, 20_000);
         if (replyCode(reply)) {
           return { status: lastId ? "unknown" : "failed", error: "微信拒收消息" };
         }
-        if (reply.ret !== 0 && reply.errcode !== 0) return { status: "unknown", error: "微信发送回执缺失" };
+        lastId = reply.message_id || id;
       } catch (error) {
         const rejected = error instanceof HttpError && error.status >= 400 && error.status < 500;
         return { status: rejected && !lastId ? "failed" : "unknown",
           error: rejected ? "微信拒收消息" : "微信发送回执缺失" };
       }
-      lastId = id;
     }
     return { status: "sent", messageId: lastId };
   }

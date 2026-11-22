@@ -1,18 +1,20 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ImContext, ImInboundMessage } from "../../packages/plugin-sdk";
 import { startMock } from "./mock-weixin-server";
 import { Weixin } from "./weixin";
+import { wizard } from "./wizard";
 
 function core() {
   const kept = new Map<string, string>();
   const seen = new Map<string, ImInboundMessage>();
   const attempts: string[] = [];
+  const connections: boolean[] = [];
   let reject = "";
   const ctx: ImContext = {
-    connected() {},
+    connected(up) { connections.push(up); },
     log() {},
     async keptGet(key) { return kept.get(key) ?? null; },
     async keptSet(key, value) {
@@ -25,7 +27,7 @@ function core() {
       seen.set(msg.messageId, msg);
     },
   };
-  return { ctx, kept, seen, attempts, reject(id: string) { reject = id; } };
+  return { ctx, kept, seen, attempts, connections, reject(id: string) { reject = id; } };
 }
 
 async function until(check: () => boolean) {
@@ -35,6 +37,105 @@ async function until(check: () => boolean) {
   }
   throw new Error("Timed out waiting for adapter state");
 }
+
+async function withEndpoint(
+  respond: (path: string) => Response,
+  verify: (plugin: Weixin, state: ReturnType<typeof core>) => Promise<void>,
+) {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => respond(new URL(request.url).pathname) });
+  const plugin = new Weixin(), state = core();
+  state.kept.set("ctx:test-user", "test-context");
+  try {
+    await plugin.init({ proto: 1, botId: "test", botName: "test", config: { baseUrl: server.url.origin, token: "test-token" } }, state.ctx);
+    await verify(plugin, state);
+  } finally {
+    await plugin.shutdown();
+    await server.stop(true);
+  }
+}
+
+test("accepts a success object without a status and returns the exact server message ID", async () => {
+  const replies = ["{}", '{"message_id":18446744073709551615}', '{"errcode":-1}'];
+  await withEndpoint(path => path.endsWith("/sendmessage")
+    ? new Response(replies.shift())
+    : Response.json({ msgs: [] }), async (plugin, { ctx }) => {
+    expect(await plugin.send("test-user", { text: "test message" }, ctx)).toMatchObject({ status: "sent" });
+    expect(await plugin.send("test-user", { text: "test message" }, ctx)).toEqual({
+      status: "sent", messageId: "18446744073709551615",
+    });
+    expect(await plugin.send("test-user", { text: "test message" }, ctx)).toMatchObject({ status: "failed" });
+  });
+});
+
+test("delivers new private messages with exact uint64 IDs and quoted text", async () => {
+  let polls = 0;
+  const batch = `{"get_updates_buf":"next","msgs":[
+    {"from_user_id":"test-user","message_id":9007199254740992,"message_state":0,
+     "item_list":[{"type":1,"text_item":{"text":"First"},"ref_msg":{"svr_id":18446744073709551615,"title":"Reference"}}]},
+    {"from_user_id":"test-user","message_id":9007199254740993,"message_type":1,"message_state":2,
+     "item_list":[{"type":1,"text_item":{"text":"Message includes \\"msg_id\\":123"},"ref_msg":{"message_item":{"msg_id":18446744073709551614}}}]},
+    {"from_user_id":"test-user","message_id":3,"message_type":2},
+    {"from_user_id":"test-user","message_id":4,"group_id":"group"}
+  ]}`;
+  await withEndpoint(() => polls++ === 0 ? new Response(batch) : Response.json({ msgs: [] }), async (_plugin, state) => {
+    await until(() => state.kept.get("sync_buf") === "next");
+    expect([...state.seen.keys()]).toEqual(["9007199254740992", "9007199254740993"]);
+    expect(state.seen.get("9007199254740992")?.quote).toEqual({ ref: "18446744073709551615", text: "Reference" });
+    expect(state.seen.get("9007199254740993")).toMatchObject({
+      text: 'Message includes "msg_id":123', quote: { ref: "18446744073709551614" },
+    });
+  });
+});
+
+test("reports a short outage once and restores online status after retrying", async () => {
+  let polls = 0;
+  await withEndpoint(() => {
+    polls++;
+    if (polls === 2 || polls === 3) return new Response(null, { status: 503 });
+    return Response.json({ msgs: [] });
+  }, async (_plugin, state) => {
+    for (let attempt = 0; polls < 4 && attempt < 100; attempt++) await Bun.sleep(50);
+    expect(polls).toBeGreaterThanOrEqual(4);
+    await until(() => state.connections.at(-1) === true);
+    expect(state.connections).toEqual([true, false, true]);
+  });
+}, 8_000);
+
+test("wizard renews expired QR codes and follows redirects after a status timeout", async () => {
+  const redirectHost = "redirect.mock.test";
+  const mock = startMock({ wizardRedirectHost: redirectHost });
+  const fetchOriginal = globalThis.fetch;
+  const redirects: string[] = [];
+  let statusRequests = 0;
+  const fetchMock: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/get_qrcode_status") && ++statusRequests === 1) {
+      throw new DOMException("Mock long poll timed out", "TimeoutError");
+    }
+    if (url.hostname === redirectHost) {
+      redirects.push(url.href);
+      return fetchOriginal(new URL(url.pathname + url.search, mock.config.baseUrl), options);
+    }
+    return fetchOriginal(input, options);
+  }, { preconnect: fetchOriginal.preconnect });
+  const intercept = spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+  const codes: string[] = [];
+  try {
+    const done = await wizard({ botName: "test", config: mock.config }, {
+      signal: AbortSignal.timeout(5_000),
+      qr(data) { codes.push(data); },
+      waiting() {},
+      link() {},
+      async input() { return "123456"; },
+    });
+    expect(codes).toHaveLength(2);
+    expect(redirects).toEqual([`https://${redirectHost}/ilink/bot/get_qrcode_status?qrcode=mock-qr-2`]);
+    expect(done.config).toEqual({ token: mock.config.token, baseUrl: mock.config.baseUrl, accountId: "mock-bot" });
+  } finally {
+    intercept.mockRestore();
+    await mock.server.stop(true);
+  }
+});
 
 test("replays an interrupted batch and restores context and cursor on restart", async () => {
   const mock = startMock();
@@ -103,12 +204,14 @@ test("uploads encrypted media and downloads it only on attachment request", asyn
     const source = join(root, "source.png"), dest = join(root, "dest.png");
     const content = Buffer.from("mock image bytes");
     await Bun.write(source, content);
-    expect(await plugin.send(mock.chat, { text: "", file: { kind: "image", path: source, name: "source.png" } }, state.ctx))
+    expect(await plugin.send(mock.chat, { text: "caption", file: { kind: "image", path: source, name: "source.png" } }, state.ctx))
       .toMatchObject({ status: "sent" });
-    const media = mock.sent[0]?.item_list[0]?.image_item?.media;
+    expect(mock.sent[0]?.item_list[0]?.text_item?.text).toBe("caption");
+    const media = mock.sent[1]?.item_list[0]?.image_item?.media;
     expect(media?.encrypt_type).toBe(1);
-    mock.queue([{ id: 2, items: [{ type: 2, image_item: { media: {
-      ...media, full_url: `${mock.config.cdnBaseUrl}/download?encrypted_query_param=${media?.encrypt_query_param}`,
+    const hexKey = Buffer.from(media!.aes_key!, "base64").toString("ascii");
+    mock.queue([{ id: 2, items: [{ type: 2, image_item: { aeskey: hexKey, media: {
+      ...media, aes_key: "unused", full_url: `${mock.config.cdnBaseUrl}/download?encrypted_query_param=${media?.encrypt_query_param}`,
     } } }] }]);
     await until(() => state.seen.has("2"));
     const id = state.seen.get("2")?.attachments?.[0]?.id;
