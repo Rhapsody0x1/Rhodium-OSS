@@ -1125,12 +1125,18 @@ function rhCommand(state: State, cmd: { word: string; args: string }, here: Slot
   if (!def) return fail(`没有 ${cmd.word} 这个命令，${im ? "发 /rh_help" : "打 /"} 看有哪些。`);
   const args = cmd.args.split(/\s+/).filter(Boolean);
   if (name === "help") {
+    const caps = ctx.capabilities(im!.bot.id);
+    const candidates = homeButtons(here?.mode);
+    const text = here ? `这里的消息交给 ${slotView(state, here).ref}，用 ${agentDef(agentOf(state, here)).name}。` : "这里还没指定槽位。";
+    if (!caps?.buttons) {
+      showIn(state, ctx, d, at, { command: cmd.word, head: [text], candidates });
+      return null;
+    }
     // Rhodium's home (docs/im-style.md §10.1): not paged, so its 9 are past a page's 8. A press shows,
     // on Telegram, in place of it, with 返回 to it, as /status's buttons do (§7).
-    const buttons = layout(homeButtons(here?.mode).map((c) => ({ label: c.label, data: c.command, ...(c.fill !== undefined && { fill: c.fill }) })), true);
+    const buttons = layout(candidates.map((c) => ({ label: c.label, data: c.command, ...(c.fill !== undefined && { fill: c.fill }) })), true);
     buttons.push({ label: "取消", data: CANCEL, row: buttons.at(-1)!.row! + 1, muted: true });
-    const text = here ? `这里的消息交给 ${slotView(state, here).ref}，用 ${agentDef(agentOf(state, here)).name}。` : "这里还没指定槽位。";
-    answer(d, ctx, at, text, fitting(ctx.capabilities(im!.bot.id), buttons));
+    answer(d, ctx, at, text, fitting(caps, buttons));
     return null;
   }
   if (name === "verbose") return verbose(ctx, d, im!.chat, ctx.capabilities(im!.bot.id), at, args);

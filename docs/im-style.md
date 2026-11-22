@@ -1785,7 +1785,9 @@ ultracode 开还是关？
 
 ### 10.1 `/rh_help`
 
-`/rh_help` 是 Rhodium 的首页：第一行写这里交给谁，下面每个 Rhodium 功能一个按钮。不再列命令清单。两边一样，QQ 上照常没有 Markdown：
+`/rh_help` 是 Rhodium 的首页：第一行写这里交给谁，下面列出 Rhodium 的功能。支持按钮的平台每个功能显示一个按钮，QQ 上照常没有 Markdown。不支持按钮的平台显示编号，用户可以回复编号打开对应功能。
+
+按钮的布局如下：
 
 ```
 这里的消息交给 dispatcher/main，用 Claude。
