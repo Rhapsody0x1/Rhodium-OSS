@@ -20,7 +20,8 @@ if (!outArg) {
 const out = resolve(outArg);
 mkdirSync(out, { recursive: true });
 const ids = wanted.length ? wanted : readdirSync(join(root, "plugins")).filter((id) => existsSync(join(root, "plugins", id, "plugin.json")));
-const sha = run(["git", "rev-parse", "--short=12", "HEAD"], root).trim();
+// A build from a tree with uncommitted changes is marked -dirty, so its zip never passes for HEAD's.
+const sha = run(["git", "rev-parse", "--short=12", "HEAD"], root).trim() + (run(["git", "status", "--porcelain"], root).trim() ? "-dirty" : "");
 
 // The offline config each plugin's conformance run uses, as .github/workflows/ci.yml runs it.
 // weixin talks to its mock server, which --check starts from the package.

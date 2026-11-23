@@ -120,6 +120,8 @@ Linux 和 Windows 在提交 PR 和推送至 main 时自动检查。验证 macOS 
 
 用这个插件的槽位不会被删掉。停用后，往槽位发消息会直接报“插件 agy 已禁用，请启用或切换对话”。连配置一起删掉后，发消息时槽位启动失败，IM 里收到“dev/a 崩溃了，没能启动……原因：插件 agy 未加载，无法启动。”，消息留着等下次启动。只删文件夹、留着 `[plugins.agy.config]` 的话，`rh doctor` 报错，往槽位发消息会直接报“插件 agy 加载失败”。
 
+用 IM 插件（比如 weixin）的 Bot，也就是 `[bots.<name>]` 里写了 `platform = "weixin"` 的，也不会被删。停用插件，或只删文件夹、留着它的配置时，这个 Bot 不连接，看板上标成故障。卸载插件前，先对每个这样的 Bot 运行 `rh bot rm <name>`：`config.toml` 里还有 Bot 用着一个 `plugins/` 里没有、也没写 `[plugins.<id>]` 的插件时，Rhodium 启动不了，报 `config: bots.<name>.platform must be one of ...`。
+
 ## 参与贡献
 
 Rhodium 在作者的私有仓库中开发，公开仓库 `github.com/RhodiumTeam/Rhodium` 是按版本导出的快照，不带提交历史。
