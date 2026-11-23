@@ -7,6 +7,7 @@ let blocked: { prompt: unknown; request: string; kind: "permission" | "question"
 let request = 0;
 let cutting = false;
 let rulesSeen = false;
+let stuck = false;
 
 const write = (frame: Wire) => writeJsonLine(process.stdout, { jsonrpc: "2.0", ...frame });
 const result = (id: unknown, data: Wire) => write({ id, result: data });
@@ -35,6 +36,7 @@ await readJsonLines(process.stdin, { onMessage(value) {
       reply("Old conversation text that is not a new turn.");
       return result(id, {});
     case "session/close":
+      if (stuck) return; // a hung agy answers nothing
       return result(id, {});
     case "session/prompt": {
       cutting = false;
@@ -45,6 +47,10 @@ await readJsonLines(process.stdin, { onMessage(value) {
       if (!rulesSeen) return error(id, -32602);
       const prompt = texts.at(-1)?.replace(/^\[来自 [^\n]*\]\n/, "").trim();
       if (prompt === "[error]") return error(id, -32603);
+      if (prompt === "[stuck]") {
+        stuck = true; // ignores cancel and never ends the turn
+        return;
+      }
       if (prompt === "[argv]") {
         reply(process.argv.slice(2).join(" "));
         return end(id);
@@ -74,6 +80,7 @@ await readJsonLines(process.stdin, { onMessage(value) {
       return end(id);
     }
     case "session/cancel":
+      if (stuck) return;
       cutting = true;
       return;
     case undefined: {

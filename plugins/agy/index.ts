@@ -239,7 +239,9 @@ export class AgyPlugin implements AgentPlugin {
       await within(Promise.all([peer.notify("session/cancel", { sessionId: this.session }), this.cancelAsks(turn), turn.done.promise]),
         interruptTimeout, "Antigravity did not acknowledge cancellation.");
     } catch {
-      await this.close();
+      // agy ignored the cancel, so skip session/close and its 1 s wait: the kill lands well inside the core's 10 s.
+      this.turn = undefined;
+      await peer.close();
       throw new PluginFatalError("Antigravity stopped responding during cancellation.", { retryable: true });
     }
   }

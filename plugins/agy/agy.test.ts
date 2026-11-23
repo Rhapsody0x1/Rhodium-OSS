@@ -159,3 +159,16 @@ test("a start slower than the plugin's budget fails with its own reason before t
   expect(ready).toMatchObject({ type: "fatal", message: expect.stringContaining("did not start within 8 s") });
   expect(Date.now() - started).toBeLessThan(10_000);
 }, 20_000);
+
+test("agy ignoring cancel is killed without waiting on session/close, inside the core's interrupt limit", async () => {
+  const { peer } = await start();
+  const from = send(peer, "[stuck]");
+  await event(peer, from, "turn_start");
+  const started = Date.now();
+  peer.write({ type: "interrupt" });
+  peer.options.ms = 12_000;
+  expect(await event(peer, from, "error")).toMatchObject({ recoverable: false, detail: expect.stringContaining("stopped responding") });
+  expect(await peer.proc.exited).not.toBe(0);
+  // 8 s cancel budget; a session/close attempt would add its own 1 s and leave no room before the core's 10 s.
+  expect(Date.now() - started).toBeLessThan(9_000);
+}, 20_000);
