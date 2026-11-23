@@ -193,6 +193,26 @@ describe("config.ts plugin support", () => {
         toml: `[bots.b]\nplatform = ""\ntoken = "t"\n`,
         match: /bots\.b\.platform/,
       },
+      {
+        name: "platform Telegram that is no plugin id",
+        toml: `[bots.b]\nplatform = "Telegram"\ntoken = "t"\n`,
+        match: /bots\.b\.platform/,
+      },
+      {
+        name: "platform QQ that is no plugin id",
+        toml: `[bots.b]\nplatform = "QQ"\ntoken = "t"\n`,
+        match: /bots\.b\.platform/,
+      },
+      {
+        name: "platform tele gram that is no plugin id",
+        toml: `[bots.b]\nplatform = "tele gram"\ntoken = "t"\n`,
+        match: /bots\.b\.platform/,
+      },
+      {
+        name: "platform me that is no plugin id",
+        toml: `[bots.b]\nplatform = "me"\ntoken = "t"\n`,
+        match: /bots\.b\.platform/,
+      },
     ];
 
     for (const c of fatalCases) {
@@ -209,6 +229,9 @@ describe("config.ts plugin support", () => {
     expect(leftCfg.bots.b?.platform).toBe("weixin");
     const leftReg = loadPlugins(leftCfg.plugins, { coreVersion: "1.5.0", agentPath: process.env.PATH ?? "", bots: leftCfg.bots, programs: leftCfg.programs });
     expect(pluginFindings(leftReg).findings).toContainEqual({ level: "错误", text: "bots.b.platform 引用的插件 weixin 没有安装，这个 bot 连不上" });
+    // A name on Object.prototype is no plugin either.
+    const protoReg = loadPlugins(leftCfg.plugins, { coreVersion: "1.5.0", agentPath: process.env.PATH ?? "", bots: { b: { platform: "constructor" } }, programs: leftCfg.programs });
+    expect(pluginFindings(protoReg).findings).toContainEqual({ level: "错误", text: "bots.b.platform 引用的插件 constructor 没有安装，这个 bot 连不上" });
 
     const isolatedCases: { name: string; toml: string; match: RegExp }[] = [
       {

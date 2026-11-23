@@ -10,6 +10,7 @@ import type { AgentKind, BuiltinAgentKind, Platform } from "./contracts";
 import { isClaudeExecutable } from "./pi-pane-credentials";
 import type { Bot } from "./store";
 import { PLATFORMS } from "./platforms";
+import { IM_RESERVED_IDS, PLUGIN_ID_RE } from "@rhodium-oss/plugin-sdk";
 
 /** The commit this rhodium was built from, which scripts/build.sh bakes in; run from source (rh dev,
  *  tests), the environment's, if it has one. BUILD: 1.0.0-4a9cf6e, or 1.0.0 with no commit, as
@@ -388,8 +389,9 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
     if (name === "me") throw new Error("config: bots.me: a bot may not be named me: rh send me is to you; rename it");
     if (name === "web") throw new Error("config: bots.web: a bot may not be named web: an agent still running may write rh send web, which is gone; rename it");
     const plat = (bot as BotConfig).platform;
-    // Any other name is a plugin's, maybe one since removed: its bot is faulted at start, not fatal.
-    if (typeof plat !== "string" || !plat) {
+    // Any other name that could be an IM plugin's id is one, maybe since removed: its bot is faulted at start, not fatal.
+    const pluginId = typeof plat === "string" && PLUGIN_ID_RE.test(plat) && !(IM_RESERVED_IDS as readonly string[]).includes(plat);
+    if (!platforms.includes(plat) && !pluginId) {
       throw new Error(`config: bots.${name}.platform must be one of ${[...platforms, ...Object.keys(plugins)].join(", ")} or an IM plugin's id`);
     }
     const { owner } = bot as Record<string, unknown>;

@@ -237,7 +237,7 @@ export function loadPlugins(
   const configErrors: { key: string; pluginId: string; error: string }[] = [];
   for (const [botName, bot] of Object.entries(resolvedOpts.bots)) {
     if (isBuiltinPlatform(bot.platform)) continue;
-    const rec = pluginsMap[bot.platform];
+    const rec = Object.hasOwn(pluginsMap, bot.platform) ? pluginsMap[bot.platform] : undefined;
     if (!rec) {
       configErrors.push({
         key: `bots.${botName}.platform`,

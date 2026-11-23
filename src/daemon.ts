@@ -1030,7 +1030,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
       return id;
     });
     if (!isBuiltinPlatform(bot.platform)) {
-      const rec = plugins.plugins[bot.platform];
+      const rec = Object.hasOwn(plugins.plugins, bot.platform) ? plugins.plugins[bot.platform] : undefined;
       if (rec?.status === "loaded" && rec.manifest.kind === "im") {
         const { platform, target, owner, ...fields } = { ...config.plugins[bot.platform]?.config, ...bot };
         adapters.set(id, new PluginImAdapter({
