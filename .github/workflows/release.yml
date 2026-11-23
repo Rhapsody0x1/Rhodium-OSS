@@ -8,7 +8,7 @@ on: workflow_dispatch
 
 permissions: {}
 
-# Two runs at once would make two drafts of one version.
+# Two runs at once would make two drafts of the same commit.
 concurrency: release
 
 jobs:
@@ -46,6 +46,7 @@ jobs:
 
   windows:
     runs-on: windows-2022
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:

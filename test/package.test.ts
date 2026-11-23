@@ -35,7 +35,9 @@ for (const [arch, em] of [["x86_64", 62], ["arm64", 183]] as const)
       await run([join(root, "scripts/package.sh"), at, arch], { cwd: root, timeoutMs: 300_000, env });
       expect(readdirSync(tmp)).toEqual([]);
 
-      const commit = (await run(["git", "-C", root, "describe", "--always", "--dirty"])).trim();
+      // The same 12-character commit as the release tag and the Windows zip.
+      const commit = (await run(["git", "-C", root, "describe", "--always", "--dirty", "--abbrev=12"])).trim();
+      expect(commit).toContain((await run(["git", "-C", root, "rev-parse", "--short=12", "HEAD"])).trim());
       const name = `rhodium-${version}-${commit}-linux-${arch}`;
       expect(readdirSync(at).filter((f) => f !== "tmp")).toEqual([`${name}.tar.xz`]);
       await run(["tar", "-xJf", join(at, `${name}.tar.xz`), "-C", at]);
