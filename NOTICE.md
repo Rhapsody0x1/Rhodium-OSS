@@ -12,6 +12,7 @@
 | `web/src/faces.tsx` | 飞书的图形 | ByteDance IconPark（new-lark） | Apache-2.0 |
 | `web/src/common.tsx` | pi 的图形 | pi.dev/logo.svg（pi-mono） | MIT |
 | `web/public/openai.svg` | OpenAI 的图形 | opencode 的 packages/ui | MIT |
+| `plugins/agy/icon.svg` | Antigravity 的图形 | Google Antigravity 官网媒体资料页（antigravity.google/press）的 https://antigravity.google/assets/image/brand/antigravity-icon__full-color.svg ，原样未改 | 商标归 Google，不在 Rhodium 的 MIT 许可内 |
 | `web/src/terminal-glyphs.woff2` | 终端里的几个符号 | Noto Sans Symbols 2 v2.008，裁剪过 | SIL OFL 1.1，全文见下文 |
 | `src/claude.ts` | 控制请求的处理 | Claude Agent SDK for Python | MIT，声明在文件开头 |
 | `src/bot-flow.ts` 的 `scan()` | QQ 扫码建 Bot 的协议 | 腾讯的 qqbot-agent-sdk（tencent-connect） | MIT，声明在函数上方 |

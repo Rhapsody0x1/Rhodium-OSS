@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "kind": "agent",
+  "id": "agy",
+  "name": "Antigravity",
+  "statusName": "Antigravity",
+  "version": "0.1.0",
+  "minRhodium": "1.5.0",
+  "protocol": "rh-agent/1",
+  "program": "agy",
+  "command": ["bun", "${PLUGIN_DIR}/index.ts"],
+  "optionalConfig": ["fixture"],
+  "capabilities": { "liveApproval": false, "steer": false, "commands": [] },
+  "icon": "icon.svg"
+}
