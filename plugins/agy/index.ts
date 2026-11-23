@@ -1,5 +1,5 @@
 import { basename, join } from "node:path";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { PluginFatalError, runAgentPlugin, type AgentContext, type AgentInitParams, type AgentPlugin, type AgentSendParams, type AskAnswer } from "@rhodium-oss/plugin-sdk";
 import { AcpPeer, list, object, text, within, type RpcId, type Wire } from "./acp";
 import { form } from "./form";
@@ -51,7 +51,7 @@ export class AgyPlugin implements AgentPlugin {
     // With slot approval off, agy approves tools itself (spec §9.2 #3); liveApproval is false, so a switch restarts the slot.
     const args = ["acp", ...(params.approval ? [] : ["--dangerously-skip-permissions"])];
     const command: [string, ...string[]] = offline
-      ? [process.execPath, join(pluginDir, "fixtures", "agy.ts"), ...args]
+      ? [process.execPath, fakeAgy(pluginDir), ...args]
       : [executable(params.program ?? manifest.program), ...args];
     this.rules = await Bun.file(params.systemPromptFile).text();
     const peer = this.peer = new AcpPeer(command, offline ? pluginDir : params.cwd, environment(offline), (method, value, id) => {
@@ -253,6 +253,12 @@ export class AgyPlugin implements AgentPlugin {
     }
     await this.peer?.close(this.closable ? this.session : undefined);
   }
+}
+
+/** The packaged plugin ships the fake agy bundled as fixtures/agy.js (scripts/plugin-package.ts); a checkout runs the source. */
+function fakeAgy(pluginDir: string) {
+  const bundled = join(pluginDir, "fixtures", "agy.js");
+  return existsSync(bundled) ? bundled : join(pluginDir, "fixtures", "agy.ts");
 }
 
 if (import.meta.main) void runAgentPlugin(new AgyPlugin());

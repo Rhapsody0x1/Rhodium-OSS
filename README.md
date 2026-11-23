@@ -96,6 +96,32 @@ You only need to do six things yourself:
 5. **Start using it**: Send a message from your IM chat window or the web board.
 6. **Let your agent read the docs**: Most docs in this repository are written by agents, for agents; you don't need to read them yourself. If you have other questions, ask your agent to read them and answer you: the glossary in [GLOSSARY.md](GLOSSARY.md), the product guide in [docs/product.md](docs/product.md), and the documentation map in [docs/README.md](docs/README.md).
 
+## Installing and removing plugins
+
+The team plugins (`agy`, `dsh`, `weixin`) are not in the core package. Each one is its own `rhodium-plugin-<id>-<version>-<commit>.zip` in Releases. Bun runs them (1.3.14 or newer), so `bun` must be on the service's `PATH`.
+
+1. **Install**: unzip the zip into `plugins/` in the config directory, which gives `plugins/<id>/plugin.json`. The config directory is `~/.config/rhodium/` on Linux and `%LOCALAPPDATA%\Rhodium\` on Windows ([WINDOWS.md](WINDOWS.md)).
+
+   ```sh
+   mkdir -p ~/.config/rhodium/plugins
+   unzip rhodium-plugin-agy-*.zip -d ~/.config/rhodium/plugins/
+   ```
+
+   On Windows, in PowerShell:
+
+   ```powershell
+   Expand-Archive rhodium-plugin-agy-*.zip -DestinationPath "$env:LOCALAPPDATA\Rhodium\plugins"
+   ```
+
+2. **Try it offline** (optional, no account): add `[plugins.agy.config]` with `fixture = "builtin"` to `config.toml`. For dsh use `fixture = "./fixtures/sample.jsonl"`. To use the real CLI instead, install it and log in yourself, and leave out `fixture`. The README inside the package is written for the source repo: skip its `bun install` and `path` steps, since the unzipped folder is already where Rhodium looks, and its `.ts` helpers ship as `.js` (for example `mock-weixin-server.js`).
+3. **Restart**: on Linux run `systemctl --user restart rhodium`. On Windows run `Stop-ScheduledTask -TaskName Rhodium; Start-ScheduledTask -TaskName Rhodium` in PowerShell. Installing, disabling, upgrading and removing a plugin all need a restart; running conversations are not affected.
+4. **Disable**: write `[plugins.<id>]` with `enabled = false` in `config.toml`, then restart.
+5. **Remove**: delete `plugins/<id>/`, and delete the `[plugins.<id>]` and `[plugins.<id>.config]` sections from `config.toml` if you added them. Then restart.
+
+Slots that use the plugin stay. Once it is disabled, a message to such a slot is refused at once with "插件 agy 已禁用，请启用或切换对话" (plugin disabled). Once it is removed along with its sections, the slot fails to start when a message arrives, and IM shows that it crashed because the plugin is not loaded; the message waits for the next start. If you delete the folder but keep `[plugins.agy.config]`, `rh doctor` reports an error, and a message to the slot is refused at once with "插件 agy 加载失败" (plugin failed to load).
+
+A bot on an IM plugin such as weixin (`platform = "weixin"` in its `[bots.<name>]`) stays too. Once the plugin is disabled, or its folder is deleted but its section kept, the bot does not connect and the board marks it faulted. Before you remove the plugin, run `rh bot rm <name>` for each such bot: if `config.toml` still has a bot on a plugin that is neither in `plugins/` nor in a `[plugins.<id>]` section, Rhodium refuses to start with `config: bots.<name>.platform must be one of ...`.
+
 ## Contributing
 
 Rhodium is developed in the author's private repository. The public repository at `github.com/RhodiumTeam/Rhodium` publishes versioned snapshots without commit history.

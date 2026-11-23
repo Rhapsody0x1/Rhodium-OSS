@@ -380,14 +380,18 @@ path = "/path/to/Rhodium-OSS/plugins/my-agent"
 注意依赖解析与独立打包：
 
 - 在仓库内的 `plugins/<id>/` 里直接运行 `.ts` 源码时，Bun 会向上找到仓库根目录的 `node_modules/@rhodium-oss/plugin-sdk`。
-- 如果要把插件复制到仓库外的任意 `<配置目录>/plugins/<id>/` 单独交付或测试自动扫描，用 `bun build` 把契约包一并打进单文件：
+- 要把插件放到仓库外的 `<配置目录>/plugins/<id>/` 单独交付或测试自动扫描，用打包脚本：
 
 ```sh
-bun build plugins/<id>/index.ts --outfile plugins/<id>/dist/index.js --target bun
+bun scripts/plugin-package.ts <输出目录> --check [插件 ID ...]
 ```
 
-- 打包后把 `plugin.json` 的 `command` 改成 `["bun", "run", "${PLUGIN_DIR}/dist/index.js"]`（Windows 如需指定可执行名，可在 `commandByPlatform.win32` 写 `["bun.exe", "run", "${PLUGIN_DIR}/dist/index.js"]`）。
-- **打包后用 `RHODIUM_PLUGIN_DIR` 找随包资源**：`examples/plugins/echo-agent/index.ts` 原版用 `import.meta.dir` 定位 `conversations/`，直接打包到 `dist/index.js` 后 `import.meta.dir` 会变成 `<插件目录>/dist`，导致第 8 组导入检查找不到 `conv_a1`。打包前把源码里的基准目录改成 `RHODIUM_PLUGIN_DIR`（复制出独立目录时一并带上 `conversations/`、`fixtures/`、`icon.svg`、`conformance.json`）：
+- 不写插件 ID 时，打包 `plugins/` 下每个带 `plugin.json` 的目录。每个插件得到一个 `rhodium-plugin-<id>-<版本>-<提交>.zip`，里面只有一个顶层目录 `<id>/`。
+- 脚本用 `bun build --target bun` 把入口和契约包打成 `dist/index.js`，并把 `plugin.json` 的 `command` 改成 `["bun", "run", "${PLUGIN_DIR}/dist/index.js"]`。核心按 `PATH` 找 `bun`，Windows 上会找到 `bun.exe`。
+- 包里只放运行时要用的东西：图标、`README*.md`、`conformance.json`、`fixtures/`，以及 `mock-*.ts` 这类离线模式要拉起的辅助程序。`.ts` 辅助程序同样打成单个 `.js`。测试和 `node_modules` 不进包。
+- `--check` 把每个包解压到全新的 `/tmp/rhodium-test-*/plugins/`，用离线配置对解压出的清单跑契约检查器，和 CI 用同一份配置。插件进程用 `PATH` 上的 `bun`，所以把别的版本的 `bun` 放到 `PATH` 前面，就能在那个版本上检查。
+- 打包后的插件至少要 Bun 1.3.14（已实测）。
+- **打包后用 `RHODIUM_PLUGIN_DIR` 找随包资源**：打包后 `import.meta.dir` 会变成 `<插件目录>/dist`。源码里定位随包资源的基准目录要用核心注入的 `RHODIUM_PLUGIN_DIR`：
 
 ```ts
 const pluginDir = process.env.RHODIUM_PLUGIN_DIR || import.meta.dir;
@@ -396,11 +400,7 @@ const folder = params.config.conversations || join(pluginDir, "conversations");
 // dir: isAbsolute(s.dir) ? s.dir : resolve(pluginDir, s.dir)
 ```
 
-- 打包并改完 `plugin.json` 后，立刻对**打包后的清单**跑一遍契约检查器，确认包含导入/向导在内的全部检查都通过：
-
-```sh
-bun scripts/plugin-conformance.ts --manifest plugins/<id>/plugin.json
-```
+- 离线模式另起的 `.ts` 子进程（如 agy 的 `fixtures/agy.ts`）在包里是 `.js`，插件要先找 `.js`。
 
 ### 4.3 用 `rh dev --fake` 和看板本地调试
 
@@ -476,7 +476,7 @@ target = "dev/try"
 - **直接调试仓库里的源码**：在上面这份 `config.toml` 末尾加 `[plugins.<id>]` 和 `path = "<仓库目录>/plugins/<id>"`（Windows 用单引号）。
   - 改完 **IM 插件**代码后，重启 `rh dev` 即可加载新版。
   - 改完 **agent 插件**代码后，如果测试槽位已经跑过一轮，`rh dev` 退出不会停掉托管进程，只重启 `rh dev` 会重新接上旧进程；先在看板里**停掉**这个测试槽位的进程，再向同一槽位发消息拉起新版。
-- **验证自动扫描与独立产物**：按 4.2 节打包插件（改用 `RHODIUM_PLUGIN_DIR` 定位资源）后，把整个插件目录放进 `<临时目录>/plugins/<id>/`，`config.toml` 里不写 `[plugins.<id>]`，重启后直接被自动扫到。之后每次改代码，都要先重新 `bun build` 并更新 `<临时目录>/plugins/<id>/` 里的产物，再按上面同样的方法停掉测试槽位（agent）或重启 `rh dev`（IM）。
+- **验证自动扫描与独立产物**：按 4.2 节打包插件后，把 zip 解压到 `<临时目录>/plugins/`，得到 `<临时目录>/plugins/<id>/`。`config.toml` 里不写 `[plugins.<id>]`，重启后直接被自动扫到。之后每次改代码，都要先重新打包，删掉旧的 `<临时目录>/plugins/<id>/` 再解压，再按上面同样的方法停掉测试槽位（agent）或重启 `rh dev`（IM）。
 
 #### 第 2 步：设好文件权限并启动隔离实例
 
