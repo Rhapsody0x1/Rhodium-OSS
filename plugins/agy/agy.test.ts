@@ -153,6 +153,11 @@ test("agy crashing with an approval pending cancels the ask and fails with its s
   expect(await peer.proc.exited).not.toBe(0);
 });
 
+test("agy dying during startup fails with the tail of its stderr", async () => {
+  const { ready } = await start({ session: { resume: "crash-session" } });
+  expect(ready).toMatchObject({ type: "fatal", message: expect.stringContaining("synthetic agy startup crash") });
+});
+
 test("a start slower than the plugin's budget fails with its own reason before the core's limit", async () => {
   const started = Date.now();
   const { ready } = await start({ session: { resume: "slow-session" } });

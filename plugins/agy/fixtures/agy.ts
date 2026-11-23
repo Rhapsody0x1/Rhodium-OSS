@@ -32,6 +32,10 @@ await readJsonLines(process.stdin, { onMessage(value) {
       return result(id, { sessionId });
     case "session/resume":
       if (params.sessionId === "slow-session") return; // never answers, for the startup time limit
+      if (params.sessionId === "crash-session") {
+        process.stderr.write("synthetic agy startup crash\n");
+        process.exit(3);
+      }
       sessionId = text(params.sessionId);
       reply("Old conversation text that is not a new turn.");
       return result(id, {});
