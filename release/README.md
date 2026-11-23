@@ -153,6 +153,24 @@ Rhodium 有事找你、又不知道发到哪个聊天时，就发到主窗口。
 - **切回来**：在终端里退出 Claude（输入 `/exit`），对话回到网页和 IM，接着聊。
 - **卡住了**：网页顶栏的 ⋯ 里点“收回终端”，或在 IM 里发 `/rh_release`，强制切回来。
 
+## 插件
+
+组员的插件（`agy`、`dsh`、`weixin`）不在这个包里。每个插件在 Releases 里是单独的 `rhodium-plugin-<id>-<版本>-<提交>.zip`。插件由 Bun 运行（至少 1.3.14），装插件前先装好 Bun，并确认 `PATH="$(cat ~/.config/rhodium/service-path)" command -v bun` 找得到它。
+
+- **安装**：解压到 `~/.config/rhodium/plugins/`，得到 `plugins/<id>/plugin.json`，然后运行 `systemctl --user restart rhodium`。
+
+  ```sh
+  mkdir -p ~/.config/rhodium/plugins
+  unzip rhodium-plugin-agy-*.zip -d ~/.config/rhodium/plugins/
+  systemctl --user restart rhodium
+  ```
+
+- **离线试用**（不用账号）：在 `~/.config/rhodium/config.toml` 末尾加 `[plugins.agy.config]` 和 `fixture = "builtin"`，再重启。怎么接真实 CLI 见插件里的 README。
+- **停用**：在 `config.toml` 里写 `[plugins.<id>]` 和 `enabled = false`，再重启。
+- **卸载**：删掉 `~/.config/rhodium/plugins/<id>/`，再重启。
+- 装、停用、卸载都要重启，正在进行的对话不受影响。
+- 用这个插件的槽位不会被删。停用后往它发消息，直接回“插件 <id> 已禁用”；卸载后发消息，IM 里收到“……崩溃了，没能启动”，原因是插件未加载，消息留着等下次启动。
+
 ## 要知道的
 
 - Claude 用你自己的登录：订阅算额度，API 令牌按用量计费。

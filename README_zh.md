@@ -96,6 +96,24 @@ Linux 和 Windows 在提交 PR 和推送至 main 时自动检查。验证 macOS 
 5. **开始使用**：在 IM 聊天窗口或网页看板中发送消息，开始日常使用。
 6. **查阅其他文档**：本仓库的多数文档由 agent 编写，也以 agent 为读者，你不必直接阅读。如果还有其他问题，可以让 agent 阅读这些文档来回答，包括术语表 [GLOSSARY.md](GLOSSARY.md)、产品说明 [docs/product.md](docs/product.md) 和文档地图 [docs/README.md](docs/README.md)。
 
+## 安装和卸载插件
+
+组员的插件（`agy`、`dsh`、`weixin`）不在核心安装包里。每个插件在 Releases 里是单独的 `rhodium-plugin-<id>-<版本>-<提交>.zip`。插件由 Bun 运行（至少 1.3.14），服务的 `PATH` 里要能找到 `bun`。
+
+1. **安装**：把 zip 解压到配置目录下的 `plugins/`，得到 `plugins/<id>/plugin.json`。Linux 的配置目录是 `~/.config/rhodium/`，Windows 是 `%LOCALAPPDATA%\Rhodium\`（[WINDOWS.md](WINDOWS.md)）。
+
+   ```sh
+   mkdir -p ~/.config/rhodium/plugins
+   unzip rhodium-plugin-agy-*.zip -d ~/.config/rhodium/plugins/
+   ```
+
+2. **离线试用**（可选，不用账号）：在 `config.toml` 里加 `[plugins.agy.config]` 和 `fixture = "builtin"`。dsh 用 `fixture = "./fixtures/sample.jsonl"`。接真实 CLI 的方法见包里的 README。
+3. **重启**：Linux 运行 `systemctl --user restart rhodium`。Windows 在 PowerShell 里运行 `Stop-ScheduledTask -TaskName Rhodium; Start-ScheduledTask -TaskName Rhodium`。装、停用、升级、卸载插件都要重启，正在进行的对话不受影响。
+4. **停用**：在 `config.toml` 里写 `[plugins.<id>]` 和 `enabled = false`，再重启。
+5. **卸载**：删掉 `plugins/<id>/`，再重启。
+
+用这个插件的槽位不会被删掉。停用后，往槽位发消息会直接报“插件 agy 已禁用，请启用或切换对话”。卸载后，发消息时槽位启动失败，IM 里收到“dev/a 崩溃了，没能启动……原因：插件 agy 未加载，无法启动。”，消息留着等下次启动。
+
 ## 参与贡献
 
 Rhodium 在作者的私有仓库中开发，公开仓库 `github.com/RhodiumTeam/Rhodium` 是按版本导出的快照，不带提交历史。
