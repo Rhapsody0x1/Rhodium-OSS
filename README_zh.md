@@ -107,12 +107,18 @@ Linux 和 Windows 在提交 PR 和推送至 main 时自动检查。验证 macOS 
    unzip rhodium-plugin-agy-*.zip -d ~/.config/rhodium/plugins/
    ```
 
-2. **离线试用**（可选，不用账号）：在 `config.toml` 里加 `[plugins.agy.config]` 和 `fixture = "builtin"`。dsh 用 `fixture = "./fixtures/sample.jsonl"`。接真实 CLI 的方法见包里的 README。
+   Windows 在 PowerShell 里运行：
+
+   ```powershell
+   Expand-Archive rhodium-plugin-agy-*.zip -DestinationPath "$env:LOCALAPPDATA\Rhodium\plugins"
+   ```
+
+2. **离线试用**（可选，不用账号）：在 `config.toml` 里加 `[plugins.agy.config]` 和 `fixture = "builtin"`。dsh 用 `fixture = "./fixtures/sample.jsonl"`。要接真实 CLI，自己装好并登录，不写 `fixture`。包里的 README 是给源码仓库写的：跳过其中的 `bun install` 和 `path` 两步，解压好的文件夹已经在 Rhodium 找插件的地方；里面的 `.ts` 小工具在包里是 `.js`（比如 `mock-weixin-server.js`）。
 3. **重启**：Linux 运行 `systemctl --user restart rhodium`。Windows 在 PowerShell 里运行 `Stop-ScheduledTask -TaskName Rhodium; Start-ScheduledTask -TaskName Rhodium`。装、停用、升级、卸载插件都要重启，正在进行的对话不受影响。
 4. **停用**：在 `config.toml` 里写 `[plugins.<id>]` 和 `enabled = false`，再重启。
-5. **卸载**：删掉 `plugins/<id>/`，再重启。
+5. **卸载**：删掉 `plugins/<id>/`；加过 `[plugins.<id>]` 和 `[plugins.<id>.config]` 的，也从 `config.toml` 里删掉。再重启。
 
-用这个插件的槽位不会被删掉。停用后，往槽位发消息会直接报“插件 agy 已禁用，请启用或切换对话”。卸载后，发消息时槽位启动失败，IM 里收到“dev/a 崩溃了，没能启动……原因：插件 agy 未加载，无法启动。”，消息留着等下次启动。
+用这个插件的槽位不会被删掉。停用后，往槽位发消息会直接报“插件 agy 已禁用，请启用或切换对话”。连配置一起删掉后，发消息时槽位启动失败，IM 里收到“dev/a 崩溃了，没能启动……原因：插件 agy 未加载，无法启动。”，消息留着等下次启动。只删文件夹、留着 `[plugins.agy.config]` 的话，`rh doctor` 报错，往槽位发消息会直接报“插件 agy 加载失败”。
 
 ## 参与贡献
 

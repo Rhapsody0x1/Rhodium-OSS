@@ -155,7 +155,7 @@ Rhodium 有事找你、又不知道发到哪个聊天时，就发到主窗口。
 
 ## 插件
 
-组员的插件（`agy`、`dsh`、`weixin`）不在这个包里。每个插件在 Releases 里是单独的 `rhodium-plugin-<id>-<版本>-<提交>.zip`。插件由 Bun 运行（至少 1.3.14），装插件前先装好 Bun，并确认 `PATH="$(cat ~/.config/rhodium/service-path)" command -v bun` 找得到它。
+组员的插件（`agy`、`dsh`、`weixin`）不在这个包里。每个插件在 Releases 里是单独的 `rhodium-plugin-<id>-<版本>-<提交>.zip`。插件由 Bun 运行（至少 1.3.14），装插件前先装好 Bun，并确认 `PATH="$(cat ~/.config/rhodium/service-path)" command -v bun` 找得到它。找不到时，照 [INSTALLATION.md](INSTALLATION.md) 第 2 步给 `node` 加目录的办法，把 `bun` 所在的目录加进 `service-path`，再重跑第 6 步。
 
 - **安装**：解压到 `~/.config/rhodium/plugins/`，得到 `plugins/<id>/plugin.json`，然后运行 `systemctl --user restart rhodium`。
 
@@ -165,11 +165,11 @@ Rhodium 有事找你、又不知道发到哪个聊天时，就发到主窗口。
   systemctl --user restart rhodium
   ```
 
-- **离线试用**（不用账号）：在 `~/.config/rhodium/config.toml` 末尾加 `[plugins.agy.config]` 和 `fixture = "builtin"`，再重启。怎么接真实 CLI 见插件里的 README。
+- **离线试用**（不用账号）：在 `~/.config/rhodium/config.toml` 末尾加 `[plugins.agy.config]` 和 `fixture = "builtin"`，再重启。要接真实 CLI，自己装好并登录，不写 `fixture`。插件里的 README 是给源码仓库写的：跳过其中的 `bun install` 和 `path` 两步，里面的 `.ts` 小工具在包里是 `.js`。
 - **停用**：在 `config.toml` 里写 `[plugins.<id>]` 和 `enabled = false`，再重启。
-- **卸载**：删掉 `~/.config/rhodium/plugins/<id>/`，再重启。
+- **卸载**：删掉 `~/.config/rhodium/plugins/<id>/`；加过 `[plugins.<id>]` 和 `[plugins.<id>.config]` 的，也从 `config.toml` 里删掉。再重启。
 - 装、停用、卸载都要重启，正在进行的对话不受影响。
-- 用这个插件的槽位不会被删。停用后往它发消息，直接回“插件 <id> 已禁用”；卸载后发消息，IM 里收到“……崩溃了，没能启动”，原因是插件未加载，消息留着等下次启动。
+- 用这个插件的槽位不会被删。停用后往它发消息，直接回“插件 <id> 已禁用”；连配置一起删掉后发消息，IM 里收到“……崩溃了，没能启动”，原因是插件未加载，消息留着等下次启动。只删文件夹、留着 `[plugins.<id>.config]` 的话，`rh doctor` 报错，发消息直接回“插件 <id> 加载失败”。
 
 ## 要知道的
 

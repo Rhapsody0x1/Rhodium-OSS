@@ -107,12 +107,18 @@ The team plugins (`agy`, `dsh`, `weixin`) are not in the core package. Each one 
    unzip rhodium-plugin-agy-*.zip -d ~/.config/rhodium/plugins/
    ```
 
-2. **Try it offline** (optional, no account): add `[plugins.agy.config]` with `fixture = "builtin"` to `config.toml`. For dsh use `fixture = "./fixtures/sample.jsonl"`. The README inside the package says how to use the real CLI.
+   On Windows, in PowerShell:
+
+   ```powershell
+   Expand-Archive rhodium-plugin-agy-*.zip -DestinationPath "$env:LOCALAPPDATA\Rhodium\plugins"
+   ```
+
+2. **Try it offline** (optional, no account): add `[plugins.agy.config]` with `fixture = "builtin"` to `config.toml`. For dsh use `fixture = "./fixtures/sample.jsonl"`. To use the real CLI instead, install it and log in yourself, and leave out `fixture`. The README inside the package is written for the source repo: skip its `bun install` and `path` steps, since the unzipped folder is already where Rhodium looks, and its `.ts` helpers ship as `.js` (for example `mock-weixin-server.js`).
 3. **Restart**: on Linux run `systemctl --user restart rhodium`. On Windows run `Stop-ScheduledTask -TaskName Rhodium; Start-ScheduledTask -TaskName Rhodium` in PowerShell. Installing, disabling, upgrading and removing a plugin all need a restart; running conversations are not affected.
 4. **Disable**: write `[plugins.<id>]` with `enabled = false` in `config.toml`, then restart.
-5. **Remove**: delete `plugins/<id>/`, then restart.
+5. **Remove**: delete `plugins/<id>/`, and delete the `[plugins.<id>]` and `[plugins.<id>.config]` sections from `config.toml` if you added them. Then restart.
 
-Slots that use the plugin stay. Once it is disabled, a message to such a slot is refused at once with "插件 agy 已禁用，请启用或切换对话" (plugin disabled). Once it is removed, the slot fails to start when a message arrives, and IM shows that it crashed because the plugin is not loaded; the message waits for the next start.
+Slots that use the plugin stay. Once it is disabled, a message to such a slot is refused at once with "插件 agy 已禁用，请启用或切换对话" (plugin disabled). Once it is removed along with its sections, the slot fails to start when a message arrives, and IM shows that it crashed because the plugin is not loaded; the message waits for the next start. If you delete the folder but keep `[plugins.agy.config]`, `rh doctor` reports an error, and a message to the slot is refused at once with "插件 agy 加载失败" (plugin failed to load).
 
 ## Contributing
 
