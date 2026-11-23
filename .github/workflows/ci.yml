@@ -50,6 +50,8 @@ jobs:
       - run: scripts/ci-test.sh
       - run: bun scripts/plugin-conformance.ts --manifest examples/plugins/echo-agent/plugin.json
       - run: bun scripts/plugin-conformance.ts --manifest examples/plugins/local-im/plugin.json
+      - run: bun scripts/plugin-conformance.ts --manifest plugins/dsh/plugin.json --config '{"fixture":"./fixtures/sample.jsonl"}' --timeout 20000
+      - run: bun --config=bunfig.ci.toml test plugins/dsh/
       - run: bun --config=bunfig.ci.toml test ./plugins/weixin/weixin.test.ts
       - run: bun plugins/weixin/conformance.ts
       - run: bun --config=bunfig.ci.toml test ./plugins/agy/agy.test.ts
@@ -125,6 +127,10 @@ jobs:
           bun scripts/plugin-conformance.ts --manifest examples/plugins/echo-agent/plugin.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           bun scripts/plugin-conformance.ts --manifest examples/plugins/local-im/plugin.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          bun scripts/plugin-conformance.ts --manifest plugins/dsh/plugin.json --config '{"fixture":"./fixtures/sample.jsonl"}' --timeout 20000
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          bun --config=bunfig.ci.toml test plugins/dsh/
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           bun --config=bunfig.ci.toml test ./plugins/weixin/weixin.test.ts
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
