@@ -107,7 +107,7 @@ Rhodium 在作者的私有仓库中开发，公开仓库 `github.com/RhodiumTeam
 Rhodium 是按 MIT 许可提供的单用户开源个人项目，使用前请了解以下事项。
 
 - **无担保**：本软件按“原样”提供，不作任何明示或暗示的担保；作者和版权持有人不对使用本软件产生的损失承担责任，具体以 MIT 许可为准。
-- **独立项目**：Rhodium 与 Anthropic、OpenAI、腾讯、Telegram、字节跳动、Tailscale、Cloudflare、Herdr 及 pi 的作者等没有关联，也未获其认可或赞助。商标和标志归各自所有者；QQ 企鹅不在 Rhodium 的 MIT 许可范围内，详见 [NOTICE.md](NOTICE.md)。
+- **独立项目**：Rhodium 与 Anthropic、OpenAI、Google、腾讯、Telegram、字节跳动、Tailscale、Cloudflare、Herdr 及 pi 的作者等没有关联，也未获其认可或赞助。商标和标志归各自所有者；QQ 企鹅不在 Rhodium 的 MIT 许可范围内，详见 [NOTICE.md](NOTICE.md)。
 - **账号与规则**：你须遵守所在地法律法规、各 agent 提供方的服务条款和使用政策以及 IM 平台规则，不得用本软件共享或转售账号、绕过用量限制。只有你本人可以触发 agent；不要让 pi 等第三方 harness 使用 Claude 订阅登录。
 - **费用**：agent 使用你自己的登录和额度，可能消耗订阅额度或产生 API 费用，均由你承担。Rhodium 不提供模型、不转售额度，也不共享账号。
 - **安全**：远程控制能执行命令、读写和删除文件的机器存在风险；agent 可能误操作，也可能受消息或网页内容中的提示注入诱导。请自行做好访问控制、凭据保管和备份；同一台机器上的其他程序也可能访问网页看板。
