@@ -186,7 +186,7 @@ function FolderLine({ git }: { git: FolderData }) {
  *  workspace, the picker is a line naming it and its directory, where the sheet makes its slot. go:
  *  takes the picker to a folder. dropped: its folders are down, over what is under the path, from a tap in
  *  the path or on the arrow at its end, till a tap outside, Esc or focus moving away (story 664). */
-function useDirPicker(open: boolean, windows: boolean, start: string | undefined, fixed?: Fixed, paneIn?: string, steady = false) {
+function useDirPicker(open: boolean, windows: boolean, start: string | undefined, fixed?: Fixed, paneIn?: string, steady = false, builtin = true) {
   const [typed, setTyped] = useState<string | null>(null);
   const [dropped, setDropped] = useState(false);
   const [named, setNamed] = useState<{ path: string; name: string } | null>(null);
@@ -328,9 +328,10 @@ function useDirPicker(open: boolean, windows: boolean, start: string | undefined
         </Autocomplete.Portal>
       </Autocomplete.Root>
       {/* Folded, why the path lists nothing. steady: the line's room kept, empty too, as the list under it
-          would move under a tap; not once the folder is known to have nothing for it: then no built-in
-          agent has a conversation there to list either (the line counts as the list does). */}
-      {!dropped && listed?.error ? <p className="text-sm text-destructive">{listed.error}</p> : steady ? <div className={git && git.at === listedAt?.path && quiet(git) ? "hidden" : "h-5"}>{git && <FolderLine git={git} />}</div> : git && <FolderLine git={git} />}
+          would move under a tap; not once the folder is known to have nothing for it, for a built-in agent
+          (builtin): then it has no conversation there to list either (the line counts the built-in ones'
+          alone). A plugin agent's list may have rows there all the same. */}
+      {!dropped && listed?.error ? <p className="text-sm text-destructive">{listed.error}</p> : steady ? <div className={builtin && git && git.at === listedAt?.path && quiet(git) ? "hidden" : "h-5"}>{git && <FolderLine git={git} />}</div> : git && <FolderLine git={git} />}
       {listed && !listed.error && listed.fresh && listed.path !== paneIn && (
         <label className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
           <Folder aria-hidden className="size-4 shrink-0" />
@@ -430,6 +431,7 @@ function AgentPick({ agent, pick, importing = false }: { agent: AgentKind; pick:
         const plugin = !isBuiltinAgent(id);
         const icon = "icon" in option ? option.icon : undefined;
         const showName = plugin && !importing && (!icon || broken.includes(icon));
+        // focus-visible:opacity-100: the key reaches one not picked only when none is (the first), not dim then, or its ring would be too.
         return (
           <button key={id} type="button" role="radio" aria-label={plugin ? name : undefined} title={name} aria-checked={agent === id} tabIndex={agent === id || (!picked && i === 0) ? 0 : -1} onClick={() => pick(id)} className={cn("focus-child flex h-11 min-w-11 max-w-full items-center justify-center transition focus-visible:opacity-100", agent === id ? "bg-secondary" : "opacity-40 grayscale hover:opacity-70")}>
             <span className="grid size-9 place-items-center rounded-md">
@@ -684,7 +686,7 @@ function ImportSheet({ open, close, ws, inWs, done }: From) {
     return () => clearTimeout(wait);
   }, [typed]);
   // A pane's slot lands by the pane's own directory: no workspace is made, or shown, for the folder.
-  const dirs = useDirPicker(open, !!windowsPaths, startIn(workspaces, ws), fixed, picked?.pane ? picked.dir : undefined, true);
+  const dirs = useDirPicker(open, !!windowsPaths, startIn(workspaces, ws), fixed, picked?.pane ? picked.dir : undefined, true, isBuiltinAgent(agent));
   const { picker, go, dropped } = dirs;
   // While the folders are down, the list, its pick and the name stay the last folder's; folded, the new
   // one's (story 665).

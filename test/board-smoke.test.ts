@@ -2551,7 +2551,7 @@ smoke("#503: a small control reached by Tab rings what you see along its edge, n
   await page.keyboard.press("Tab");
   const agents = page.getByRole("dialog").getByRole("radio");
   expect(await ringed(agents.first().locator(":scope > span"))).toEqual({ ring: 36, round: 36 });
-  // The arrow takes the key, and the pick, to the next one, dim at rest: rung the same, and not dim, or its ring would be too.
+  // The arrow takes the key and the pick to the next one: rung the same, and not dim now it is picked.
   await page.keyboard.press("ArrowRight");
   expect(await ringed(agents.nth(1).locator(":scope > span"))).toEqual({ ring: 36, round: 36 });
   expect(await agents.nth(1).evaluate(async (el) => (await Promise.all(el.getAnimations().map((a) => a.finished)), getComputedStyle(el).opacity))).toBe("1");
@@ -8585,6 +8585,8 @@ smoke("the board offers a loaded agent for creation and switching, keeps import 
 
 smoke("spec plugins §3.5: the import dialog lists an agent plugin's conversations, with no count where it gives none, a busy one locked, and previews what was said", async () => {
   const plugin = { id: "echo-agent", name: "Echo Agent", statusName: "Echo", tui: false, importable: true };
+  let answer = () => {};
+  const held = new Promise<void>(r => (answer = r));
   const page = await open("", async p => {
     await p.route("**/api/board", async route => {
       const data = await (await route.fetch()).json();
@@ -8599,6 +8601,9 @@ smoke("spec plugins §3.5: the import dialog lists an agent plugin's conversatio
       { kind: "user", text: "整理 README", source: null, from: null, at: "0", time: null },
       { kind: "assistant", text: "已整理好了。", at: "1", time: null },
     ] } }));
+    // The folder has nothing for the info line, which counts the built-in agents' conversations alone;
+    // held till the plugin's rows are in.
+    await p.route("**/api/folder?*", async route => (await held, route.fulfill({ json: {} })));
   });
   await page.getByRole("button", { name: "新建", exact: true }).click();
   await page.getByRole("menuitem", { name: "导入" }).click();
@@ -8611,6 +8616,13 @@ smoke("spec plugins §3.5: the import dialog lists an agent plugin's conversatio
   const free = rows.filter({ hasText: "整理 README" });
   const busy = rows.filter({ hasText: "修登录页" });
   await busy.waitFor();
+  // The plugin's own rows stay put once the folder's info comes empty: the line keeps its room for them.
+  const top = (await busy.boundingBox())!.y;
+  const asked = page.waitForResponse(r => r.url().includes("/api/folder?"));
+  answer();
+  await asked;
+  await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+  expect((await busy.boundingBox())!.y).toBe(top);
   expect(await busy.isDisabled()).toBe(true);
   expect(await busy.getByLabel("正被别的进程使用").count()).toBe(1);
   expect(await free.getByLabel("消息条数").count()).toBe(0);
