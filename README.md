@@ -118,9 +118,9 @@ The team plugins (`agy`, `dsh`, `weixin`) are not in the core package. Each one 
 4. **Disable**: write `[plugins.<id>]` with `enabled = false` in `config.toml`, then restart.
 5. **Remove**: delete `plugins/<id>/`, and delete the `[plugins.<id>]` and `[plugins.<id>.config]` sections from `config.toml` if you added them. Then restart.
 
-Slots that use the plugin stay. Once it is disabled, a message to such a slot is refused at once with "插件 agy 已禁用，请启用或切换对话" (plugin disabled). Once it is removed along with its sections, the slot fails to start when a message arrives, and IM shows that it crashed because the plugin is not loaded; the message waits for the next start. If you delete the folder but keep `[plugins.agy.config]`, `rh doctor` reports an error, and a message to the slot is refused at once with "插件 agy 加载失败" (plugin failed to load).
+Slots that use the plugin stay. Once it is disabled, a message to such a slot is refused at once with "插件 agy 已禁用，请启用或切换对话" (plugin disabled). Once it is removed along with its sections, a message to the slot is refused at once with "插件 agy 没有安装，请装回插件或切换对话" (plugin not installed). If you delete the folder but keep `[plugins.agy.config]`, `rh doctor` reports an error, and a message to the slot is refused at once with "插件 agy 加载失败" (plugin failed to load).
 
-A bot on an IM plugin such as weixin (`platform = "weixin"` in its `[bots.<name>]`) stays too. Once the plugin is disabled, or its folder is deleted but its section kept, the bot does not connect and the board marks it faulted. Before you remove the plugin, run `rh bot rm <name>` for each such bot: if `config.toml` still has a bot on a plugin that is neither in `plugins/` nor in a `[plugins.<id>]` section, Rhodium refuses to start with `config: bots.<name>.platform must be one of ...`.
+A bot on an IM plugin such as weixin (`platform = "weixin"` in its `[bots.<name>]`) stays too. Once the plugin is disabled or removed, the bot does not connect and the board marks it faulted; everything else starts as usual. If the plugin is removed, `rh doctor` also reports the bot's plugin as not installed. Run `rh bot rm <name>` when you no longer want the bot.
 
 ## Contributing
 

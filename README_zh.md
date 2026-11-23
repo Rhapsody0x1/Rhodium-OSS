@@ -118,9 +118,9 @@ Linux 和 Windows 在提交 PR 和推送至 main 时自动检查。验证 macOS 
 4. **停用**：在 `config.toml` 里写 `[plugins.<id>]` 和 `enabled = false`，再重启。
 5. **卸载**：删掉 `plugins/<id>/`；加过 `[plugins.<id>]` 和 `[plugins.<id>.config]` 的，也从 `config.toml` 里删掉。再重启。
 
-用这个插件的槽位不会被删掉。停用后，往槽位发消息会直接报“插件 agy 已禁用，请启用或切换对话”。连配置一起删掉后，发消息时槽位启动失败，IM 里收到“dev/a 崩溃了，没能启动……原因：插件 agy 未加载，无法启动。”，消息留着等下次启动。只删文件夹、留着 `[plugins.agy.config]` 的话，`rh doctor` 报错，往槽位发消息会直接报“插件 agy 加载失败”。
+用这个插件的槽位不会被删掉。停用后，往槽位发消息会直接报“插件 agy 已禁用，请启用或切换对话”。连配置一起删掉后，往槽位发消息会直接报“插件 agy 没有安装，请装回插件或切换对话”。只删文件夹、留着 `[plugins.agy.config]` 的话，`rh doctor` 报错，往槽位发消息会直接报“插件 agy 加载失败”。
 
-用 IM 插件（比如 weixin）的 Bot，也就是 `[bots.<name>]` 里写了 `platform = "weixin"` 的，也不会被删。停用插件，或只删文件夹、留着它的配置时，这个 Bot 不连接，看板上标成故障。卸载插件前，先对每个这样的 Bot 运行 `rh bot rm <name>`：`config.toml` 里还有 Bot 用着一个 `plugins/` 里没有、也没写 `[plugins.<id>]` 的插件时，Rhodium 启动不了，报 `config: bots.<name>.platform must be one of ...`。
+用 IM 插件（比如 weixin）的 Bot，也就是 `[bots.<name>]` 里写了 `platform = "weixin"` 的，也不会被删。停用或卸载插件后，这个 Bot 不连接，看板上标成故障，其他照常启动。卸载后 `rh doctor` 还会报这个 Bot 的插件没有安装。不再要这个 Bot 时，运行 `rh bot rm <name>`。
 
 ## 参与贡献
 

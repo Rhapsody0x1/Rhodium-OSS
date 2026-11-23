@@ -125,7 +125,7 @@ test("rejects unknown keys, bad durations and wrong types", () => {
   expect(() => loadConfig(configFile('[durations]\nidleReap = "5 minutes"'), env)).toThrow(/idleReap/);
   expect(() => loadConfig(configFile("[durations]\nidleReap = 5"), env)).toThrow(/idleReap/);
   expect(() => loadConfig(configFile('[limits]\nmaxRunning = "8"'), env)).toThrow(/maxRunning/);
-  expect(() => loadConfig(configFile('[bots.x]\nplatform = "irc"'), env)).toThrow(/platform/);
+  expect(() => loadConfig(configFile("[bots.x]\nplatform = 1"), env)).toThrow(/platform/);
   expect(() => loadConfig(configFile("not toml ="), env)).toThrow();
 });
 
@@ -230,7 +230,7 @@ test("ADR-0013: a [board] written wrong does not stop rhodium: it closes the boa
 test("a [bots.<name>] table may be a Feishu bot, its App ID and secret as strings", () => {
   const c = loadConfig(configFile('[bots.fs]\nplatform = "feishu"\nappId = "cli_0123456789abcdef"\nsecret = "s"\nowner = "ou_1"'), env);
   expect(c.bots.fs).toEqual({ platform: "feishu", appId: "cli_0123456789abcdef", secret: "s", owner: "ou_1" });
-  expect(() => loadConfig(configFile('[bots.l]\nplatform = "lark"'), env)).toThrow(/feishu/);
+  expect(() => loadConfig(configFile('[bots.l]\nplatform = "Feishu"'), env)).toThrow(/feishu/);
 });
 
 test("#449: a bot's owner may be one id or a list of them; with the paired ones on top, each counts once", () => {
