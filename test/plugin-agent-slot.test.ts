@@ -146,3 +146,45 @@ test("an SDK send failure ends the turn so a non-steering plugin can receive the
     await rhodium.cleanup();
   }
 }, 20_000);
+
+test("a message right after /stop, before the plugin withdraws its ask, is no answer to that ask: it goes in as a message (#31)", async () => {
+  const rhodium = newInstance({
+    bots: { q: { like: "qq", owner: "owner", target: "w/plug" } },
+    toml: '[plugins.lagging]\npath = "."',
+  });
+  const manifest = JSON.parse(readFileSync(resolve(import.meta.dir, "../examples/plugins/echo-agent/plugin.json"), "utf8"));
+  writeFileSync(join(rhodium.dir, "plugin.json"), JSON.stringify({ ...manifest, id: "lagging", command: [process.execPath, "${PLUGIN_DIR}/lagging.js"] }));
+  // It withdraws its ask a while after the interrupt, as a plugin with a slow downstream does.
+  writeFileSync(join(rhodium.dir, "lagging.js"), `
+    import { createInterface } from "node:readline";
+    const emit = (m) => console.log(JSON.stringify(m));
+    for await (const line of createInterface({input: process.stdin})) {
+      const m = JSON.parse(line);
+      if (m.type === "init") emit({type: "ready", proto: 1, session: "lagging-session"});
+      if (m.type === "send") {
+        emit({type: "taken", inputId: m.id});
+        emit({type: "turn_start", input: m.id});
+        if (m.text.includes("next")) emit({type: "turn_end", reply: "next delivered"});
+        else emit({type: "ask", requestId: "r1", kind: "permission", tool: "Bash", input: {command: "ls"}});
+      }
+      if (m.type === "answer") emit({type: "turn_end", reply: "answered"});
+      if (m.type === "interrupt") setTimeout(() => { emit({type: "ask_cancel", requestId: "r1"}); emit({type: "turn_end"}); }, 1000);
+      if (m.type === "close") break;
+    }
+  `);
+  try {
+    await rhodium.start();
+    await rhodium.slots("main");
+    await rhodium.ok("new", "w/plug", "--agent", "lagging");
+    const send = (text: string) => rhodium.im.inject("q", { chat: "owner", sender: "owner", text });
+    await send("first");
+    await until(async () => (await rhodium.state("w/plug")) === "需要你");
+    await send("/stop");
+    await send("next");
+    await until(async () => (await rhodium.im.log("q", "owner")).some((m) => m.text === "next delivered"), 8_000);
+    const said = (await rhodium.im.log("q", "owner")).map((m) => m.text);
+    expect(said.some((t) => t.startsWith("已拒绝") || t === "answered")).toBe(false);
+  } finally {
+    await rhodium.cleanup();
+  }
+}, 20_000);

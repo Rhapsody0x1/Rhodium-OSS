@@ -868,9 +868,9 @@ function im(state: State, m: InboundMessage, ctx: Ctx): Decision {
   // An ask pushed here that this chat does not go to, say a child's in its root slot's chat or one
   // another bot forwarded (tell()), takes your answer here, before the slot this chat goes to (product §5.3).
   // With asks of another slot too, this chat's or another one pushed here, you pick from one list of them all.
-  const away = !bang && !cmd && !sender ? state.asks.filter((a) => a.status === "open" && a.forwardedTo === chat.id && a.slot !== slot?.id) : [];
+  const away = !bang && !cmd && !sender ? state.asks.filter((a) => a.status === "open" && a.forwardedTo === chat.id && a.slot !== slot?.id && answerable(state, a)) : [];
   if (away.length) {
-    const asks = state.asks.filter((a) => away.includes(a) || (a.status === "open" && a.slot === slot?.id));
+    const asks = state.asks.filter((a) => away.includes(a) || (a.status === "open" && a.slot === slot?.id && answerable(state, a)));
     const one = asks.every((a) => a.slot === away[0]!.slot);
     return record(one ? away[0]!.slot : null, answerFromIm(state, ctx, d, asks, text, attachments.length > 0, chat, id));
   }
@@ -892,7 +892,7 @@ function im(state: State, m: InboundMessage, ctx: Ctx): Decision {
   if (cmd?.kind === "common" && (!tui || cmd.name === "status")) return done(common(state, slot, cmd, patch, d, ctx, chat.id, id, ui));
   // With asks open, your message is for them (product §5.3); a ! message interrupts instead. So it
   // is while the slot waits for its turn to end to switch to the terminal: the turn needs the answers.
-  const open = openAsks(state, slot);
+  const open = openAsks(state, slot).filter((a) => answerable(state, a));
   if (open.length && !bang && !cmd) {
     // Your quote brought another slot's asks here: what you type here next, a number too, is for them (away above).
     // As with an ask pushed here (pushAsk()), the picks and lists of the others you answer here are void.
@@ -3540,6 +3540,10 @@ const prompt = (a: Ask) => JSON.parse(a.prompt!) as AskPrompt;
 const agentAsks = (state: State, slot: Slot) => state.asks.filter((a) => a.slot === slot.id && a.kind !== "confirm");
 /** The slot's asks waiting on you, oldest first, confirm requests too. */
 const openAsks = (state: State, slot: Slot) => state.asks.filter((a) => a.slot === slot.id && a.status === "open");
+/** Whether your words can answer the ask: an agent's ask not once its slot's turn was stopped, as the
+ *  agent then withdraws it, maybe a moment later; what you send meanwhile is a message, held for the
+ *  next turn (#31). A confirm request is Rhodium's own, which no agent withdraws. */
+const answerable = (state: State, a: Ask) => a.kind === "confirm" || state.slots.find((s) => s.id === a.slot)?.interruptedAt == null;
 /** Those the agent's turn waits on: all but confirm requests (product §5.8). */
 const blocking = (state: State, slot: Slot) => agentAsks(state, slot).filter((a) => a.status === "open");
 
