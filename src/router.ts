@@ -3540,9 +3540,10 @@ const prompt = (a: Ask) => JSON.parse(a.prompt!) as AskPrompt;
 const agentAsks = (state: State, slot: Slot) => state.asks.filter((a) => a.slot === slot.id && a.kind !== "confirm");
 /** The slot's asks waiting on you, oldest first, confirm requests too. */
 const openAsks = (state: State, slot: Slot) => state.asks.filter((a) => a.slot === slot.id && a.status === "open");
-/** Whether your words can answer the ask: not once its slot's turn was stopped, as the agent then
- *  withdraws it, maybe a moment later; what you send meanwhile is a message, held for the next turn (#31). */
-const answerable = (state: State, a: Ask) => state.slots.find((s) => s.id === a.slot)?.interruptedAt == null;
+/** Whether your words can answer the ask: an agent's ask not once its slot's turn was stopped, as the
+ *  agent then withdraws it, maybe a moment later; what you send meanwhile is a message, held for the
+ *  next turn (#31). A confirm request is Rhodium's own, which no agent withdraws. */
+const answerable = (state: State, a: Ask) => a.kind === "confirm" || state.slots.find((s) => s.id === a.slot)?.interruptedAt == null;
 /** Those the agent's turn waits on: all but confirm requests (product §5.8). */
 const blocking = (state: State, slot: Slot) => agentAsks(state, slot).filter((a) => a.status === "open");
 
