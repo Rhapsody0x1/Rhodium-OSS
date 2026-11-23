@@ -140,6 +140,10 @@ type At = Pick<DirsData, "path" | "workspace" | "fresh">;
 /** A workspace a sheet was opened from (stories 634, 636, 639): its name and directory. */
 type Fixed = { name: string; dir: string };
 
+/** Whether a folder has nothing for the info line: no branch, nothing to commit or push or pull, no
+ *  conversation. */
+const quiet = (git: FolderData) => !git.branch && !git.changed && !git.ahead && !git.behind && !AGENT_KINDS.some((a) => git.sessions?.[a]);
+
 /** A folder's state on the picker's info line (story 638): icons and numbers, no words; its branch,
  *  files not committed, commits ahead and behind, each only where there is one; then each agent's
  *  conversations there to import, how many and when the newest changed. Sideways as it runs out of room. */
@@ -152,7 +156,7 @@ function FolderLine({ git }: { git: FolderData }) {
   ];
   const shown = items.filter(([, v]) => v !== undefined);
   const sessions = AGENT_KINDS.flatMap((a) => (git.sessions?.[a] ? [[a, git.sessions[a]] as const] : []));
-  if (!shown.length && !sessions.length) return null;
+  if (quiet(git)) return null;
   return (
     <div data-quiet-scroll="" className="flex min-w-0 items-center gap-3 overflow-x-auto text-sm whitespace-nowrap text-muted-foreground">
       {shown.map(([Icon, v, label]) => (
@@ -182,12 +186,13 @@ function FolderLine({ git }: { git: FolderData }) {
  *  workspace, the picker is a line naming it and its directory, where the sheet makes its slot. go:
  *  takes the picker to a folder. dropped: its folders are down, over what is under the path, from a tap in
  *  the path or on the arrow at its end, till a tap outside, Esc or focus moving away (story 664). */
-function useDirPicker(open: boolean, windows: boolean, start: string | undefined, fixed?: Fixed, paneIn?: string, steady = false) {
+function useDirPicker(open: boolean, windows: boolean, start: string | undefined, fixed?: Fixed, paneIn?: string, steady = false, builtin = true) {
   const [typed, setTyped] = useState<string | null>(null);
   const [dropped, setDropped] = useState(false);
   const [named, setNamed] = useState<{ path: string; name: string } | null>(null);
   // The last folder's, till this one's comes, as the list's: the sheet stays put as you go.
-  const [git, setGit] = useState<FolderData | null>(null);
+  // at: the folder it is for.
+  const [git, setGit] = useState<(FolderData & { at: string }) | null>(null);
   useFresh(open, () => (setTyped(null), setNamed(null), setGit(null), setDropped(false)));
   const slash = (p: string) => {
     const path = pickerPath(p, windows);
@@ -209,7 +214,7 @@ function useDirPicker(open: boolean, windows: boolean, start: string | undefined
     const path = listedAt?.path;
     if (!open || fixed || !path) return;
     const stop = new AbortController();
-    const wait = setTimeout(() => void json<FolderData>(`api/folder?path=${encodeURIComponent(path)}`, { signal: stop.signal }).then(setGit, () => {}), 300);
+    const wait = setTimeout(() => void json<FolderData>(`api/folder?path=${encodeURIComponent(path)}`, { signal: stop.signal }).then((d) => setGit({ ...d, at: path }), () => {}), 300);
     return () => (clearTimeout(wait), stop.abort());
   }, [open, listedAt?.path]);
   // A field shows its start unfocused, and where it was as a folder is gone into: the folder you are in
@@ -323,8 +328,10 @@ function useDirPicker(open: boolean, windows: boolean, start: string | undefined
         </Autocomplete.Portal>
       </Autocomplete.Root>
       {/* Folded, why the path lists nothing. steady: the line's room kept, empty too, as the list under it
-          would move under a tap. */}
-      {!dropped && listed?.error ? <p className="text-sm text-destructive">{listed.error}</p> : steady ? <div className="h-5">{git && <FolderLine git={git} />}</div> : git && <FolderLine git={git} />}
+          would move under a tap; not once the folder is known to have nothing for it, for a built-in agent
+          (builtin): then it has no conversation there to list either (the line counts the built-in ones'
+          alone). A plugin agent's list may have rows there all the same. */}
+      {!dropped && listed?.error ? <p className="text-sm text-destructive">{listed.error}</p> : steady ? <div className={builtin && git && git.at === listedAt?.path && quiet(git) ? "hidden" : "h-5"}>{git && <FolderLine git={git} />}</div> : git && <FolderLine git={git} />}
       {listed && !listed.error && listed.fresh && listed.path !== paneIn && (
         <label className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
           <Folder aria-hidden className="size-4 shrink-0" />
@@ -403,17 +410,38 @@ export function NewSlot({ open, close, ws, inWs, done }: From) {
 /** The agents, by logo, one picked. */
 function AgentPick({ agent, pick, importing = false }: { agent: AgentKind; pick: (a: AgentKind) => void; importing?: boolean }) {
   const agents = useAgents().filter(a => !importing || a.importable);
+  // The icons that did not load: their plugins show their names, as those with none do.
+  const [broken, setBroken] = useState<string[]>([]);
+  const picked = agents.some(a => a.id === agent);
+  // As a radio group: one Tab stop, the picked one; the arrows move the pick, round from end to end.
+  const arrows = (e: KeyboardEvent<HTMLDivElement>) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    const buttons = [...e.currentTarget.children] as HTMLElement[];
+    const at = buttons.indexOf(e.target as HTMLElement);
+    if (!step || at < 0) return;
+    e.preventDefault();
+    const to = (at + step + buttons.length) % buttons.length;
+    pick(agents[to]!.id);
+    buttons[to]!.focus();
+  };
   return (
-    <div role="radiogroup" aria-label="agent" className="flex max-w-full shrink-0 flex-wrap overflow-hidden rounded-lg border">
-      {agents.map(({ id: a, name }) => (
-        <button key={a} type="button" role="radio" aria-label={isBuiltinAgent(a) ? undefined : name} title={name} aria-checked={agent === a} onClick={() => pick(a)} className={cn("focus-child flex h-11 min-w-11 max-w-full items-center justify-center transition focus-visible:opacity-100", agent === a ? "bg-secondary" : "opacity-40 grayscale hover:opacity-70")}>
-          <span className="grid size-9 place-items-center rounded-md">
-            <AgentLogo agent={a} className="size-5" />
-          </span>
-          {/* In the import dialog a plugin is its logo alone, as the built-in ones are: its name would squeeze the slot name on a phone. */}
-          {!importing && !isBuiltinAgent(a) && <span className="truncate pr-2 text-sm">{name}</span>}
-        </button>
-      ))}
+    <div role="radiogroup" aria-label="agent" onKeyDown={arrows} className="flex max-w-full shrink-0 flex-wrap overflow-hidden rounded-lg border">
+      {agents.map((option, i) => {
+        const { id, name } = option;
+        const plugin = !isBuiltinAgent(id);
+        const icon = "icon" in option ? option.icon : undefined;
+        const showName = plugin && !importing && (!icon || broken.includes(icon));
+        // focus-visible:opacity-100: the key reaches one not picked only when none is (the first), not dim then, or its ring would be too.
+        return (
+          <button key={id} type="button" role="radio" aria-label={plugin ? name : undefined} title={name} aria-checked={agent === id} tabIndex={agent === id || (!picked && i === 0) ? 0 : -1} onClick={() => pick(id)} className={cn("focus-child flex h-11 min-w-11 max-w-full items-center justify-center transition focus-visible:opacity-100", agent === id ? "bg-secondary" : "opacity-40 grayscale hover:opacity-70")}>
+            <span className="grid size-9 place-items-center rounded-md">
+              <AgentLogo agent={id} className="size-5" onBroken={() => icon && setBroken(b => [...b, icon])} />
+            </span>
+            {/* A plugin with an icon is that icon alone, as the built-in ones are; one without, or whose icon did not load, keeps its name. In the import dialog every plugin is its logo alone: a name would squeeze the slot name on a phone. */}
+            {showName && <span className="truncate pr-2 text-sm">{name}</span>}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -658,7 +686,7 @@ function ImportSheet({ open, close, ws, inWs, done }: From) {
     return () => clearTimeout(wait);
   }, [typed]);
   // A pane's slot lands by the pane's own directory: no workspace is made, or shown, for the folder.
-  const dirs = useDirPicker(open, !!windowsPaths, startIn(workspaces, ws), fixed, picked?.pane ? picked.dir : undefined, true);
+  const dirs = useDirPicker(open, !!windowsPaths, startIn(workspaces, ws), fixed, picked?.pane ? picked.dir : undefined, true, isBuiltinAgent(agent));
   const { picker, go, dropped } = dirs;
   // While the folders are down, the list, its pick and the name stay the last folder's; folded, the new
   // one's (story 665).

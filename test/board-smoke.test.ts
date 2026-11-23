@@ -2551,8 +2551,8 @@ smoke("#503: a small control reached by Tab rings what you see along its edge, n
   await page.keyboard.press("Tab");
   const agents = page.getByRole("dialog").getByRole("radio");
   expect(await ringed(agents.first().locator(":scope > span"))).toEqual({ ring: 36, round: 36 });
-  // One not picked, dim at rest, is not so with the key on it: its ring would be too.
-  await page.keyboard.press("Tab");
+  // The arrow takes the key and the pick to the next one: rung the same, and not dim now it is picked.
+  await page.keyboard.press("ArrowRight");
   expect(await ringed(agents.nth(1).locator(":scope > span"))).toEqual({ ring: 36, round: 36 });
   expect(await agents.nth(1).evaluate(async (el) => (await Promise.all(el.getAnimations().map((a) => a.finished)), getComputedStyle(el).opacity))).toBe("1");
   // 操作, its 44px tap hung on the collapsed sheet's status line: in the sheet, so a key on it scrolls
@@ -8517,11 +8517,12 @@ smoke("the board offers a loaded agent for creation and switching, keeps import 
   const plugin = { id: "echo-agent", name: "Echo Agent", statusName: "Echo", tui: false, importable: false, icon: "api/plugin-icon?id=echo-agent&v=0.1.0" };
   // Spec §4.6: an icon that does not load falls back to the generic badge.
   const dead = { id: "dead-agent", name: "Dead Agent", statusName: "Dead", tui: false, importable: false, icon: "api/plugin-icon?id=dead-agent&v=0.1.0" };
+  const bare = { id: "bare-agent", name: "Bare Agent", statusName: "Bare", tui: false, importable: false };
   const page = await open("", async p => {
     await p.route("**/api/plugin-icon?id=echo-agent*", route => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>' }));
     await p.route("**/api/board", async route => {
       const data = await (await route.fetch()).json();
-      data.metadata.agents.push(plugin, dead);
+      data.metadata.agents.push(plugin, dead, bare);
       data.metadata.plugins.push({ id: "broken", status: "failed", error: "missing manifest" });
       await route.fulfill({ json: data });
     });
@@ -8541,14 +8542,38 @@ smoke("the board offers a loaded agent for creation and switching, keeps import 
   const deadOne = dialog.getByRole("radio", { name: "Dead Agent", exact: true });
   await deadOne.locator("svg").waitFor();
   expect(await deadOne.locator("img").count()).toBe(0);
+  // A plugin with an icon shows the icon alone, its name kept for a screen reader and on hover; one without,
+  // or whose icon does not load, shows its name: two such would be told apart.
+  expect([await echo.innerText(), await echo.getAttribute("title")]).toEqual(["", "Echo Agent"]);
+  expect(await dialog.getByRole("radio", { name: "Bare Agent", exact: true }).innerText()).toBe("Bare Agent");
+  await page.waitForFunction(el => (el as HTMLElement).innerText === "Dead Agent", await deadOne.elementHandle());
   await echo.click();
   expect(await echo.getAttribute("aria-checked")).toBe("true");
+  // One Tab stop, the picked one; the arrows move the pick, round from the last to the first.
+  const agents = dialog.getByRole("radiogroup", { name: "agent" }).getByRole("radio");
+  expect(await agents.evaluateAll(els => els.map(e => (e as HTMLElement).tabIndex).filter(t => t === 0).length)).toBe(1);
+  expect(await echo.getAttribute("tabindex")).toBe("0");
+  await page.keyboard.press("ArrowRight");
+  expect(await deadOne.getAttribute("aria-checked")).toBe("true");
+  expect(await deadOne.evaluate(e => e === document.activeElement)).toBe(true);
+  await page.keyboard.press("ArrowLeft");
+  expect(await echo.getAttribute("aria-checked")).toBe("true");
+  await agents.last().click();
+  await page.keyboard.press("ArrowDown");
+  expect(await agents.first().getAttribute("aria-checked")).toBe("true");
+  expect(await agents.first().evaluate(e => e === document.activeElement)).toBe(true);
   await page.keyboard.press("Escape");
   await dialog.waitFor({state: "hidden"});
+  // A folder with nothing for the info line keeps no blank room under the path: what is next, here the
+  // new workspace's name, comes right under it.
+  await page.route("**/api/folder?*", route => route.fulfill({ json: {} }));
+  const asked = page.waitForResponse(r => r.url().includes("/api/folder?"));
   await plus.click();
   await page.getByRole("menuitem", { name: "导入" }).click();
   await dialog.getByRole("radio", { name: "pi", exact: true }).waitFor();
   expect(await echo.count()).toBe(0);
+  await asked;
+  await page.waitForFunction(() => document.querySelector('input[aria-label="工作区名"]')!.getBoundingClientRect().top - document.querySelector('input[aria-label="路径"]')!.getBoundingClientRect().bottom < 16);
   await page.goto(`http://127.0.0.1:${server!.port}/#/slot/${talks}`);
   const change = page.getByRole("button", { name: "换 agent" });
   await change.waitFor();
@@ -8560,6 +8585,8 @@ smoke("the board offers a loaded agent for creation and switching, keeps import 
 
 smoke("spec plugins §3.5: the import dialog lists an agent plugin's conversations, with no count where it gives none, a busy one locked, and previews what was said", async () => {
   const plugin = { id: "echo-agent", name: "Echo Agent", statusName: "Echo", tui: false, importable: true };
+  let answer = () => {};
+  const held = new Promise<void>(r => (answer = r));
   const page = await open("", async p => {
     await p.route("**/api/board", async route => {
       const data = await (await route.fetch()).json();
@@ -8574,6 +8601,9 @@ smoke("spec plugins §3.5: the import dialog lists an agent plugin's conversatio
       { kind: "user", text: "整理 README", source: null, from: null, at: "0", time: null },
       { kind: "assistant", text: "已整理好了。", at: "1", time: null },
     ] } }));
+    // The folder has nothing for the info line, which counts the built-in agents' conversations alone;
+    // held till the plugin's rows are in.
+    await p.route("**/api/folder?*", async route => (await held, route.fulfill({ json: {} })));
   });
   await page.getByRole("button", { name: "新建", exact: true }).click();
   await page.getByRole("menuitem", { name: "导入" }).click();
@@ -8586,6 +8616,13 @@ smoke("spec plugins §3.5: the import dialog lists an agent plugin's conversatio
   const free = rows.filter({ hasText: "整理 README" });
   const busy = rows.filter({ hasText: "修登录页" });
   await busy.waitFor();
+  // The plugin's own rows stay put once the folder's info comes empty: the line keeps its room for them.
+  const top = (await busy.boundingBox())!.y;
+  const asked = page.waitForResponse(r => r.url().includes("/api/folder?"));
+  answer();
+  await asked;
+  await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+  expect((await busy.boundingBox())!.y).toBe(top);
   expect(await busy.isDisabled()).toBe(true);
   expect(await busy.getByLabel("正被别的进程使用").count()).toBe(1);
   expect(await free.getByLabel("消息条数").count()).toBe(0);
