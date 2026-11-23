@@ -184,8 +184,13 @@ describe("config.ts plugin support", () => {
         match: /claude/i,
       },
       {
-        name: "unconfigured plugin platform on bot",
-        toml: `[bots.b]\nplatform = "weixin"\ntoken = "t"\n`,
+        name: "non-string platform on bot",
+        toml: `[bots.b]\nplatform = 3\ntoken = "t"\n`,
+        match: /bots\.b\.platform/,
+      },
+      {
+        name: "empty platform on bot",
+        toml: `[bots.b]\nplatform = ""\ntoken = "t"\n`,
         match: /bots\.b\.platform/,
       },
     ];
@@ -195,6 +200,15 @@ describe("config.ts plugin support", () => {
       writeFileSync(p, c.toml, { mode: 0o600 });
       expect(() => loadConfig(p)).toThrow(c.match);
     }
+
+    // A bot of an IM plugin since removed (folder and [plugins.<id>] gone) still loads: like a
+    // disabled plugin's bot it is faulted at start, and doctor says why.
+    const leftover = join(root, "leftover-bot.toml");
+    writeFileSync(leftover, `stateDir = ${JSON.stringify(join(root, "state-left"))}\n[bots.b]\nplatform = "weixin"\ntoken = "t"\n`, { mode: 0o600 });
+    const leftCfg = loadConfig(leftover);
+    expect(leftCfg.bots.b?.platform).toBe("weixin");
+    const leftReg = loadPlugins(leftCfg.plugins, { coreVersion: "1.5.0", agentPath: process.env.PATH ?? "", bots: leftCfg.bots, programs: leftCfg.programs });
+    expect(pluginFindings(leftReg).findings).toContainEqual({ level: "错误", text: "bots.b.platform 引用的插件 weixin 没有安装，这个 bot 连不上" });
 
     const isolatedCases: { name: string; toml: string; match: RegExp }[] = [
       {
@@ -646,6 +660,17 @@ describe("commands, router, and transcript guards for plugin agents", () => {
     const bfReply = rhReply(boardFailed);
     expect(bfReply?.ok).toBe(false);
     if (bfReply && !bfReply.ok) expect(bfReply.error).toStartWith("插件 badp 加载失败：");
+
+    // A slot whose plugin is gone (removed from plugins/ and config) is refused like a disabled one.
+    const imMissing = route(
+      makeState("gone"),
+      { kind: "im", message: { bot: "b1", chat: "u1", sender: "u1", messageId: "m-gone", at: ctx.now, text: "hello" } },
+      ctx,
+    );
+    expect(outboundTexts(imMissing).join("\n")).toContain("插件 gone 没有安装，请装回插件或切换对话");
+    expect(outboundTexts(imMissing).join("\n")).not.toContain("崩溃");
+    const sendMissing = route(makeState("gone"), { kind: "rh", id: "r-gone", caller: AT_BOARD, argv: ["send", "work/main", "hi"] }, ctx);
+    expect(rhReply(sendMissing)).toEqual({ ok: false, error: "插件 gone 没有安装，请装回插件或切换对话" });
 
     const sendDisabled = route(makeState("offp"), { kind: "rh", id: "r4", caller: AT_BOARD, argv: ["send", "work/main", "hi"] }, ctx);
     expect(rhReply(sendDisabled)).toEqual({ ok: false, error: "插件 offp 已禁用，请启用或切换对话" });

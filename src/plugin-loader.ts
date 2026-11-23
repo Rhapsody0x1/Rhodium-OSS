@@ -238,7 +238,13 @@ export function loadPlugins(
   for (const [botName, bot] of Object.entries(resolvedOpts.bots)) {
     if (isBuiltinPlatform(bot.platform)) continue;
     const rec = pluginsMap[bot.platform];
-    if (rec?.status === "loaded" && rec.manifest.kind !== "im") {
+    if (!rec) {
+      configErrors.push({
+        key: `bots.${botName}.platform`,
+        pluginId: bot.platform,
+        error: `bots.${botName}.platform 引用的插件 ${bot.platform} 没有安装，这个 bot 连不上`,
+      });
+    } else if (rec.status === "loaded" && rec.manifest.kind !== "im") {
       configErrors.push({
         key: `bots.${botName}.platform`,
         pluginId: bot.platform,

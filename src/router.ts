@@ -108,7 +108,7 @@ function turnAgent(state: State, ctx: Ctx, slot: Slot) {
 function pluginProblem(ctx: Ctx, agent: AgentKind): string | undefined {
   if (isBuiltinAgent(agent)) return undefined;
   const rec = ctx.plugins?.plugins[agent];
-  if (!rec) return undefined;
+  if (!rec) return ctx.plugins && !isRegisteredAgent(agent) ? `插件 ${agent} 没有安装，请装回插件或切换对话` : undefined;
   if (rec.status === "disabled") return `插件 ${agent} 已禁用，请启用或切换对话`;
   if (rec.status === "failed") return `插件 ${agent} 加载失败：${rec.error}`;
   return undefined;

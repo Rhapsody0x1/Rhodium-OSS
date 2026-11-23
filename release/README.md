@@ -169,8 +169,8 @@ Rhodium 有事找你、又不知道发到哪个聊天时，就发到主窗口。
 - **停用**：在 `config.toml` 里写 `[plugins.<id>]` 和 `enabled = false`，再重启。
 - **卸载**：删掉 `~/.config/rhodium/plugins/<id>/`；加过 `[plugins.<id>]` 和 `[plugins.<id>.config]` 的，也从 `config.toml` 里删掉。再重启。
 - 装、停用、卸载都要重启，正在进行的对话不受影响。
-- 用这个插件的槽位不会被删。停用后往它发消息，直接回“插件 <id> 已禁用”；连配置一起删掉后发消息，IM 里收到“……崩溃了，没能启动”，原因是插件未加载，消息留着等下次启动。只删文件夹、留着 `[plugins.<id>.config]` 的话，`rh doctor` 报错，发消息直接回“插件 <id> 加载失败”。
-- 用 IM 插件（比如 weixin）的 Bot 也不会被删。停用插件，或只删文件夹、留着配置时，它不连接，看板上标成故障。卸载前先对每个这样的 Bot 运行 `rh bot rm <name>`，不然 Rhodium 启动不了，报 `config: bots.<name>.platform must be one of ...`。
+- 用这个插件的槽位不会被删。停用后往它发消息，直接回“插件 <id> 已禁用”；连配置一起删掉后发消息，直接回“插件 <id> 没有安装，请装回插件或切换对话”。只删文件夹、留着 `[plugins.<id>.config]` 的话，`rh doctor` 报错，发消息直接回“插件 <id> 加载失败”。
+- 用 IM 插件（比如 weixin）的 Bot 也不会被删。停用或卸载插件后，它不连接，看板上标成故障，其他照常启动；卸载后 `rh doctor` 还会报插件没有安装。不再要这个 Bot 时运行 `rh bot rm <name>`。
 
 ## 要知道的
 

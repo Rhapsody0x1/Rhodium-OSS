@@ -547,7 +547,7 @@ export async function runDaemon(args: string[], checkPi?: typeof import("./pi-pa
   for (const id of plugins.disabled) log("plugin disabled", { plugin: id });
   for (const p of plugins.loaded) if (p.iconError) log("plugin icon unusable", { plugin: p.id, error: p.iconError });
   for (const f of plugins.failed) log("plugin load failed", { plugin: f.id, error: f.error });
-  for (const err of plugins.configErrors) log("plugin config kind mismatch", { key: err.key, plugin: err.pluginId, error: err.error });
+  for (const err of plugins.configErrors) log("plugin config error", { key: err.key, plugin: err.pluginId, error: err.error });
   // Run by hand, by rh dev or in a Herdr pane, the configured unit's journal is some other process's, if anything.
   if (detached || unitOf(process.pid) !== config.unit) config.unit = "";
   const directories = [...new Set([config.stateDir, config.socketDir, config.lockDir])];

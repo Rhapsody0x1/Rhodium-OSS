@@ -388,8 +388,9 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
     if (name === "me") throw new Error("config: bots.me: a bot may not be named me: rh send me is to you; rename it");
     if (name === "web") throw new Error("config: bots.web: a bot may not be named web: an agent still running may write rh send web, which is gone; rename it");
     const plat = (bot as BotConfig).platform;
-    if (!platforms.includes(plat) && !Object.hasOwn(plugins, plat)) {
-      throw new Error(`config: bots.${name}.platform must be one of ${[...platforms, ...Object.keys(plugins)].join(", ")}`);
+    // Any other name is a plugin's, maybe one since removed: its bot is faulted at start, not fatal.
+    if (typeof plat !== "string" || !plat) {
+      throw new Error(`config: bots.${name}.platform must be one of ${[...platforms, ...Object.keys(plugins)].join(", ")} or an IM plugin's id`);
     }
     const { owner } = bot as Record<string, unknown>;
     if (Array.isArray(owner)) {
