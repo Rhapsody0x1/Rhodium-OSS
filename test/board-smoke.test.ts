@@ -2551,8 +2551,8 @@ smoke("#503: a small control reached by Tab rings what you see along its edge, n
   await page.keyboard.press("Tab");
   const agents = page.getByRole("dialog").getByRole("radio");
   expect(await ringed(agents.first().locator(":scope > span"))).toEqual({ ring: 36, round: 36 });
-  // One not picked, dim at rest, is not so with the key on it: its ring would be too.
-  await page.keyboard.press("Tab");
+  // The arrow takes the key, and the pick, to the next one, dim at rest: rung the same, and not dim, or its ring would be too.
+  await page.keyboard.press("ArrowRight");
   expect(await ringed(agents.nth(1).locator(":scope > span"))).toEqual({ ring: 36, round: 36 });
   expect(await agents.nth(1).evaluate(async (el) => (await Promise.all(el.getAnimations().map((a) => a.finished)), getComputedStyle(el).opacity))).toBe("1");
   // 操作, its 44px tap hung on the collapsed sheet's status line: in the sheet, so a key on it scrolls
@@ -8542,17 +8542,38 @@ smoke("the board offers a loaded agent for creation and switching, keeps import 
   const deadOne = dialog.getByRole("radio", { name: "Dead Agent", exact: true });
   await deadOne.locator("svg").waitFor();
   expect(await deadOne.locator("img").count()).toBe(0);
-  // A plugin with an icon shows the icon alone, its name kept for a screen reader and on hover; one without shows its name.
+  // A plugin with an icon shows the icon alone, its name kept for a screen reader and on hover; one without,
+  // or whose icon does not load, shows its name: two such would be told apart.
   expect([await echo.innerText(), await echo.getAttribute("title")]).toEqual(["", "Echo Agent"]);
   expect(await dialog.getByRole("radio", { name: "Bare Agent", exact: true }).innerText()).toBe("Bare Agent");
+  await page.waitForFunction(el => (el as HTMLElement).innerText === "Dead Agent", await deadOne.elementHandle());
   await echo.click();
   expect(await echo.getAttribute("aria-checked")).toBe("true");
+  // One Tab stop, the picked one; the arrows move the pick, round from the last to the first.
+  const agents = dialog.getByRole("radiogroup", { name: "agent" }).getByRole("radio");
+  expect(await agents.evaluateAll(els => els.map(e => (e as HTMLElement).tabIndex).filter(t => t === 0).length)).toBe(1);
+  expect(await echo.getAttribute("tabindex")).toBe("0");
+  await page.keyboard.press("ArrowRight");
+  expect(await deadOne.getAttribute("aria-checked")).toBe("true");
+  expect(await deadOne.evaluate(e => e === document.activeElement)).toBe(true);
+  await page.keyboard.press("ArrowLeft");
+  expect(await echo.getAttribute("aria-checked")).toBe("true");
+  await agents.last().click();
+  await page.keyboard.press("ArrowDown");
+  expect(await agents.first().getAttribute("aria-checked")).toBe("true");
+  expect(await agents.first().evaluate(e => e === document.activeElement)).toBe(true);
   await page.keyboard.press("Escape");
   await dialog.waitFor({state: "hidden"});
+  // A folder with nothing for the info line keeps no blank room under the path: what is next, here the
+  // new workspace's name, comes right under it.
+  await page.route("**/api/folder?*", route => route.fulfill({ json: {} }));
+  const asked = page.waitForResponse(r => r.url().includes("/api/folder?"));
   await plus.click();
   await page.getByRole("menuitem", { name: "导入" }).click();
   await dialog.getByRole("radio", { name: "pi", exact: true }).waitFor();
   expect(await echo.count()).toBe(0);
+  await asked;
+  await page.waitForFunction(() => document.querySelector('input[aria-label="工作区名"]')!.getBoundingClientRect().top - document.querySelector('input[aria-label="路径"]')!.getBoundingClientRect().bottom < 16);
   await page.goto(`http://127.0.0.1:${server!.port}/#/slot/${talks}`);
   const change = page.getByRole("button", { name: "换 agent" });
   await change.waitFor();
