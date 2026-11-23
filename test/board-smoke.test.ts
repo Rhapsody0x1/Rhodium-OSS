@@ -8517,11 +8517,12 @@ smoke("the board offers a loaded agent for creation and switching, keeps import 
   const plugin = { id: "echo-agent", name: "Echo Agent", statusName: "Echo", tui: false, importable: false, icon: "api/plugin-icon?id=echo-agent&v=0.1.0" };
   // Spec §4.6: an icon that does not load falls back to the generic badge.
   const dead = { id: "dead-agent", name: "Dead Agent", statusName: "Dead", tui: false, importable: false, icon: "api/plugin-icon?id=dead-agent&v=0.1.0" };
+  const bare = { id: "bare-agent", name: "Bare Agent", statusName: "Bare", tui: false, importable: false };
   const page = await open("", async p => {
     await p.route("**/api/plugin-icon?id=echo-agent*", route => route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>' }));
     await p.route("**/api/board", async route => {
       const data = await (await route.fetch()).json();
-      data.metadata.agents.push(plugin, dead);
+      data.metadata.agents.push(plugin, dead, bare);
       data.metadata.plugins.push({ id: "broken", status: "failed", error: "missing manifest" });
       await route.fulfill({ json: data });
     });
@@ -8541,6 +8542,9 @@ smoke("the board offers a loaded agent for creation and switching, keeps import 
   const deadOne = dialog.getByRole("radio", { name: "Dead Agent", exact: true });
   await deadOne.locator("svg").waitFor();
   expect(await deadOne.locator("img").count()).toBe(0);
+  // A plugin with an icon shows the icon alone, its name kept for a screen reader and on hover; one without shows its name.
+  expect([await echo.innerText(), await echo.getAttribute("title")]).toEqual(["", "Echo Agent"]);
+  expect(await dialog.getByRole("radio", { name: "Bare Agent", exact: true }).innerText()).toBe("Bare Agent");
   await echo.click();
   expect(await echo.getAttribute("aria-checked")).toBe("true");
   await page.keyboard.press("Escape");
