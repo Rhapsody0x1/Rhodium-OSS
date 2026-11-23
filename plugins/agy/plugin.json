@@ -9,7 +9,7 @@
   "protocol": "rh-agent/1",
   "program": "agy",
   "command": ["bun", "${PLUGIN_DIR}/index.ts"],
-  "optionalConfig": ["fixture", "skipPermissions"],
+  "optionalConfig": ["fixture"],
   "capabilities": { "liveApproval": false, "steer": false, "commands": [] },
   "icon": "icon.svg"
 }

@@ -6,8 +6,10 @@ import { form } from "./form";
 import manifest from "./plugin.json";
 
 const cancelled = { outcome: { outcome: "cancelled" } };
-const startupTimeout = 12_000;
-const interruptTimeout = 2_500;
+// Below the core's 10 s handshake limit (durations.pluginHandshake), so the user sees this plugin's reason.
+const startupTimeout = 8_000;
+// agy stops sub-agents and background tasks on cancel; stay under the core's 10 s interrupt limit.
+const interruptTimeout = 8_000;
 
 type Tool = { name: string; input: unknown; complete: boolean };
 type Pending = { id: RpcId; cancel: Wire; submit: (answer: AskAnswer) => Wire };
@@ -37,6 +39,7 @@ export class AgyPlugin implements AgentPlugin {
   private session = "";
   private image = false;
   private rules = "";
+  private closable = false;
   private turn?: Turn;
   private nextAsk = 0;
 
@@ -45,9 +48,11 @@ export class AgyPlugin implements AgentPlugin {
     if (fixture !== undefined && fixture !== "builtin") throw new PluginFatalError("Unknown Antigravity fixture; use fixture = \"builtin\".");
     const offline = fixture === "builtin";
     const pluginDir = process.env.RHODIUM_PLUGIN_DIR || import.meta.dir;
+    // With slot approval off, agy approves tools itself (spec §9.2 #3); liveApproval is false, so a switch restarts the slot.
+    const args = ["acp", ...(params.approval ? [] : ["--dangerously-skip-permissions"])];
     const command: [string, ...string[]] = offline
-      ? [process.execPath, join(pluginDir, "fixtures", "agy.ts")]
-      : [executable(params.program ?? manifest.program), "acp", ...(params.config.skipPermissions === "true" && !params.approval ? ["--dangerously-skip-permissions"] : [])];
+      ? [process.execPath, join(pluginDir, "fixtures", "agy.ts"), ...args]
+      : [executable(params.program ?? manifest.program), ...args];
     this.rules = await Bun.file(params.systemPromptFile).text();
     const peer = this.peer = new AcpPeer(command, offline ? pluginDir : params.cwd, environment(offline), (method, value, id) => {
       if (id === undefined) {
@@ -57,29 +62,35 @@ export class AgyPlugin implements AgentPlugin {
       }
     });
     try {
-      const initialized = await within(peer.request("initialize", {
-        protocolVersion: 1, clientInfo: { name: "Rhodium", version: manifest.version },
-        clientCapabilities: { elicitation: { form: {} } },
-      }), startupTimeout, "Antigravity ACP handshake timed out.");
-      if (initialized.protocolVersion !== 1) throw new Error("Antigravity did not negotiate ACP protocol version 1.");
-      const caps = object(initialized.agentCapabilities);
-      this.image = object(caps.promptCapabilities).image === true;
-      const dir = { cwd: params.cwd, mcpServers: [] };
-      if ("resume" in params.session) {
-        const sessionId = params.session.resume;
-        const canResume = object(caps.sessionCapabilities).resume != null;
-        if (!canResume && caps.loadSession !== true) throw new Error("Antigravity does not support resuming sessions over ACP.");
-        await within(peer.request(canResume ? "session/resume" : "session/load", { ...dir, sessionId }), startupTimeout, "Antigravity session resume timed out.");
-        this.session = sessionId;
-      } else {
-        const opened = await within(peer.request("session/new", dir), startupTimeout, "Antigravity session creation timed out.");
-        this.session = text(opened.sessionId);
-        if (!this.session) throw new Error("Antigravity did not return a session ID.");
-      }
+      await within(this.handshake(peer, params), startupTimeout, `Antigravity did not start within ${startupTimeout / 1000} s.`);
       return { session: this.session, capabilities: manifest.capabilities, version: manifest.version };
     } catch (error) {
       await this.close();
-      throw error;
+      const message = error instanceof Error ? error.message : "Antigravity failed to start.";
+      throw new Error(peer.tail && !message.includes(peer.tail) ? `${message}\n${peer.tail}` : message);
+    }
+  }
+
+  private async handshake(peer: AcpPeer, params: AgentInitParams): Promise<void> {
+    const initialized = await peer.request("initialize", {
+      protocolVersion: 1, clientInfo: { name: "Rhodium", version: manifest.version },
+      clientCapabilities: { elicitation: { form: {} } },
+    });
+    if (initialized.protocolVersion !== 1) throw new Error("Antigravity did not negotiate ACP protocol version 1.");
+    const caps = object(initialized.agentCapabilities);
+    this.image = object(caps.promptCapabilities).image === true;
+    this.closable = object(caps.sessionCapabilities).close != null;
+    const dir = { cwd: params.cwd, mcpServers: [] };
+    if ("resume" in params.session) {
+      const sessionId = params.session.resume;
+      const canResume = object(caps.sessionCapabilities).resume != null;
+      if (!canResume && caps.loadSession !== true) throw new Error("Antigravity does not support resuming sessions over ACP.");
+      await peer.request(canResume ? "session/resume" : "session/load", { ...dir, sessionId });
+      this.session = sessionId;
+    } else {
+      const opened = await peer.request("session/new", dir);
+      this.session = text(opened.sessionId);
+      if (!this.session) throw new Error("Antigravity did not return a session ID.");
     }
   }
 
@@ -111,7 +122,7 @@ export class AgyPlugin implements AgentPlugin {
       }
     } catch (error) {
       if (!turn.interrupted) {
-        if (!peer.alive) throw new PluginFatalError("Lost the Antigravity ACP connection.", { retryable: true });
+        if (!peer.alive) throw new PluginFatalError(["Lost the Antigravity ACP connection.", peer.tail].filter(Boolean).join("\n"), { retryable: true });
         ctx.error(error instanceof Error ? error.message : "Antigravity prompt failed.", true);
       }
     } finally {
@@ -191,7 +202,8 @@ export class AgyPlugin implements AgentPlugin {
       if (params.mode !== "form") return peer.reject(id, -32602, "Only form elicitation is supported by Rhodium.");
       if (!turn || turn.interrupted || params.sessionId !== this.session) return peer.respond(id, { action: "cancel" });
       const question = form(params);
-      if (!question) return peer.respond(id, { action: "decline" });
+      // agy falls back to asking in the conversation when the form errors, so the user can still answer.
+      if (!question) return peer.reject(id, -32602, "Rhodium cannot show this form.");
       const requestId = `agy-ask-${++this.nextAsk}`;
       turn.asks.set(requestId, { id, cancel: { action: "cancel" }, submit: answer => answer.kind === "question"
         ? question.submit(answer.answers) : { action: "decline" } });
@@ -237,7 +249,7 @@ export class AgyPlugin implements AgentPlugin {
       this.turn.interrupted = true;
       this.turn = undefined;
     }
-    await this.peer?.close();
+    await this.peer?.close(this.closable ? this.session : undefined);
   }
 }
 

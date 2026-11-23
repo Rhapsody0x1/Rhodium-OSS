@@ -22,12 +22,19 @@ await readJsonLines(process.stdin, { onMessage(value) {
   switch (frame.method) {
     case "initialize":
       if (!Object.hasOwn(object(object(params.clientCapabilities).elicitation), "form")) return error(id, -32602);
-      return result(id, { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true } } });
+      // The capabilities real agy 1.5.14 declares, so the plugin takes the same session/resume path.
+      return result(id, { protocolVersion: 1, agentCapabilities: {
+        loadSession: true, promptCapabilities: { image: true, audio: false, embeddedContext: true },
+        sessionCapabilities: { resume: {}, close: {}, load: {}, list: {}, additionalDirectories: {} },
+      } });
     case "session/new":
       return result(id, { sessionId });
-    case "session/load":
+    case "session/resume":
+      if (params.sessionId === "slow-session") return; // never answers, for the startup time limit
       sessionId = text(params.sessionId);
       reply("Old conversation text that is not a new turn.");
+      return result(id, {});
+    case "session/close":
       return result(id, {});
     case "session/prompt": {
       cutting = false;
@@ -38,8 +45,18 @@ await readJsonLines(process.stdin, { onMessage(value) {
       if (!rulesSeen) return error(id, -32602);
       const prompt = texts.at(-1)?.replace(/^\[来自 [^\n]*\]\n/, "").trim();
       if (prompt === "[error]") return error(id, -32603);
-      if (prompt === "[crash]") process.exit(13);
-      if (prompt === "[permission]" || prompt === "[question]") {
+      if (prompt === "[argv]") {
+        reply(process.argv.slice(2).join(" "));
+        return end(id);
+      }
+      if (prompt === "[crash]") {
+        // Dies with an approval still waiting for the user.
+        write({ id: `fixture-${++request}`, method: "session/request_permission", params: { sessionId, toolCall: { toolCallId: "crash-1", title: "Crash" }, options: scenarios.permissionOptions } });
+        process.stderr.write("synthetic agy crash\n");
+        setTimeout(() => process.exit(13), 100);
+        return;
+      }
+      if (prompt === "[permission]" || prompt === "[question]" || prompt === "[number form]") {
         const kind = prompt === "[permission]" ? "permission" : "question";
         blocked = { prompt: id, request: `fixture-${++request}`, kind };
         if (kind === "permission") {
@@ -47,7 +64,9 @@ await readJsonLines(process.stdin, { onMessage(value) {
           update({ sessionUpdate: "tool_call", ...toolCall, status: "pending" });
           return write({ id: blocked.request, method: "session/request_permission", params: { sessionId, toolCall, options: scenarios.permissionOptions } });
         }
-        return write({ id: blocked.request, method: "elicitation/create", params: { sessionId, ...scenarios.question } });
+        const question = prompt === "[question]" ? scenarios.question
+          : { ...scenarios.question, requestedSchema: { type: "object", properties: { count: { type: "number" } } } };
+        return write({ id: blocked.request, method: "elicitation/create", params: { sessionId, ...question } });
       }
       for (const item of scenarios.updates) update(item);
       reply("Fixture reply ");
@@ -62,6 +81,10 @@ await readJsonLines(process.stdin, { onMessage(value) {
       const { prompt, kind } = blocked;
       blocked = undefined;
       const response = object(frame.result);
+      if (frame.error) {
+        reply(`Form error ${object(frame.error).code}`);
+        return end(prompt);
+      }
       if (cutting) {
         if (kind === "permission" ? object(response.outcome).outcome !== "cancelled" : response.action !== "cancel") process.exit(15);
         return end(prompt, "cancelled");

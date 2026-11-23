@@ -14,17 +14,19 @@ afterEach(async () => {
   }
 });
 
-async function start(options: { session?: Frame; offline?: boolean; program?: string } = {}) {
+async function start(options: { session?: Frame; offline?: boolean; program?: string; approval?: boolean } = {}) {
   const manifest = await Bun.file(join(dir, "plugin.json")).json() as Options["manifest"];
   const cwd = mkdtempSync(join(tmpdir(), "rhodium-test-agy "));
   const systemPromptFile = join(cwd, "slot rules.md");
   writeFileSync(systemPromptFile, "Synthetic slot rule");
   const config: Record<string, string> = options.offline === false ? {} : { fixture: "builtin" };
-  const peer = new Peer({ manifest, dir, cwd, config, ms: 4000 });
+  // Starting bun and the fixture can be slow on a busy Windows runner; turn checks keep a tighter limit.
+  const peer = new Peer({ manifest, dir, cwd, config, ms: 15_000 });
   instances.push({ peer, cwd });
   peer.write({ type: "init", proto: 1, conv: "conv-test", session: options.session ?? { new: "placeholder" }, cwd,
-    systemPromptFile, program: options.program ?? "agy-not-installed-for-tests", approval: true, config });
+    systemPromptFile, program: options.program ?? "agy-not-installed-for-tests", approval: options.approval ?? true, config });
   const ready = await peer.wait(0, () => true, "ready or fatal");
+  peer.options.ms = 4000;
   return { peer, ready };
 }
 
@@ -111,7 +113,7 @@ test("interrupt cancels a pending permission and keeps the session usable", asyn
 test("a prompt RPC error closes the failed turn without losing the session", async () => {
   const { peer } = await start();
   const from = send(peer, "[error]");
-  expect(await event(peer, from, "error")).toMatchObject({ recoverable: true });
+  expect(await event(peer, from, "error")).toMatchObject({ recoverable: true, detail: expect.stringContaining("Synthetic ACP error") });
   await event(peer, from, "turn_end");
   const next = send(peer, "inspect fixture");
   expect(await event(peer, next, "turn_end")).toMatchObject({ reply: "Fixture reply (0 images)." });
@@ -123,3 +125,37 @@ test("a missing real CLI fails setup without falling back to the demo", async ()
   expect(ready).toMatchObject({ type: "fatal", message: expect.stringContaining("Antigravity"), retryable: false });
   expect(await peer.proc.exited).not.toBe(0);
 });
+
+test("slot approval off launches agy with its skip-permissions flag, and on without it", async () => {
+  for (const approval of [false, true]) {
+    const { peer } = await start({ approval });
+    const from = send(peer, "[argv]");
+    const { reply } = await event(peer, from, "turn_end");
+    expect(reply).toBe(approval ? "acp" : "acp --dangerously-skip-permissions");
+    await close(peer);
+  }
+});
+
+test("a form Rhodium cannot show is refused with an ACP error, not declined for the user", async () => {
+  const { peer } = await start();
+  const from = send(peer, "[number form]");
+  expect(await event(peer, from, "turn_end")).toMatchObject({ reply: "Form error -32602" });
+  expect(peer.frames.slice(from).some(frame => frame.type === "ask")).toBe(false);
+  await close(peer);
+});
+
+test("agy crashing with an approval pending cancels the ask and fails with its stderr", async () => {
+  const { peer } = await start();
+  const from = send(peer, "[crash]");
+  const ask = await event(peer, from, "ask");
+  expect(await event(peer, from, "ask_cancel")).toMatchObject({ requestId: ask.requestId });
+  expect(await event(peer, from, "error")).toMatchObject({ recoverable: false, detail: expect.stringContaining("synthetic agy crash") });
+  expect(await peer.proc.exited).not.toBe(0);
+});
+
+test("a start slower than the plugin's budget fails with its own reason before the core's limit", async () => {
+  const started = Date.now();
+  const { ready } = await start({ session: { resume: "slow-session" } });
+  expect(ready).toMatchObject({ type: "fatal", message: expect.stringContaining("did not start within 8 s") });
+  expect(Date.now() - started).toBeLessThan(10_000);
+}, 20_000);
