@@ -187,12 +187,13 @@ rm -rf ~/.local/opt/<实例> <stateDir> ~/.config/rhodium/<实例> ~/.local/bin/
   - 包名是 `rhodium-<版本>-<提交>-linux-<架构>.tar.xz`。
   - 也能打另一种架构的包。
   - 要 `xz` 和 `rustup`。第一次要联网：装打包用的 Rust 和它的 musl 目标，下载另一种架构的 Bun 运行时。
-- 发版用公开仓库的 GitHub Action `.github/workflows/release.yml`。它只能手动触发，私有仓库里不跑。
-  1. 先升版本：`package.json` 和 `holder/Cargo.toml` 一起改。
-  2. 在公开仓库的 Actions 页选 `Release packages`，点 Run workflow；或者 `gh workflow run release.yml -R <公开仓库>`。
-  3. 它在 GitHub 的 x86_64 和 arm64 机器上各跑一遍 `scripts/package.sh`，再建一个草稿 Release：标签 `v<版本>`，附上两个包和 `SHA256SUMS`。
-  4. 去 Release 页看草稿，写好说明，再点发布。发布时才建标签。
-- 同一个版本再跑一遍：草稿的附件换成新打的，说明不动。这个版本已经发布过的话，它报错退出，什么都不改。
+- 发版用 GitHub Action `.github/workflows/release.yml`。它只能手动触发。
+  1. 版本号只在发版时改：`package.json` 和 `holder/Cargo.toml` 一起改。
+  2. 在 Actions 页选 `Release packages`，点 Run workflow；或者 `gh workflow run release.yml -R <仓库>`。
+  3. 它在 GitHub 的 x86_64 和 arm64 机器上各跑一遍 `scripts/package.sh`，在 Windows 机器上照 `ci.yml` 打 Windows x64 的 zip。
+  4. 再建一个草稿预发布：标签 `v<版本>-<12 位提交>`，标题 `Rhodium <版本> (<12 位提交>)`，附上三个包和 `SHA256SUMS`。
+  5. 去 Release 页看草稿，写好说明，再点发布。发布时才建标签。
+- 每个提交各有一个草稿。同一个提交再跑一遍：草稿的附件换成新打的，说明不动。这个提交已经发布过的话，它报错退出，什么都不改。
 - Action 装的 Bun 是 `release/licenses/bun-<版本>.md` 写的那个版本。升 Bun 时换掉这份说明，Action 就跟着换。
 - 打包用的 Rust 是 `release/licenses/rust-<版本>.md` 写的那个版本，不管机器上默认的是哪个。没装的话，`package.sh` 用 rustup 装一个。
   - 要钉住，是因为 Rust 标准库带的第三方库每个版本都不一样，这份声明只对得上这一个版本。

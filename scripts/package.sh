@@ -26,7 +26,8 @@ bun install --frozen-lockfile --cwd "$root"
 # The page as React's production build, whatever NODE_ENV the caller has, as build.sh builds it: the
 # development one is slower and names this checkout's files.
 (cd "$root" && NODE_ENV=production NODE_DISABLE_COMPILE_CACHE=1 bun --bun vite build web --outDir "$stage/web" --emptyOutDir --logLevel warn)
-RHODIUM_BUILD_COMMIT=$(git -C "$root" describe --always --dirty)
+# 12 characters, as the release tag and the Windows zip name the commit.
+RHODIUM_BUILD_COMMIT=$(git -C "$root" describe --always --dirty --abbrev=12)
 export RHODIUM_BUILD_COMMIT RHODIUM_BUILD_NOTE=
 mkdir "$stage/pkg"
 # __dirname as the binary's own root, not this checkout's path (#524), as build.sh does.
